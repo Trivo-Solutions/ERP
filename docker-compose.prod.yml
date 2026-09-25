@@ -1,0 +1,102 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: trivo_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── ONE-TIME: create the database roles + database (DEPLOY.md step 3) ───────────────────────────────────────────
+  #   docker compose -f docker-compose.prod.yml --profile setup run --rm db-bootstrap
+  # Creates trivo_owner / trivo_runtime / trivo_platform (and trivo_backup when BACKUP_PW is set). NOT run automatically.
+  db-bootstrap:
+    image: postgres:16-alpine
+    profiles: ["setup"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      TRIVO_DB: ${TRIVO_DB:-trivo}
+      OWNER_PW: ${OWNER_PW:?set OWNER_PW}
+      RUNTIME_PW: ${RUNTIME_PW:?set RUNTIME_PW}
+      PLATFORM_PW: ${PLATFORM_PW:?set PLATFORM_PW}
+      BACKUP_PW: ${BACKUP_PW:-}
+    volumes:
+      - ./server/prisma/production-rls-roles.sql:/sql/production-rls-roles.sql:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - psql -h postgres -U ${POSTGRES_USER:-postgres} -d postgres -v ON_ERROR_STOP=1 -v db="$$TRIVO_DB" -v owner_pw="$$OWNER_PW" -v runtime_pw="$$RUNTIME_PW" -v platform_pw="$$PLATFORM_PW" -v backup_pw="$$BACKUP_PW" -f /sql/production-rls-roles.sql
+
+  # ── EVERY DEPLOY: apply migrations AS THE OWNER role, then re-secure (grants + FORCE RLS). Run BEFORE starting a new
+  #    server version:   docker compose -f docker-compose.prod.yml --profile deploy run --rm migrate
+  migrate:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    profiles: ["deploy"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${OWNER_DATABASE_URL:?set OWNER_DATABASE_URL (the trivo_owner connection string)}
+    command:
+      - sh
+      - -c
+      - npx prisma migrate deploy && npx prisma db execute --file prisma/db-secure.sql --schema prisma/schema.prisma
+
+  redis:
+    image: redis:7-alpine
+    container_name: trivo_redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: trivo_server
+    restart: unless-stopped
+    env_file:
+      - server/.env.production
+    ports:
+      - "127.0.0.1:3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  client:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-}
+    container_name: trivo_client
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - server
+
+volumes:
+  postgres_data:
+  redis_data:

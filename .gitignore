@@ -1,0 +1,24 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+.env.test
+.env.production
+.env.bak*
+*.log
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+coverage/
+.nyc_output/
+uploads/
+temp/
+*.pid
+
+# local Claude Code settings
+.claude/settings.local.json
+
+# local tooling / scratch — not part of the product
+.claude/
+/estimation_smoke10.js

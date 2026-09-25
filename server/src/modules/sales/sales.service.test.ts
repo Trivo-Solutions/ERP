@@ -1,0 +1,1789 @@
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { platformPrisma as prisma } from '../../config/database'; // tests act as the platform/admin role for fixtures and verification; the code under test uses the runtime client
+import { AppError } from '../../middleware/error';
+import { createInvoice as _createInvoice, createMemoOut, convertMemoToInvoice, recordPayment, createSalesReturn, createOldGoldExchange, recordClientPayment, listClientPayments, getSalesRegister } from './sales.service';
+import { LEDGER_ACCOUNT } from '../../shared/ledgerAccounts';
+import { cleanupJournalEntries, getJournalEntry, lineAmount } from '../../test/ledger';
+import { createTestTenant, cleanupTestTenant, TestTenant } from '../../test/fixtures';
+
+describe('createInvoice (tag-aware direct invoicing)', () => {
+  const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+  let tenant: TestTenant;
+  let userId: string;
+  let branchId: string;
+  let clientId: string;
+  let categoryId: string;
+  const invoiceIds: string[] = [];
+  const tagIds: string[] = [];
+
+  // Local shim: absorbs the multi-tenant signature change (ctx now required, branchId now a
+  // required field on the invoice itself) so the ~50 existing createInvoice(data, userId) call
+  // sites below don't each need editing. branchId defaults to this suite's fixture branch but a
+  // call's own data.branchId (spread last) still wins, for the handful of tests that exercise a
+  // second/other branch explicitly.
+  function createInvoice(data: Omit<Parameters<typeof _createInvoice>[0], 'branchId'> & { branchId?: string }, uid: string) {
+    return _createInvoice({ branchId, ...data }, tenant.ctx, uid);
+  }
+
+  async function makeTag(name: string, overrides: { categoryId?: string; metalKarat?: string; saleMcRate?: number; saleVaPercent?: number } = {}) {
+    const tag = await prisma.jewelryTag.create({
+      data: {
+        tagNumber: `TSTTAG-${suffix}-${tagIds.length}`,
+        companyId: tenant.company.id,
+        branchId, name, metalType: 'GOLD', metalKarat: '22K',
+        grossWeight: 10, netWeight: 10, stoneWeight: 0,
+        costPrice: 40000, sellingPrice: 48000,
+        createdById: userId,
+        ...overrides,
+      },
+    });
+    tagIds.push(tag.id);
+    return tag;
+  }
+
+  function baseItem(overrides: Partial<Parameters<typeof _createInvoice>[0]['items'][number]> = {}) {
+    return {
+      productCode: 'MISC', description: 'Test line', quantity: 1,
+      grossWeight: 10, netGoldWeight: 10, rateType: 'PER_GRAM',
+      goldRate: 48000, makingCharge: 0,
+      ...overrides,
+    };
+  }
+
+  beforeAll(async () => {
+    tenant = await createTestTenant(suffix, ['invoice:create']);
+    userId = tenant.user.id;
+    branchId = tenant.branch.id;
+
+    const client = await prisma.client.create({
+      data: { companyId: tenant.company.id, clientCode: `TSTCL-${suffix}`, name: 'Test Client', panNumber: 'ABCDE1234F', type: 'RETAIL' },
+    });
+    clientId = client.id;
+
+    const category = await prisma.productCategory.create({
+      data: { companyId: tenant.company.id, code: `TSTCAT-${suffix}`, name: 'Test Rings' },
+    });
+    categoryId = category.id;
+  });
+
+  afterAll(async () => {
+    // F1: undo the ledger side-effects (Account.balance) of every JournalEntry this suite posted
+    // — one per invoice, per payment, per return — before touching the business rows themselves
+    // (JournalEntry.referenceId isn't an FK, so order relative to the deletes below doesn't matter).
+    const returnIds = (await prisma.salesReturn.findMany({ where: { invoiceId: { in: invoiceIds } }, select: { id: true } })).map((r) => r.id);
+    const paymentIds = (await prisma.invoicePayment.findMany({ where: { invoiceId: { in: invoiceIds } }, select: { id: true } })).map((p) => p.id);
+    await cleanupJournalEntries([...invoiceIds, ...returnIds, ...paymentIds]);
+
+    // Must precede the salesInvoice/jewelryTag deletes below — sales_return_items has a RESTRICT
+    // FK to both invoice_items (via salesInvoice's cascade) and jewelry_tags.
+    await prisma.salesReturn.deleteMany({ where: { invoiceId: { in: invoiceIds } } }); // cascades sales_return_items
+    await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
+    await prisma.invoicePayment.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
+    await prisma.salesInvoice.deleteMany({ where: { id: { in: invoiceIds } } }); // cascades invoice_items
+    await prisma.jewelryTag.deleteMany({ where: { id: { in: tagIds } } });
+    await prisma.productCategory.deleteMany({ where: { id: categoryId } });
+    await prisma.client.deleteMany({ where: { id: clientId } });
+    await cleanupTestTenant(tenant);
+    await prisma.$disconnect();
+  });
+
+  it('flips a single tagged line to SOLD and links it', async () => {
+    const tag = await makeTag('Ring A');
+
+    const invoice = await createInvoice(
+      { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ tagId: tag.id })] },
+      userId
+    );
+    invoiceIds.push(invoice.id);
+
+    expect(invoice.items).toHaveLength(1);
+    expect(invoice.items[0].tagId).toBe(tag.id);
+
+    const updated = await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } });
+    expect(updated.status).toBe('SOLD');
+  });
+
+  it('supports a mixed invoice: one tagged line + one free-text line', async () => {
+    const tag = await makeTag('Ring B');
+
+    const invoice = await createInvoice(
+      {
+        clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+        items: [
+          baseItem({ tagId: tag.id, description: 'Tagged ring' }),
+          baseItem({ description: 'Making charge adjustment', goldRate: 0, makingCharge: 500 }),
+        ],
+      },
+      userId
+    );
+    invoiceIds.push(invoice.id);
+
+    const taggedLine = invoice.items.find((i) => i.tagId === tag.id);
+    const freeTextLine = invoice.items.find((i) => i.tagId === null);
+    expect(taggedLine).toBeDefined();
+    expect(freeTextLine).toBeDefined();
+    // tagged line: netGoldWeight(10) * goldRate(48000) = 480000; free-text line: makingCharge only = 500
+    expect(Number(invoice.subtotal)).toBeCloseTo(480000 + 500);
+
+    const updated = await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } });
+    expect(updated.status).toBe('SOLD');
+  });
+
+  it('is all-or-nothing: one unsellable tag rolls back the whole invoice, including the sellable tag', async () => {
+    const sellable = await makeTag('Ring C (sellable)');
+    const alreadySold = await makeTag('Ring D (already sold)');
+    await prisma.jewelryTag.update({ where: { id: alreadySold.id }, data: { status: 'SOLD' } });
+
+    const invoiceCountBefore = await prisma.salesInvoice.count({ where: { clientId } });
+
+    await expect(
+      createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          items: [baseItem({ tagId: sellable.id }), baseItem({ tagId: alreadySold.id })],
+        },
+        userId
+      )
+    ).rejects.toThrow(AppError);
+
+    const invoiceCountAfter = await prisma.salesInvoice.count({ where: { clientId } });
+    expect(invoiceCountAfter).toBe(invoiceCountBefore); // no invoice was created
+
+    const stillInStock = await prisma.jewelryTag.findUniqueOrThrow({ where: { id: sellable.id } });
+    expect(stillInStock.status).toBe('IN_STOCK'); // not left half-flipped
+  });
+
+  it('lets exactly one of several concurrent invoices win the same tag', async () => {
+    const tag = await makeTag('Ring E (contested)');
+
+    const attempt = () =>
+      createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ tagId: tag.id })] },
+        userId
+      );
+
+    const results = await Promise.allSettled([attempt(), attempt(), attempt()]);
+    const fulfilled = results.filter((r) => r.status === 'fulfilled') as PromiseFulfilledResult<any>[];
+    const rejected = results.filter((r) => r.status === 'rejected');
+
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(2);
+    invoiceIds.push(fulfilled[0].value.id);
+
+    const finalTag = await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } });
+    expect(finalTag.status).toBe('SOLD');
+
+    const linkedCount = await prisma.invoiceItem.count({ where: { tagId: tag.id } });
+    expect(linkedCount).toBe(1);
+  });
+
+  it('rejects the same tag appearing twice in one invoice request, without touching the DB', async () => {
+    const tag = await makeTag('Ring F (duplicated line)');
+
+    await expect(
+      createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          items: [baseItem({ tagId: tag.id }), baseItem({ tagId: tag.id })],
+        },
+        userId
+      )
+    ).rejects.toThrow(/cannot appear on more than one line/);
+
+    const untouched = await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } });
+    expect(untouched.status).toBe('IN_STOCK');
+  });
+
+  it('still supports a free-text-only invoice with no tags (regression)', async () => {
+    const invoice = await createInvoice(
+      { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()] },
+      userId
+    );
+    invoiceIds.push(invoice.id);
+
+    expect(invoice.items).toHaveLength(1);
+    expect(invoice.items[0].tagId).toBeNull();
+  });
+
+  // A1: currency was read twice (once for the tax rate, once — separately — for the row default),
+  // so an omitted currency invoiced as INR but taxed as if it weren't. These prove the two reads
+  // can no longer diverge.
+  describe('GST / currency (A1 zero-GST bug)', () => {
+    it('computes GST when currency is omitted, same as an explicit INR invoice', async () => {
+      const omitted = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()] },
+        userId
+      );
+      invoiceIds.push(omitted.id);
+
+      const explicit = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', currency: 'INR', items: [baseItem()] },
+        userId
+      );
+      invoiceIds.push(explicit.id);
+
+      expect(Number(omitted.taxAmount)).toBeCloseTo(480000 * 0.03);
+      expect(Number(omitted.taxAmount)).toBeCloseTo(Number(explicit.taxAmount));
+      expect(omitted.currency).toBe('INR');
+
+      const taxInvoice = await prisma.taxInvoice.findUnique({ where: { invoiceId: omitted.id } });
+      expect(taxInvoice).not.toBeNull();
+      expect(Number(taxInvoice!.totalTax)).toBeGreaterThan(0);
+    });
+
+    it('charges zero GST and emits no TaxInvoice for a non-INR currency (not a bug — legitimately untaxed here)', async () => {
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', currency: 'USD',
+          items: [baseItem()],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.taxAmount)).toBe(0);
+
+      const taxInvoice = await prisma.taxInvoice.findUnique({ where: { invoiceId: invoice.id } });
+      expect(taxInvoice).toBeNull();
+    });
+  });
+
+  // A2: rateType existed on both the input and the schema but createInvoice ignored it, always
+  // treating goldRate as ₹/gram. That made FIXED-rate rows (e.g. convertMemoToInvoice's flat
+  // sellingPrice) mislabeled data. This proves createInvoice now honors rateType.
+  describe('rateType-driven pricing (A2 price-mode fix)', () => {
+    it('prices a FIXED-rate line at goldRate directly, ignoring netGoldWeight', async () => {
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          items: [baseItem({ rateType: 'FIXED', goldRate: 52000, netGoldWeight: 10 })],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.items[0].unitPrice)).toBe(52000);
+      expect(Number(invoice.subtotal)).toBe(52000);
+    });
+
+    it('prices a FIXED-rate, zero-netGoldWeight line (e.g. a loose stone) at goldRate, not zero', async () => {
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          items: [baseItem({
+            rateType: 'FIXED', goldRate: 15000, netGoldWeight: 0, grossWeight: 0,
+            description: 'Loose stone',
+          })],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.items[0].unitPrice)).toBe(15000);
+    });
+
+    it('still prices a PER_GRAM line off netGoldWeight * goldRate (regression)', async () => {
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          items: [baseItem({ rateType: 'PER_GRAM', goldRate: 48000, netGoldWeight: 10, makingCharge: 200 })],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.items[0].unitPrice)).toBe(48000 * 10 + 200);
+    });
+
+    // VA% (wastagePercent): reuses the same markup-the-making-charge formula NewTagPage.tsx
+    // already applies for the MakingCharge master, rather than inventing a new one.
+    it('marks up makingCharge by wastagePercent (VA%) on a PER_GRAM line', async () => {
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          items: [baseItem({
+            rateType: 'PER_GRAM', goldRate: 48000, netGoldWeight: 10,
+            makingCharge: 1000, wastagePercent: 10,
+          })],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      // 10*48000 + 1000*(1+10/100) = 480000 + 1100 = 481100
+      expect(Number(invoice.items[0].unitPrice)).toBe(481100);
+      expect(Number(invoice.items[0].wastagePercent)).toBe(10);
+    });
+
+    it('ignores wastagePercent on a FIXED-rate line, same as it ignores makingCharge (regression)', async () => {
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          items: [baseItem({ rateType: 'FIXED', goldRate: 52000, makingCharge: 1000, wastagePercent: 10 })],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.items[0].unitPrice)).toBe(52000);
+    });
+
+    it('defaults wastagePercent to 0 when omitted (regression)', async () => {
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.items[0].wastagePercent)).toBe(0);
+    });
+  });
+
+  // C2: a PER_GRAM line that omits goldRate now prices off MetalRate for its karat, as of
+  // invoiceDate — not always "today". Two rates are seeded at different dates so the tests can
+  // tell "resolved the right one for this date" apart from "resolved *a* rate".
+  describe('daily rate auto-pricing (C2)', () => {
+    const testKarat = `TSTKAR-${suffix}`;
+    const noRateKarat = `TSTKAR-NONE-${suffix}`;
+    const dateOnly = (d: Date) => new Date(d.toISOString().split('T')[0]);
+    const today = dateOnly(new Date());
+    const tenDaysAgo = dateOnly(new Date(Date.now() - 10 * 24 * 60 * 60 * 1000));
+    const fiveDaysAgo = dateOnly(new Date(Date.now() - 5 * 24 * 60 * 60 * 1000));
+    const rateIds: string[] = [];
+
+    beforeAll(async () => {
+      const older = await prisma.metalRate.create({
+        data: { companyId: tenant.company.id, date: tenDaysAgo, karat: testKarat, purity: 0.916, ratePerGram: 40000 },
+      });
+      const newer = await prisma.metalRate.create({
+        data: { companyId: tenant.company.id, date: today, karat: testKarat, purity: 0.916, ratePerGram: 45000 },
+      });
+      rateIds.push(older.id, newer.id);
+    });
+
+    afterAll(async () => {
+      await prisma.metalRate.deleteMany({ where: { id: { in: rateIds } } });
+    });
+
+    it('resolves an omitted goldRate from the MetalRate as of invoiceDate', async () => {
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: today, invoiceType: 'RETAIL',
+          items: [baseItem({ goldRate: undefined, karat: testKarat, netGoldWeight: 10 })],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.items[0].goldRate)).toBe(45000);
+      expect(Number(invoice.items[0].unitPrice)).toBe(10 * 45000);
+    });
+
+    it('resolves the rate as of a backdated invoiceDate, not the latest one available', async () => {
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: fiveDaysAgo, invoiceType: 'RETAIL',
+          items: [baseItem({ goldRate: undefined, karat: testKarat, netGoldWeight: 10 })],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      // fiveDaysAgo is after the 40000 rate (10 days ago) but before the 45000 rate (today) —
+      // must resolve to the older, still-effective-on-that-date rate.
+      expect(Number(invoice.items[0].goldRate)).toBe(40000);
+      expect(Number(invoice.items[0].unitPrice)).toBe(10 * 40000);
+    });
+
+    it('still honors an explicit goldRate override even when a MetalRate exists for that karat/date (regression)', async () => {
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: today, invoiceType: 'RETAIL',
+          items: [baseItem({ goldRate: 99999, karat: testKarat, netGoldWeight: 10 })],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.items[0].goldRate)).toBe(99999);
+      expect(Number(invoice.items[0].unitPrice)).toBe(10 * 99999);
+    });
+
+    it('rejects a PER_GRAM line with neither goldRate nor karat to resolve one', async () => {
+      await expect(
+        createInvoice(
+          {
+            clientId, invoiceDate: today, invoiceType: 'RETAIL',
+            items: [baseItem({ goldRate: undefined, karat: undefined })],
+          },
+          userId
+        )
+      ).rejects.toThrow(/goldRate or karat/);
+    });
+
+    it('rejects a karat with no MetalRate on or before invoiceDate', async () => {
+      await expect(
+        createInvoice(
+          {
+            clientId, invoiceDate: today, invoiceType: 'RETAIL',
+            items: [baseItem({ goldRate: undefined, karat: noRateKarat })],
+          },
+          userId
+        )
+      ).rejects.toThrow(/No metal rate found/);
+    });
+
+    it('rejects a FIXED-rate line with no explicit goldRate (it has no market rate to fall back on)', async () => {
+      await expect(
+        createInvoice(
+          {
+            clientId, invoiceDate: today, invoiceType: 'RETAIL',
+            items: [baseItem({ rateType: 'FIXED', goldRate: undefined, karat: testKarat })],
+          },
+          userId
+        )
+      ).rejects.toThrow(/FIXED-rate lines require an explicit goldRate/);
+    });
+  });
+
+  // C3: a PER_GRAM line missing an explicit makingCharge/wastagePercent now pulls the
+  // MakingCharge master's rate for its karat + category (+ tag makeType), same
+  // override-always-wins pattern as C2's goldRate. Most-specific-match-wins across all three
+  // dimensions — see the karat-specificity describe block below.
+  describe('making-charge / wastage master (C3)', () => {
+    let masterChargeId: string;
+    let flatMasterChargeId: string;
+    let flatCategoryId: string;
+
+    beforeAll(async () => {
+      const charge = await prisma.makingCharge.create({
+        data: {
+          companyId: tenant.company.id,
+          categoryId, makeType: 'GOLD', makingCharge: 300, makingChargeType: 'PER_GRAM',
+          saleWastagePercent: 5, isActive: true,
+        },
+      });
+      masterChargeId = charge.id;
+
+      const flatCategory = await prisma.productCategory.create({
+        data: { companyId: tenant.company.id, code: `TSTCAT-FLAT-${suffix}`, name: 'Test Flat-Charge Category' },
+      });
+      flatCategoryId = flatCategory.id;
+      const flatCharge = await prisma.makingCharge.create({
+        data: {
+          companyId: tenant.company.id,
+          categoryId: flatCategoryId, makeType: 'GOLD', makingCharge: 750,
+          makingChargeType: 'PER_PIECE', saleWastagePercent: 0, isActive: true,
+        },
+      });
+      flatMasterChargeId = flatCharge.id;
+    });
+
+    afterAll(async () => {
+      await prisma.makingCharge.deleteMany({ where: { id: { in: [masterChargeId, flatMasterChargeId] } } });
+      // flatCategory is removed by cleanupTestTenant after the tags that reference it (composite FK: RESTRICT)
+    });
+
+    it('resolves makingCharge/wastagePercent from the master for a tagged line when both omitted', async () => {
+      const tag = await makeTag('Ring C3-a', { categoryId });
+
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          items: [baseItem({ tagId: tag.id, goldRate: 48000, netGoldWeight: 10, makingCharge: undefined, wastagePercent: undefined })],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      // PER_GRAM master: 300 * netGoldWeight(10) = 3000; wastagePercent from saleWastagePercent (5)
+      expect(Number(invoice.items[0].makingCharge)).toBe(3000);
+      expect(Number(invoice.items[0].wastagePercent)).toBe(5);
+      // 10*48000 + 3000*1.05 = 480000 + 3150
+      expect(Number(invoice.items[0].unitPrice)).toBe(480000 + 3150);
+    });
+
+    // The concern this closes: an executive can override MC/VA at tagging time (NewTagPage's
+    // MC & VA tab), and the MakingCharge master can change afterward — a piece already tagged
+    // must keep billing at what was actually decided for it, not silently re-price to whatever
+    // the master says today.
+    it('prefers the tagged piece\'s own settled saleMcRate/saleVaPercent over the master when both omitted', async () => {
+      const tag = await makeTag('Ring C3-tag-rate', { categoryId, saleMcRate: 777, saleVaPercent: 12 });
+
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          items: [baseItem({ tagId: tag.id, goldRate: 48000, netGoldWeight: 10, makingCharge: undefined, wastagePercent: undefined })],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      // Tag's own rate wins over the master's (300/5%): 777 * netGoldWeight(10) = 7770; VA 12%.
+      expect(Number(invoice.items[0].makingCharge)).toBe(7770);
+      expect(Number(invoice.items[0].wastagePercent)).toBe(12);
+      expect(Number(invoice.items[0].unitPrice)).toBe(10 * 48000 + 7770 * 1.12);
+    });
+
+    it('an explicit request-level makingCharge/wastagePercent still wins over the tag\'s own settled rate (regression)', async () => {
+      const tag = await makeTag('Ring C3-tag-rate-override', { categoryId, saleMcRate: 777, saleVaPercent: 12 });
+
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          items: [baseItem({ tagId: tag.id, goldRate: 48000, netGoldWeight: 10, makingCharge: 111, wastagePercent: 2 })],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.items[0].makingCharge)).toBe(111);
+      expect(Number(invoice.items[0].wastagePercent)).toBe(2);
+    });
+
+    it('still honors explicit makingCharge/wastagePercent even when a master row matches (regression)', async () => {
+      const tag = await makeTag('Ring C3-b', { categoryId });
+
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          items: [baseItem({ tagId: tag.id, goldRate: 48000, netGoldWeight: 10, makingCharge: 999, wastagePercent: 0 })],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.items[0].makingCharge)).toBe(999);
+      expect(Number(invoice.items[0].wastagePercent)).toBe(0);
+    });
+
+    it('defaults makingCharge/wastagePercent to 0 when no master row matches the category (regression)', async () => {
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          items: [baseItem({ makingCharge: undefined, wastagePercent: undefined })],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.items[0].makingCharge)).toBe(0);
+      expect(Number(invoice.items[0].wastagePercent)).toBe(0);
+    });
+
+    it('scales a non-PER_GRAM (flat) master charge by piece, not by weight', async () => {
+      const tag = await makeTag('Ring C3-c', { categoryId: flatCategoryId });
+
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          items: [baseItem({ tagId: tag.id, goldRate: 48000, netGoldWeight: 10, makingCharge: undefined, wastagePercent: undefined })],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.items[0].makingCharge)).toBe(750); // flat, not 750*10
+      expect(Number(invoice.items[0].wastagePercent)).toBe(0);
+    });
+
+    it('ignores the making-charge master on a FIXED-rate line even when its category matches (regression)', async () => {
+      const tag = await makeTag('Ring C3-d', { categoryId });
+
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          items: [baseItem({
+            tagId: tag.id, rateType: 'FIXED', goldRate: 52000,
+            makingCharge: undefined, wastagePercent: undefined,
+          })],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.items[0].makingCharge)).toBe(0);
+      expect(Number(invoice.items[0].unitPrice)).toBe(52000);
+    });
+
+    describe('karat specificity', () => {
+      let karatChargeId: string;
+
+      beforeAll(async () => {
+        // Same category as masterChargeId (300/gm, 5% VA, any karat) but pinned to 18K at a
+        // different rate — the two rows exist together so resolution has to actually pick the
+        // more specific one, not just be the only candidate.
+        const charge = await prisma.makingCharge.create({
+          data: {
+            companyId: tenant.company.id,
+            categoryId, karat: '18K', makeType: 'GOLD', makingCharge: 800,
+            makingChargeType: 'PER_GRAM', saleWastagePercent: 22, isActive: true,
+          },
+        });
+        karatChargeId = charge.id;
+      });
+
+      afterAll(async () => {
+        await prisma.makingCharge.deleteMany({ where: { id: karatChargeId } });
+      });
+
+      it('prefers a karat+category-specific master row over a category-only wildcard row', async () => {
+        const tag = await makeTag('Ring C3-karat-a', { categoryId, metalKarat: '18K' });
+
+        const invoice = await createInvoice(
+          {
+            clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+            items: [baseItem({ tagId: tag.id, goldRate: 48000, netGoldWeight: 10, makingCharge: undefined, wastagePercent: undefined })],
+          },
+          userId
+        );
+        invoiceIds.push(invoice.id);
+
+        // 800/gm * 10, 22% VA — the 18K-specific row, not the wildcard-karat 300/gm, 5% row.
+        expect(Number(invoice.items[0].makingCharge)).toBe(8000);
+        expect(Number(invoice.items[0].wastagePercent)).toBe(22);
+      });
+
+      it('still falls back to the category-only wildcard row for a karat with no specific master row (regression)', async () => {
+        const tag = await makeTag('Ring C3-karat-b', { categoryId, metalKarat: '22K' });
+
+        const invoice = await createInvoice(
+          {
+            clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+            items: [baseItem({ tagId: tag.id, goldRate: 48000, netGoldWeight: 10, makingCharge: undefined, wastagePercent: undefined })],
+          },
+          userId
+        );
+        invoiceIds.push(invoice.id);
+
+        expect(Number(invoice.items[0].makingCharge)).toBe(3000);
+        expect(Number(invoice.items[0].wastagePercent)).toBe(5);
+      });
+
+      it('an explicit line-level karat overrides the tag\'s own metalKarat for master resolution', async () => {
+        // Tag itself is 22K, but the line explicitly prices it as 18K (e.g. a mixed-karat piece
+        // billed under a specific karat) — resolution should follow the line, not the tag.
+        const tag = await makeTag('Ring C3-karat-c', { categoryId, metalKarat: '22K' });
+
+        const invoice = await createInvoice(
+          {
+            clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+            items: [baseItem({
+              tagId: tag.id, karat: '18K', goldRate: 48000, netGoldWeight: 10,
+              makingCharge: undefined, wastagePercent: undefined,
+            })],
+          },
+          userId
+        );
+        invoiceIds.push(invoice.id);
+
+        expect(Number(invoice.items[0].makingCharge)).toBe(8000);
+        expect(Number(invoice.items[0].wastagePercent)).toBe(22);
+      });
+    });
+  });
+
+  // B1: createInvoice used to compute one flat 3% for the whole invoice. Now each line looks up
+  // its own HsnCode.gstRate, defaulting to DEFAULT_HSN_CODE (7113, 3%) when a line omits hsnCode.
+  describe('HSN / GST rate master (B1)', () => {
+    let highRateHsnId: string;
+    const HIGH_RATE_HSN_CODE = `TSTHSN18-${suffix}`;
+
+    beforeAll(async () => {
+      const hsn = await prisma.hsnCode.create({
+        data: { code: HIGH_RATE_HSN_CODE, description: 'Test 18% HSN', gstRate: 0.18 },
+      });
+      highRateHsnId = hsn.id;
+    });
+
+    afterAll(async () => {
+      await prisma.hsnCode.delete({ where: { id: highRateHsnId } });
+    });
+
+    it('resolves an omitted hsnCode to the default (7113, 3%) and stamps it on the line', async () => {
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.items[0].taxRate)).toBeCloseTo(0.03);
+      expect(invoice.items[0].hsnCodeId).not.toBeNull();
+      expect(Number(invoice.taxAmount)).toBeCloseTo(480000 * 0.03);
+    });
+
+    it('prices a mixed-rate invoice: two lines at different HSN rates sum to the right total tax', async () => {
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          items: [
+            baseItem({ description: 'Default-rate line' }), // 480000 @ 3%
+            baseItem({
+              description: 'High-rate line', hsnCode: HIGH_RATE_HSN_CODE,
+              rateType: 'FIXED', goldRate: 10000, netGoldWeight: 0,
+            }), // 10000 @ 18%
+          ],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      const expectedTax = 480000 * 0.03 + 10000 * 0.18;
+      expect(Number(invoice.taxAmount)).toBeCloseTo(expectedTax);
+
+      const highRateLine = invoice.items.find((i) => i.hsnCodeId === highRateHsnId);
+      expect(highRateLine).toBeDefined();
+      expect(Number(highRateLine!.taxRate)).toBeCloseTo(0.18);
+    });
+
+    it('rejects an unknown HSN code without creating an invoice', async () => {
+      const invoiceCountBefore = await prisma.salesInvoice.count({ where: { clientId } });
+
+      await expect(
+        createInvoice(
+          {
+            clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+            items: [baseItem({ hsnCode: 'NOT-A-REAL-HSN' })],
+          },
+          userId
+        )
+      ).rejects.toThrow(/Unknown or inactive HSN code/);
+
+      const invoiceCountAfter = await prisma.salesInvoice.count({ where: { clientId } });
+      expect(invoiceCountAfter).toBe(invoiceCountBefore);
+    });
+  });
+
+  // B2: client.state (free text) vs COMPANY_STATE_CODE (numeric) never matched, so every sale
+  // priced as inter-state IGST regardless of the client's actual state. These prove a same-state
+  // client now correctly nets CGST+SGST (by canonical name and by alias), a genuinely different
+  // state still nets IGST, and an unresolved state keeps the old IGST fallback (regression).
+  describe('place-of-supply / state resolution (B2)', () => {
+    const originalCompanyState = process.env.COMPANY_STATE_CODE;
+    const stateClientIds: string[] = [];
+
+    beforeAll(() => {
+      process.env.COMPANY_STATE_CODE = '24'; // Gujarat — deterministic regardless of ambient env
+    });
+
+    afterAll(async () => {
+      process.env.COMPANY_STATE_CODE = originalCompanyState;
+      // Invoices for these clients are also tracked in the outer invoiceIds/afterAll, but that
+      // cleanup runs after this one (nested afterAll runs first) — so clear the FK here first.
+      const stateInvoices = await prisma.salesInvoice.findMany({
+        where: { clientId: { in: stateClientIds } }, select: { id: true },
+      });
+      const stateInvoiceIds = stateInvoices.map((i) => i.id);
+      await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: stateInvoiceIds } } });
+      await prisma.salesInvoice.deleteMany({ where: { id: { in: stateInvoiceIds } } });
+      await prisma.client.deleteMany({ where: { id: { in: stateClientIds } } });
+    });
+
+    async function makeClient(state: string | null) {
+      const c = await prisma.client.create({
+        data: {
+          companyId: tenant.company.id,
+          clientCode: `TSTSTCL-${suffix}-${stateClientIds.length}`,
+          name: 'State Test Client', panNumber: 'ABCDE1234F', type: 'RETAIL', state: state ?? undefined,
+        },
+      });
+      stateClientIds.push(c.id);
+      return c;
+    }
+
+    it('nets CGST+SGST for a client in the same state, matched by canonical name', async () => {
+      const client = await makeClient('Gujarat');
+      const invoice = await createInvoice(
+        { clientId: client.id, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      const taxInvoice = await prisma.taxInvoice.findUniqueOrThrow({ where: { invoiceId: invoice.id } });
+      expect(Number(taxInvoice.igst)).toBe(0);
+      expect(Number(taxInvoice.cgst)).toBeCloseTo(Number(invoice.taxAmount) / 2);
+      expect(Number(taxInvoice.sgst)).toBeCloseTo(Number(invoice.taxAmount) / 2);
+      expect(taxInvoice.placeOfSupply).toBe('24');
+    });
+
+    it('nets CGST+SGST for a client in the same state, matched by alias ("GJ")', async () => {
+      const client = await makeClient('GJ');
+      const invoice = await createInvoice(
+        { clientId: client.id, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      const taxInvoice = await prisma.taxInvoice.findUniqueOrThrow({ where: { invoiceId: invoice.id } });
+      expect(Number(taxInvoice.igst)).toBe(0);
+      expect(Number(taxInvoice.cgst)).toBeGreaterThan(0);
+    });
+
+    it('nets IGST for a client in a genuinely different state', async () => {
+      const client = await makeClient('Maharashtra');
+      const invoice = await createInvoice(
+        { clientId: client.id, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      const taxInvoice = await prisma.taxInvoice.findUniqueOrThrow({ where: { invoiceId: invoice.id } });
+      expect(Number(taxInvoice.cgst)).toBe(0);
+      expect(Number(taxInvoice.sgst)).toBe(0);
+      expect(Number(taxInvoice.igst)).toBeCloseTo(Number(invoice.taxAmount));
+      expect(taxInvoice.placeOfSupply).toBe('27');
+    });
+
+    it('falls back to IGST when the client state is blank or unrecognized (regression)', async () => {
+      const client = await makeClient('Nowhereland');
+      const invoice = await createInvoice(
+        { clientId: client.id, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      const taxInvoice = await prisma.taxInvoice.findUniqueOrThrow({ where: { invoiceId: invoice.id } });
+      expect(Number(taxInvoice.cgst)).toBe(0);
+      expect(Number(taxInvoice.igst)).toBeCloseTo(Number(invoice.taxAmount));
+      expect(taxInvoice.placeOfSupply).toBe('Nowhereland'); // unresolved: raw free text preserved
+    });
+  });
+
+  // Sales Executive / Terms: optional pass-through fields, no business logic — just prove they
+  // land on the row when given and stay null (not empty-string/undefined-crash) when omitted.
+  describe('salesPersonId / terms (optional pass-through)', () => {
+    it('stores salesPersonId and terms when provided', async () => {
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          salesPersonId: userId, terms: 'NET_30',
+          items: [baseItem()],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(invoice.salesPersonId).toBe(userId);
+      expect(invoice.terms).toBe('NET_30');
+      expect((invoice as any).salesPerson?.name).toBe('Test User');
+    });
+
+    it('leaves salesPersonId and terms null when omitted (regression)', async () => {
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(invoice.salesPersonId).toBeNull();
+      expect(invoice.terms).toBeNull();
+    });
+  });
+
+  // Category summary: InvoiceItem.categoryId reuses the existing ProductCategory master already
+  // on JewelryTag. Tagged lines inherit the tag's category; free-text lines may set one directly.
+  describe('categoryId (per-invoice category summary)', () => {
+    it('inherits the category from a tagged line\'s JewelryTag when none is given explicitly', async () => {
+      const tag = await makeTag('Ring G (categorized)', { categoryId });
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ tagId: tag.id })] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(invoice.items[0].categoryId).toBe(categoryId);
+    });
+
+    it('stores an explicit categoryId on a free-text line', async () => {
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ categoryId })] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(invoice.items[0].categoryId).toBe(categoryId);
+    });
+
+    it('leaves categoryId null when neither the line nor its tag has one (regression)', async () => {
+      const tag = await makeTag('Ring H (uncategorized)');
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ tagId: tag.id })] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(invoice.items[0].categoryId).toBeNull();
+    });
+  });
+
+  // otherCharges: GATI's "Add & Less" — a taxable add-on (shipping/packing/misc) alongside the
+  // existing discountAmount ("less"). Both feed the same per-line tax-scale math (B1), so this
+  // also proves that generalizes correctly instead of just working for discount.
+  describe('otherCharges (Shipping & Tax add/less)', () => {
+    it('adds otherCharges to the taxable amount and taxes it at the blended line rate', async () => {
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          otherCharges: 1000, items: [baseItem()], // 480000 line total, PER_GRAM/3%
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.otherCharges)).toBe(1000);
+      const expectedTaxable = 480000 + 1000;
+      expect(Number(invoice.totalAmount)).toBeCloseTo(expectedTaxable + expectedTaxable * 0.03);
+    });
+
+    it('defaults otherCharges to 0 when omitted (regression)', async () => {
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.otherCharges)).toBe(0);
+    });
+
+    // Caught live via Playwright: a line whose computed value is 0 (e.g. netGoldWeight entered
+    // but goldRate left blank) makes subtotal 0, which used to make the discount/otherCharges
+    // scale factor 0 too — silently dropping otherCharges' tax and tripping the A1 guard as a
+    // false-positive 500 ("zero-GST on a taxable sale") instead of actually taxing otherCharges.
+    it('still taxes otherCharges correctly when every line totals to zero', async () => {
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', otherCharges: 500,
+          items: [baseItem({ goldRate: 0, netGoldWeight: 10 })], // line totalPrice = 0
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.taxAmount)).toBeCloseTo(500 * 0.03);
+      expect(Number(invoice.totalAmount)).toBeCloseTo(500 + 500 * 0.03);
+
+      const taxInvoice = await prisma.taxInvoice.findUniqueOrThrow({ where: { invoiceId: invoice.id } });
+      expect(Number(taxInvoice.totalTax)).toBeGreaterThan(0);
+    });
+  });
+
+  // Inline payment (bill-and-collect in one screen) shares applyPayment() with the standalone
+  // recordPayment endpoint — proving the two "routes" the user flagged as a risk stay consistent
+  // with each other rather than duplicating (and potentially diverging) the same math.
+  describe('inline payment at creation (shared applyPayment)', () => {
+    it('applies an inline payment: paidAmount/balanceDue/status and client balance all net correctly', async () => {
+      const before = await prisma.client.findUniqueOrThrow({ where: { id: clientId } });
+
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()],
+          payments: [{ paymentDate: new Date(), amount: 200000, mode: 'BANK_TRANSFER' }],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.paidAmount)).toBe(200000);
+      expect(Number(invoice.balanceDue)).toBeCloseTo(Number(invoice.totalAmount) - 200000);
+      expect(invoice.status).toBe('PARTIALLY_PAID');
+
+      const payments = await prisma.invoicePayment.findMany({ where: { invoiceId: invoice.id } });
+      expect(payments).toHaveLength(1);
+      expect(Number(payments[0].amount)).toBe(200000);
+
+      // Debited by the full sale, credited back by the inline payment — same net effect as
+      // create-then-recordPayment, because both go through applyPayment().
+      const after = await prisma.client.findUniqueOrThrow({ where: { id: clientId } });
+      const expectedDelta = Number(invoice.totalAmount) - 200000;
+      expect(Number(after.currentBalance) - Number(before.currentBalance)).toBeCloseTo(expectedDelta);
+    });
+
+    it('an inline payment plus a later recordPayment top-up land on the same invoice consistently', async () => {
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()],
+          payments: [{ paymentDate: new Date(), amount: 100000, mode: 'BANK_TRANSFER' }],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+      expect(Number(invoice.balanceDue)).toBeCloseTo(Number(invoice.totalAmount) - 100000);
+
+      await recordPayment(
+        { invoiceId: invoice.id, paymentDate: new Date(), amount: 50000, mode: 'UPI' },
+        tenant.ctx, userId
+      );
+
+      const updated = await prisma.salesInvoice.findUniqueOrThrow({ where: { id: invoice.id } });
+      expect(Number(updated.paidAmount)).toBe(150000);
+      expect(Number(updated.balanceDue)).toBeCloseTo(Number(invoice.totalAmount) - 150000);
+
+      const payments = await prisma.invoicePayment.findMany({ where: { invoiceId: invoice.id } });
+      expect(payments).toHaveLength(2);
+    });
+
+    it('splits a single payment across multiple modes (e.g. part cash, part UPI) correctly', async () => {
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()],
+          payments: [
+            { paymentDate: new Date(), amount: 100000, mode: 'CASH' },
+            { paymentDate: new Date(), amount: 350000, mode: 'UPI', referenceNo: 'UPI-TEST-1' },
+          ],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.paidAmount)).toBe(450000);
+      expect(Number(invoice.balanceDue)).toBeCloseTo(Number(invoice.totalAmount) - 450000);
+
+      const payments = await prisma.invoicePayment.findMany({
+        where: { invoiceId: invoice.id }, orderBy: { amount: 'desc' },
+      });
+      expect(payments).toHaveLength(2);
+      expect(payments[0].mode).toBe('UPI');
+      expect(payments[1].mode).toBe('CASH');
+      // Each split gets its own auto-generated, unique transaction number.
+      expect(payments[0].paymentNumber).toMatch(/^PMT-/);
+      expect(payments[0].paymentNumber).not.toBe(payments[1].paymentNumber);
+    });
+
+    it('leaves the invoice unpaid/DRAFT when no payment is given at creation (regression)', async () => {
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.paidAmount)).toBe(0);
+      expect(invoice.status).toBe('DRAFT');
+    });
+  });
+
+  // F1: createInvoice/applyPayment/createSalesReturn now each post a balanced double-entry
+  // JournalEntry (via postAutoJournalEntry) alongside their existing client.currentBalance
+  // bump — previously nothing ever called createJournalEntry, so the Trial Balance/P&L/Balance
+  // Sheet screens had no data at all. These prove the ledger side-effect, not just the balance.
+  describe('F1 — ledger wiring (sales -> double-entry journal)', () => {
+    it('posts a balanced AR/Revenue/GST/COGS entry for a tagged INR sale', async () => {
+      const tag = await makeTag('Ring F1-a', { categoryId });
+
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ tagId: tag.id })] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      const entry = await getJournalEntry(invoice.id);
+      expect(entry).not.toBeNull();
+      expect(entry!.referenceType).toBe('SalesInvoice');
+      expect(Number(entry!.totalDebit)).toBeCloseTo(Number(entry!.totalCredit));
+      expect(Number(entry!.totalDebit)).toBeCloseTo(Number(invoice.totalAmount) + 40000); // + tag's costPrice (COGS)
+
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE).debit).toBeCloseTo(Number(invoice.totalAmount));
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.SALES_REVENUE).credit).toBeCloseTo(Number(invoice.subtotal));
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.COST_OF_GOODS).debit).toBeCloseTo(40000); // makeTag's fixed costPrice
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.INVENTORY).credit).toBeCloseTo(40000);
+
+      // Same-state (no client.state set -> resolveStateCode fails -> treated inter-state, B2):
+      // GST lands entirely in IGST, not split CGST/SGST.
+      const gst = Number(invoice.taxAmount);
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.IGST_PAYABLE).credit).toBeCloseTo(gst);
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.CGST_PAYABLE).credit).toBe(0);
+
+      // Account.balance actually moved, not just the JournalLine rows.
+      const ar = await prisma.account.findUniqueOrThrow({ where: { companyId_code: { companyId: tenant.company.id, code: LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE } } });
+      const revenue = await prisma.account.findUniqueOrThrow({ where: { companyId_code: { companyId: tenant.company.id, code: LEDGER_ACCOUNT.SALES_REVENUE } } });
+      // Can't assert absolute balances (shared across the whole suite/run history) — but posting
+      // is unconditional, so re-fetching right after must already reflect this entry's lines.
+      expect(ar).not.toBeNull();
+      expect(revenue).not.toBeNull();
+    });
+
+    it('has no COGS/Inventory lines for a free-text (untagged) line — nothing physical sold', async () => {
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      const entry = await getJournalEntry(invoice.id);
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.COST_OF_GOODS).debit).toBe(0);
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.INVENTORY).credit).toBe(0);
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE).debit).toBeCloseTo(Number(invoice.totalAmount));
+    });
+
+    it('still posts AR/Revenue for a non-INR sale, but no GST lines (taxAmount is 0)', async () => {
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', currency: 'USD', items: [baseItem()] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      // Revenue recognition still happens on a non-INR sale — only GST (and, with no tagged
+      // line here, COGS) are zero and so filtered out of the posted entry entirely.
+      const entry = await getJournalEntry(invoice.id);
+      expect(entry).not.toBeNull();
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE).debit).toBeCloseTo(Number(invoice.totalAmount));
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.SALES_REVENUE).credit).toBeCloseTo(Number(invoice.subtotal));
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.IGST_PAYABLE).credit).toBe(0);
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.CGST_PAYABLE).credit).toBe(0);
+      expect(entry!.lines.some((l) => l.account.code === LEDGER_ACCOUNT.IGST_PAYABLE)).toBe(false);
+    });
+
+    it('posts a Cash-in-Hand vs Accounts Receivable entry for an inline CASH payment', async () => {
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()],
+          payments: [{ paymentDate: new Date(), amount: 50000, mode: 'CASH' }],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      const payment = await prisma.invoicePayment.findFirstOrThrow({ where: { invoiceId: invoice.id } });
+      const entry = await getJournalEntry(payment.id);
+      expect(entry).not.toBeNull();
+      expect(entry!.referenceType).toBe('InvoicePayment');
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.CASH_IN_HAND).debit).toBe(50000);
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE).credit).toBe(50000);
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.BANK_ACCOUNT).debit).toBe(0);
+    });
+
+    it('routes a non-CASH mode (e.g. UPI) through Bank Account, not Cash in Hand', async () => {
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      await recordPayment({ invoiceId: invoice.id, paymentDate: new Date(), amount: 75000, mode: 'UPI' }, tenant.ctx, userId);
+
+      const payment = await prisma.invoicePayment.findFirstOrThrow({ where: { invoiceId: invoice.id, mode: 'UPI' } });
+      const entry = await getJournalEntry(payment.id);
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.BANK_ACCOUNT).debit).toBe(75000);
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.CASH_IN_HAND).debit).toBe(0);
+    });
+
+    it('reverses the original sale entry (Revenue/GST/COGS) exactly on a full return', async () => {
+      const tag = await makeTag('Ring F1-b', { categoryId });
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ tagId: tag.id })] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+      const saleEntry = await getJournalEntry(invoice.id);
+
+      const salesReturn = await createSalesReturn(
+        { invoiceId: invoice.id, items: [{ invoiceItemId: invoice.items[0].id }] },
+        tenant.ctx, userId
+      );
+
+      const returnEntry = await getJournalEntry(salesReturn.id);
+      expect(returnEntry).not.toBeNull();
+      expect(returnEntry!.referenceType).toBe('SalesReturn');
+
+      // Full return of a single-line invoice: the reversal must exactly mirror the original sale,
+      // debits and credits swapped.
+      expect(lineAmount(returnEntry!, LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE).credit)
+        .toBeCloseTo(lineAmount(saleEntry!, LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE).debit);
+      expect(lineAmount(returnEntry!, LEDGER_ACCOUNT.SALES_REVENUE).debit)
+        .toBeCloseTo(lineAmount(saleEntry!, LEDGER_ACCOUNT.SALES_REVENUE).credit);
+      expect(lineAmount(returnEntry!, LEDGER_ACCOUNT.IGST_PAYABLE).debit)
+        .toBeCloseTo(lineAmount(saleEntry!, LEDGER_ACCOUNT.IGST_PAYABLE).credit);
+      expect(lineAmount(returnEntry!, LEDGER_ACCOUNT.INVENTORY).debit).toBeCloseTo(40000);
+      expect(lineAmount(returnEntry!, LEDGER_ACCOUNT.COST_OF_GOODS).credit).toBeCloseTo(40000);
+    });
+  });
+
+  // F3: a dealer/wholesale client with Client.creditLimit set gets blocked from a sale that would
+  // push their balance over it. Unlimited (no creditLimit — the default, e.g. a lightweight
+  // walk-in retail Client) is unaffected, proven throughout the rest of this file's tests, which
+  // never set one.
+  describe('F3 — dealer credit limit', () => {
+    let limitedClientId: string;
+    const limitedInvoiceIds: string[] = [];
+
+    beforeAll(async () => {
+      const client = await prisma.client.create({
+        data: { companyId: tenant.company.id, clientCode: `TSTCL-F3-${suffix}`, name: 'Limited Dealer', panNumber: 'ABCDE1234F', type: 'WHOLESALE', creditLimit: 500000 },
+      });
+      limitedClientId = client.id;
+    });
+
+    afterAll(async () => {
+      // Self-contained cleanup (this describe's own client, not the outer clientId), same
+      // ordering the outer describe's afterAll uses — journal entries before the invoice rows
+      // they reference, taxInvoice/salesInvoice before the client, memoOut last before the client.
+      await cleanupJournalEntries(limitedInvoiceIds);
+      await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: limitedInvoiceIds } } });
+      await prisma.salesInvoice.deleteMany({ where: { id: { in: limitedInvoiceIds } } }); // cascades invoice_items
+      await prisma.memoOut.deleteMany({ where: { clientId: limitedClientId } }); // cascades memo_items
+      await prisma.client.deleteMany({ where: { id: limitedClientId } });
+    });
+
+    it('allows a sale that stays within the credit limit', async () => {
+      const invoice = await createInvoice(
+        { clientId: limitedClientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()] },
+        userId
+      );
+      limitedInvoiceIds.push(invoice.id);
+      expect(Number(invoice.totalAmount)).toBeLessThan(500000);
+    });
+
+    it('rejects a sale that would push the balance over the credit limit, without touching inventory', async () => {
+      const tag = await makeTag('Ring F3-a');
+      const before = await prisma.client.findUniqueOrThrow({ where: { id: limitedClientId } });
+
+      // baseItem() prices at 480000 (10g * 48000/g); pushing well past the 500000 limit together
+      // with whatever this client already owes from the test above.
+      await expect(
+        createInvoice(
+          { clientId: limitedClientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ tagId: tag.id })] },
+          userId
+        )
+      ).rejects.toThrow(/credit limit/);
+
+      const afterAttempt = await prisma.client.findUniqueOrThrow({ where: { id: limitedClientId } });
+      expect(Number(afterAttempt.currentBalance)).toBeCloseTo(Number(before.currentBalance)); // untouched
+
+      const stillInStock = await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } });
+      expect(stillInStock.status).toBe('IN_STOCK'); // rejected before any tag flip
+    });
+
+    it('rejects a memo conversion that would push the balance over the credit limit', async () => {
+      const tag = await makeTag('Ring F3-b');
+      const memo = await createMemoOut(
+        {
+          clientId: limitedClientId, branchId, sentDate: new Date(), returnDeadline: new Date(Date.now() + 7 * 86_400_000),
+          items: [{
+            productCode: tag.tagNumber, description: 'Ring F3-b', pieces: 1,
+            grossWeight: 10, netGoldWeight: 10, estimatedValue: 490000, tagId: tag.id,
+          }],
+        },
+        tenant.ctx, userId
+      );
+
+      await expect(
+        convertMemoToInvoice(memo.id, [{ tagId: tag.id, sellingPrice: 490000 }], tenant.ctx, userId)
+      ).rejects.toThrow(/credit limit/);
+
+      const stillOnApproval = await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } });
+      expect(stillOnApproval.status).toBe('ON_APPROVAL'); // rejected before conversion touched it
+    });
+  });
+
+  // D1: reversing a completed sale — the customer brings a piece back.
+  describe('createSalesReturn (D1)', () => {
+    it('flips the tag back to IN_STOCK and creates the SalesReturn/SalesReturnItem rows', async () => {
+      const tag = await makeTag('Ring D1-a');
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ tagId: tag.id })] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      const salesReturn = await createSalesReturn(
+        { invoiceId: invoice.id, items: [{ invoiceItemId: invoice.items[0].id }] },
+        tenant.ctx, userId
+      );
+
+      expect(salesReturn.returnNumber).toMatch(/^SRET-/);
+      // 10*48000 line price, grossed up by its 3% GST — same tax-inclusive amount the client was
+      // actually debited for on sale.
+      expect(Number(salesReturn.totalAmount)).toBeCloseTo(480000 * 1.03);
+      expect(salesReturn.items).toHaveLength(1);
+      expect(salesReturn.items[0].tagId).toBe(tag.id);
+
+      const updatedTag = await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } });
+      expect(updatedTag.status).toBe('IN_STOCK');
+    });
+
+    it('rejects a return for a tag that is not currently SOLD', async () => {
+      const tag = await makeTag('Ring D1-b');
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ tagId: tag.id })] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      // Simulate the tag already being back in stock through some other path.
+      await prisma.jewelryTag.update({ where: { id: tag.id }, data: { status: 'IN_STOCK' } });
+
+      await expect(
+        createSalesReturn({ invoiceId: invoice.id, items: [{ invoiceItemId: invoice.items[0].id }] }, tenant.ctx, userId)
+      ).rejects.toThrow(/not currently SOLD/);
+    });
+
+    it('rejects a free-text (no-tagId) line — nothing physical to take back', async () => {
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ description: 'Making charge adjustment' })] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      await expect(
+        createSalesReturn({ invoiceId: invoice.id, items: [{ invoiceItemId: invoice.items[0].id }] }, tenant.ctx, userId)
+      ).rejects.toThrow(/Only tagged lines can be returned/);
+    });
+
+    it('credits client.currentBalance by the returned amount, symmetric to the sale\'s debit', async () => {
+      const tag = await makeTag('Ring D1-c');
+      const before = await prisma.client.findUniqueOrThrow({ where: { id: clientId } });
+
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ tagId: tag.id })] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      const afterSale = await prisma.client.findUniqueOrThrow({ where: { id: clientId } });
+      expect(Number(afterSale.currentBalance)).toBeCloseTo(Number(before.currentBalance) + Number(invoice.totalAmount));
+
+      await createSalesReturn({ invoiceId: invoice.id, items: [{ invoiceItemId: invoice.items[0].id }] }, tenant.ctx, userId);
+
+      const afterReturn = await prisma.client.findUniqueOrThrow({ where: { id: clientId } });
+      expect(Number(afterReturn.currentBalance)).toBeCloseTo(Number(before.currentBalance));
+    });
+
+    it('lets the same tag be sold again on a later invoice after being returned', async () => {
+      const tag = await makeTag('Ring D1-d');
+      const invoice1 = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ tagId: tag.id })] },
+        userId
+      );
+      invoiceIds.push(invoice1.id);
+
+      await createSalesReturn({ invoiceId: invoice1.id, items: [{ invoiceItemId: invoice1.items[0].id }] }, tenant.ctx, userId);
+
+      const invoice2 = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ tagId: tag.id, goldRate: 50000 })] },
+        userId
+      );
+      invoiceIds.push(invoice2.id);
+
+      expect(invoice2.items[0].tagId).toBe(tag.id);
+      const finalTag = await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } });
+      expect(finalTag.status).toBe('SOLD');
+    });
+  });
+});
+
+describe('convertMemoToInvoice (A1 guard, A3 tag-link regression)', () => {
+  const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+  let tenant: TestTenant;
+  let userId: string;
+  let branchId: string;
+  let clientId: string;
+  let memoId: string;
+  let tagId: string;
+  const invoiceIds: string[] = [];
+  const extraTagIds: string[] = [];
+  const extraMemoIds: string[] = [];
+
+  beforeAll(async () => {
+    tenant = await createTestTenant(`MEMO${suffix}`, ['invoice:create']);
+    userId = tenant.user.id;
+    branchId = tenant.branch.id;
+
+    const client = await prisma.client.create({
+      data: { companyId: tenant.company.id, clientCode: `TSTCL-${suffix}`, name: 'Test Client', panNumber: 'ABCDE1234F', type: 'WHOLESALE' },
+    });
+    clientId = client.id;
+
+    const tag = await prisma.jewelryTag.create({
+      data: {
+        tagNumber: `TSTTAG-${suffix}`, companyId: tenant.company.id,
+        branchId, name: 'Memo Ring', metalType: 'GOLD', metalKarat: '22K',
+        grossWeight: 10, netWeight: 10, stoneWeight: 0,
+        costPrice: 40000, sellingPrice: 48000,
+        createdById: userId,
+      },
+    });
+    tagId = tag.id;
+
+    const memo = await createMemoOut(
+      {
+        clientId, branchId, sentDate: new Date(), returnDeadline: new Date(Date.now() + 7 * 86400000),
+        items: [{
+          productCode: tag.tagNumber, description: 'Memo ring', pieces: 1,
+          grossWeight: 10, netGoldWeight: 10, estimatedValue: 48000, tagId,
+        }],
+      },
+      tenant.ctx, userId
+    );
+    memoId = memo.id;
+  });
+
+  afterAll(async () => {
+    // F1: this block's tests (convertMemoToInvoice, D2's createSalesReturn) each post their own
+    // JournalEntry (keyed by invoice.id and salesReturn.id respectively) against this tenant's
+    // own Account rows — both must be cleaned up before cleanupTestTenant deletes those Account
+    // rows below, same as the outer createInvoice describe's afterAll.
+    const returnIds = (await prisma.salesReturn.findMany({ where: { invoiceId: { in: invoiceIds } }, select: { id: true } })).map((r) => r.id);
+    await cleanupJournalEntries([...invoiceIds, ...returnIds]);
+    // Must precede the salesInvoice/jewelryTag deletes below — same RESTRICT-FK ordering as the
+    // createInvoice describe block's afterAll.
+    await prisma.salesReturn.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
+    await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
+    await prisma.salesInvoice.deleteMany({ where: { id: { in: invoiceIds } } });
+    await prisma.memoOut.deleteMany({ where: { id: { in: [memoId, ...extraMemoIds] } } }); // cascades memo_items
+    await prisma.jewelryTag.deleteMany({ where: { id: { in: [tagId, ...extraTagIds] } } });
+    await prisma.client.deleteMany({ where: { id: clientId } });
+    await cleanupTestTenant(tenant);
+    await prisma.$disconnect();
+  });
+
+  it('emits a correctly-taxed TaxInvoice (A1) and links InvoiceItem.tagId (A3)', async () => {
+    const invoice = await convertMemoToInvoice(
+      memoId,
+      [{ tagId, sellingPrice: 48000 }],
+      tenant.ctx, userId
+    );
+    invoiceIds.push(invoice.id);
+
+    expect(Number(invoice.taxAmount)).toBeCloseTo(48000 * 0.03);
+
+    const taxInvoice = await prisma.taxInvoice.findUnique({ where: { invoiceId: invoice.id } });
+    expect(taxInvoice).not.toBeNull();
+    expect(Number(taxInvoice!.totalTax)).toBeCloseTo(48000 * 0.03);
+
+    // A3: the tag flip to SOLD used to be the only trace of the sale — the InvoiceItem itself
+    // carried no tagId, breaking any lookup from an invoice line back to its inventory tag.
+    expect(invoice.items[0].tagId).toBe(tagId);
+    const linkedItem = await prisma.invoiceItem.findFirst({ where: { tagId } });
+    expect(linkedItem?.invoiceId).toBe(invoice.id);
+
+    const finalTag = await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tagId } });
+    expect(finalTag.status).toBe('SOLD');
+  });
+
+  // D2: a dealer returns a piece sold via the memo-conversion path. createSalesReturn() is
+  // channel-agnostic — it only cares about the resulting SalesInvoice/InvoiceItem/JewelryTag
+  // chain, not which function created it — so this exercises the exact same code as D1's retail
+  // return, just fed an invoice that came from convertMemoToInvoice instead of createInvoice.
+  it('D2: returns a memo-converted (wholesale) sale the same way a retail one is returned', async () => {
+    const tag = await prisma.jewelryTag.create({
+      data: {
+        tagNumber: `TSTTAG-D2-${suffix}`, companyId: tenant.company.id,
+        branchId, name: 'Wholesale Ring', metalType: 'GOLD', metalKarat: '22K',
+        grossWeight: 8, netWeight: 8, stoneWeight: 0,
+        costPrice: 30000, sellingPrice: 36000,
+        createdById: userId,
+      },
+    });
+    extraTagIds.push(tag.id);
+
+    const memo = await createMemoOut(
+      {
+        clientId, branchId, sentDate: new Date(), returnDeadline: new Date(Date.now() + 7 * 86400000),
+        items: [{
+          productCode: tag.tagNumber, description: 'Wholesale ring', pieces: 1,
+          grossWeight: 8, netGoldWeight: 8, estimatedValue: 36000, tagId: tag.id,
+        }],
+      },
+      tenant.ctx, userId
+    );
+    extraMemoIds.push(memo.id);
+
+    const before = await prisma.client.findUniqueOrThrow({ where: { id: clientId } });
+
+    const invoice = await convertMemoToInvoice(memo.id, [{ tagId: tag.id, sellingPrice: 36000 }], tenant.ctx, userId);
+    invoiceIds.push(invoice.id);
+
+    const afterSale = await prisma.client.findUniqueOrThrow({ where: { id: clientId } });
+    expect(Number(afterSale.currentBalance)).toBeCloseTo(Number(before.currentBalance) + Number(invoice.totalAmount));
+
+    const salesReturn = await createSalesReturn(
+      { invoiceId: invoice.id, items: [{ invoiceItemId: invoice.items[0].id }], reason: 'Dealer return' },
+      tenant.ctx, userId
+    );
+    expect(salesReturn.items[0].tagId).toBe(tag.id);
+
+    const returnedTag = await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } });
+    expect(returnedTag.status).toBe('IN_STOCK');
+
+    const afterReturn = await prisma.client.findUniqueOrThrow({ where: { id: clientId } });
+    expect(Number(afterReturn.currentBalance)).toBeCloseTo(Number(before.currentBalance));
+
+    // The memo itself is a closed historical record of the original conversion — a later return
+    // doesn't rewrite it, same "never edit history" rule D1 applies to the SalesInvoice.
+    const finalMemo = await prisma.memoOut.findUniqueOrThrow({ where: { id: memo.id } });
+    expect(finalMemo.status).toBe('CONVERTED');
+  });
+});
+
+describe('createOldGoldExchange (D4)', () => {
+  const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const testKarat = '22K'; // seeded in every DB by the karat_master migration (C1)
+
+  let tenant: TestTenant;
+  let userId: string;
+  let clientId: string;
+  const exchangeIds: string[] = [];
+  const metalStockIds: string[] = [];
+  const rateIds: string[] = [];
+
+  beforeAll(async () => {
+    tenant = await createTestTenant(`D4${suffix}`, ['invoice:create']);
+    userId = tenant.user.id;
+
+    const client = await prisma.client.create({
+      data: { companyId: tenant.company.id, clientCode: `TSTCL-D4-${suffix}`, name: 'Test Client', panNumber: 'ABCDE1234F', type: 'RETAIL' },
+    });
+    clientId = client.id;
+
+    const today = new Date(new Date().toISOString().split('T')[0]);
+    const rate = await prisma.metalRate.create({
+      data: { companyId: tenant.company.id, date: today, karat: testKarat, purity: 0.916, ratePerGram: 5000 },
+    });
+    rateIds.push(rate.id);
+  });
+
+  afterAll(async () => {
+    await cleanupJournalEntries(exchangeIds);
+    await prisma.oldGoldExchange.deleteMany({ where: { id: { in: exchangeIds } } });
+    await prisma.metalStock.deleteMany({ where: { id: { in: metalStockIds } } });
+    await prisma.metalRate.deleteMany({ where: { id: { in: rateIds } } });
+    await prisma.client.deleteMany({ where: { id: clientId } });
+    await cleanupTestTenant(tenant);
+    await prisma.$disconnect();
+  });
+
+  it('values net weight * rate with no deduction, credits the client, and tracks the metal', async () => {
+    const before = await prisma.client.findUniqueOrThrow({ where: { id: clientId } });
+
+    const exchange = await createOldGoldExchange(
+      { clientId, description: 'Old bangle', karat: testKarat, grossWeight: 10, stoneWeight: 2 },
+      tenant.ctx, userId
+    );
+    exchangeIds.push(exchange.id);
+    metalStockIds.push(exchange.metalStockId!);
+
+    expect(exchange.exchangeNumber).toMatch(/^OGX-/);
+    expect(Number(exchange.netWeight)).toBeCloseTo(8); // 10 - 2 stone weight
+    expect(Number(exchange.valuedAmount)).toBeCloseTo(8 * 5000); // netWeight * ratePerGram, no deduction
+
+    const after = await prisma.client.findUniqueOrThrow({ where: { id: clientId } });
+    expect(Number(after.currentBalance)).toBeCloseTo(Number(before.currentBalance) - 8 * 5000);
+
+    const stock = await prisma.metalStock.findUniqueOrThrow({ where: { id: exchange.metalStockId! } });
+    expect(Number(stock.netWeight)).toBeCloseTo(8);
+    expect(Number(stock.avgCostPerGram)).toBeCloseTo(5000);
+    expect(stock.sourceType).toBe('CUSTOMER_SUPPLIED');
+    expect(stock.sourceRef).toBe(exchange.exchangeNumber);
+
+    // F1: Dr Inventory (the metal that just came in) / Cr Accounts Receivable (the store credit —
+    // a negative receivable), balanced, valued at exactly what was credited to the client.
+    const entry = await getJournalEntry(exchange.id);
+    expect(entry).not.toBeNull();
+    expect(entry!.referenceType).toBe('OldGoldExchange');
+    expect(lineAmount(entry!, LEDGER_ACCOUNT.INVENTORY).debit).toBeCloseTo(8 * 5000);
+    expect(lineAmount(entry!, LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE).credit).toBeCloseTo(8 * 5000);
+  });
+
+  it('applies a deduction % to both the valuation and the metal stock cost basis', async () => {
+    const exchange = await createOldGoldExchange(
+      { clientId, description: 'Old ring', karat: testKarat, grossWeight: 5, deductionPercent: 10 },
+      tenant.ctx, userId
+    );
+    exchangeIds.push(exchange.id);
+    metalStockIds.push(exchange.metalStockId!);
+
+    const deductedRate = 5000 * 0.9;
+    expect(Number(exchange.valuedAmount)).toBeCloseTo(5 * deductedRate);
+
+    const stock = await prisma.metalStock.findUniqueOrThrow({ where: { id: exchange.metalStockId! } });
+    expect(Number(stock.avgCostPerGram)).toBeCloseTo(deductedRate);
+  });
+
+  it('rejects an unknown karat/purity code', async () => {
+    await expect(
+      createOldGoldExchange({ clientId, description: 'Fake piece', karat: '99K', grossWeight: 5 }, tenant.ctx, userId)
+    ).rejects.toThrow(/Unknown karat\/purity code/);
+  });
+
+  it('rejects a karat with no MetalRate on or before the exchange date', async () => {
+    await expect(
+      createOldGoldExchange({ clientId, description: 'Platinum piece', karat: 'PT', grossWeight: 5 }, tenant.ctx, userId)
+    ).rejects.toThrow(/No metal rate found/);
+  });
+});
+
+// F2: a standalone payment — an advance, or a payment against a client's general outstanding
+// balance — with no invoice to apply against yet. Reuses PMT- numbering and the same Cash/Bank vs
+// Accounts Receivable ledger entry applyPayment posts (F1); the only difference is there's no
+// SalesInvoice.paidAmount/balanceDue/status to update.
+describe('recordClientPayment (F2 — on-account payments)', () => {
+  const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+  let tenant: TestTenant;
+  let userId: string;
+  let clientId: string;
+  const paymentIds: string[] = [];
+  const f2InvoiceIds: string[] = [];
+
+  beforeAll(async () => {
+    tenant = await createTestTenant(`F2${suffix}`, ['invoice:create']);
+    userId = tenant.user.id;
+
+    const client = await prisma.client.create({
+      data: { companyId: tenant.company.id, clientCode: `TSTCL-F2-${suffix}`, name: 'Test Client', panNumber: 'ABCDE1234F', type: 'WHOLESALE' },
+    });
+    clientId = client.id;
+  });
+
+  afterAll(async () => {
+    await cleanupJournalEntries([...paymentIds, ...f2InvoiceIds]);
+    await prisma.invoicePayment.deleteMany({ where: { id: { in: paymentIds } } });
+    await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: f2InvoiceIds } } });
+    await prisma.salesInvoice.deleteMany({ where: { id: { in: f2InvoiceIds } } });
+    await prisma.client.deleteMany({ where: { id: clientId } });
+    await cleanupTestTenant(tenant);
+    await prisma.$disconnect();
+  });
+
+  it('records a payment with no invoiceId, credits the client, and posts a ledger entry', async () => {
+    const before = await prisma.client.findUniqueOrThrow({ where: { id: clientId } });
+
+    const payment = await recordClientPayment(
+      { clientId, paymentDate: new Date(), amount: 50000, mode: 'CASH' },
+      tenant.ctx, userId
+    );
+    paymentIds.push(payment.id);
+
+    expect(payment.paymentNumber).toMatch(/^PMT-/);
+    expect(payment.invoiceId).toBeNull();
+    expect(payment.clientId).toBe(clientId);
+
+    const after = await prisma.client.findUniqueOrThrow({ where: { id: clientId } });
+    expect(Number(after.currentBalance)).toBeCloseTo(Number(before.currentBalance) - 50000);
+
+    const entry = await getJournalEntry(payment.id);
+    expect(entry).not.toBeNull();
+    expect(entry!.referenceType).toBe('InvoicePayment');
+    expect(lineAmount(entry!, LEDGER_ACCOUNT.CASH_IN_HAND).debit).toBe(50000);
+    expect(lineAmount(entry!, LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE).credit).toBe(50000);
+  });
+
+  it('rejects a zero or negative amount', async () => {
+    await expect(
+      recordClientPayment({ clientId, paymentDate: new Date(), amount: 0, mode: 'CASH' }, tenant.ctx, userId)
+    ).rejects.toThrow(/must be positive/);
+    await expect(
+      recordClientPayment({ clientId, paymentDate: new Date(), amount: -100, mode: 'CASH' }, tenant.ctx, userId)
+    ).rejects.toThrow(/must be positive/);
+  });
+
+  it('is listed by listClientPayments alongside invoice-scoped payments for the same client', async () => {
+    const standalone = await recordClientPayment(
+      { clientId, paymentDate: new Date(), amount: 10000, mode: 'UPI' },
+      tenant.ctx, userId
+    );
+    paymentIds.push(standalone.id);
+
+    const invoice = await _createInvoice(
+      {
+        clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', branchId: tenant.branch.id,
+        items: [{
+          productCode: 'MISC', description: 'Test line', quantity: 1,
+          grossWeight: 1, netGoldWeight: 1, rateType: 'FIXED', goldRate: 5000,
+        }],
+        payments: [{ paymentDate: new Date(), amount: 5000, mode: 'CASH' }],
+      },
+      tenant.ctx, userId
+    );
+
+    const invoiceScoped = await prisma.invoicePayment.findFirstOrThrow({ where: { invoiceId: invoice.id } });
+
+    const payments = await listClientPayments(tenant.ctx, clientId);
+    const ids = payments.map((p) => p.id);
+    expect(ids).toContain(standalone.id);
+    expect(ids).toContain(invoiceScoped.id);
+
+    // Cleanup for this invoice specifically (not tracked by the outer invoiceIds array in this
+    // describe block, which only exists in the createInvoice describe above).
+    await cleanupJournalEntries([invoice.id, invoiceScoped.id]);
+    await prisma.invoicePayment.deleteMany({ where: { id: invoiceScoped.id } });
+    await prisma.taxInvoice.deleteMany({ where: { invoiceId: invoice.id } });
+    await prisma.salesInvoice.deleteMany({ where: { id: invoice.id } });
+  });
+});
+
+// H1: every invoice in a period, retail + wholesale together, filterable by salesperson. Rows
+// are created directly against SalesInvoice (not via createInvoice) so date/type/salesperson can
+// be controlled precisely, independent of the pricing/tax machinery getSalesRegister doesn't
+// touch — it only reads what's already there.
+describe('getSalesRegister (H1)', () => {
+  const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const d = (s: string) => new Date(s);
+
+  let tenant: TestTenant;
+  let clientId: string;
+  let salesPersonAId: string;
+  let salesPersonBId: string;
+  const invoiceIds: string[] = [];
+
+  beforeAll(async () => {
+    tenant = await createTestTenant(`REG${suffix}`, []);
+
+    const client = await prisma.client.create({
+      data: { companyId: tenant.company.id, clientCode: `TSTCL-REG-${suffix}`, name: 'Register Test Client', panNumber: 'ABCDE1234F', type: 'RETAIL' },
+    });
+    clientId = client.id;
+
+    // Plain User rows (no CompanyUser membership needed) — salesPersonId is a direct FK to
+    // User, unaffected by the multi-tenant migration's Role/CompanyUser changes.
+    const [spA, spB] = await Promise.all([
+      prisma.user.create({ data: { email: `test-reg-a-${suffix}@example.com`, password: 'x', name: 'Sales Person A' } }),
+      prisma.user.create({ data: { email: `test-reg-b-${suffix}@example.com`, password: 'x', name: 'Sales Person B' } }),
+    ]);
+    salesPersonAId = spA.id;
+    salesPersonBId = spB.id;
+
+    async function makeInvoice(invoiceDate: Date, invoiceType: string, salesPersonId: string, totalAmount: number) {
+      const inv = await prisma.salesInvoice.create({
+        data: {
+          companyId: tenant.company.id, branchId: tenant.branch.id,
+          invoiceNumber: `TSTINV-REG-${suffix}-${invoiceIds.length}`, clientId, invoiceDate, invoiceType,
+          salesPersonId, subtotal: totalAmount, totalAmount, balanceDue: totalAmount, status: 'ISSUED',
+        },
+      });
+      invoiceIds.push(inv.id);
+    }
+
+    await makeInvoice(d('2026-02-05'), 'RETAIL', salesPersonAId, 10000);
+    await makeInvoice(d('2026-02-10'), 'WHOLESALE', salesPersonBId, 50000);
+    await makeInvoice(d('2026-03-01'), 'RETAIL', salesPersonAId, 15000); // outside the test range below
+  });
+
+  afterAll(async () => {
+    await prisma.salesInvoice.deleteMany({ where: { id: { in: invoiceIds } } });
+    await prisma.client.deleteMany({ where: { id: clientId } });
+    await prisma.user.deleteMany({ where: { id: { in: [salesPersonAId, salesPersonBId] } } });
+    await cleanupTestTenant(tenant);
+    await prisma.$disconnect();
+  });
+
+  it('lists invoices within the date range and totals correctly', async () => {
+    const result = await getSalesRegister(tenant.ctx, { from: d('2026-02-01'), to: d('2026-02-28') });
+    expect(result.rows).toHaveLength(2);
+    expect(result.totals.count).toBe(2);
+    expect(result.totals.totalAmount).toBeCloseTo(60000);
+  });
+
+  it('breaks totals down by invoiceType', async () => {
+    const result = await getSalesRegister(tenant.ctx, { from: d('2026-02-01'), to: d('2026-02-28') });
+    expect(result.byType.RETAIL).toEqual({ count: 1, totalAmount: 10000 });
+    expect(result.byType.WHOLESALE).toEqual({ count: 1, totalAmount: 50000 });
+  });
+
+  it('filters by salesPersonId', async () => {
+    const result = await getSalesRegister(tenant.ctx, { from: d('2026-02-01'), to: d('2026-02-28'), salesPersonId: salesPersonAId });
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0].totalAmount).toBeCloseTo(10000);
+  });
+});

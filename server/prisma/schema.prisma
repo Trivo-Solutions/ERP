@@ -1,0 +1,2692 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ═══════════════════════════════════════════════════
+// SYSTEM / SHARED
+// ═══════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════
+// MULTI-TENANCY — Platform / Company / Branch / Membership
+// ═══════════════════════════════════════════════════
+//
+// Prototype scope (see CLAUDE.md multi-tenant blueprint): Company, CompanyUser, Branch,
+// UserBranchAccess, Role, Client, JewelryTag, SalesInvoice, InvoiceItem, NumberSequence.
+// Every other model still carries no companyId yet — that is Phase J, not this migration.
+
+// A company's own copy of a role — always company-owned, never global. The role definitions themselves
+// come from the versioned TRIVO Starter Package (modules/platform/starterPackage) and are COPIED into
+// each company at provisioning; later package versions never change an existing company's roles.
+// Reached only through
+// CompanyUser (a User has no direct roleId — see User below); this is what "company membership
+// is represented through CompanyUser" means for permissions specifically.
+model Role {
+  id          String        @id @default(cuid())
+  companyId   String
+  company     Company       @relation(fields: [companyId], references: [id])
+  name        String
+  displayName String
+  permissions String[]
+  memberships CompanyUser[]
+  invitations CompanyInvitation[]
+  createdAt   DateTime      @default(now())
+
+  @@unique([companyId, name])
+  @@index([companyId])
+  // composite-FK target: lets the database refuse a child that points at another company's Role
+  @@unique([id, companyId])
+  @@map("roles")
+}
+
+// The root of the tenant hierarchy. code is the "Company Code" half of the
+// Company Code + Username/Email + Password login. Seeded values (name/gstin/stateCode/
+// defaultCurrency) replace the old singleton SystemConfig COMPANY_* rows for this data.
+model Company {
+  id              String   @id @default(cuid())
+  code            String   @unique
+  name            String
+  gstin           String?
+  stateCode       String?
+  address         String?
+  defaultCurrency String   @default("INR")
+  // The TRIVO Starter Package version this company was provisioned with (NULL = predates starter
+  // packages, e.g. the original SEA company). Recorded once at provisioning; a newer package version
+  // never changes an existing company — updates would be an explicit, separate action.
+  starterPackageVersion   Int?
+  starterPackageAppliedAt DateTime?
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  branches         Branch[]
+  companyUsers     CompanyUser[]
+  roles            Role[]
+  clients          Client[]
+  jewelryTags      JewelryTag[]
+  salesInvoices    SalesInvoice[]
+  invoiceItems     InvoiceItem[]
+  numberSequences  NumberSequence[]
+  oldGoldExchanges OldGoldExchange[]
+  memoOuts         MemoOut[]
+  memoItems        MemoItem[]
+  stockAudits      StockAudit[]
+  branchTransfers  BranchTransfer[]
+  tagTemplates     TagTemplate[]
+  invoicePayments  InvoicePayment[]
+  salesReturns     SalesReturn[]
+  accounts         Account[]
+  journalEntries   JournalEntry[]
+  journalLines     JournalLine[]
+  costCenters      CostCenter[]
+  auditLogs        AuditLog[]
+  purchaseReturns      PurchaseReturn[]
+  supplierPayments     SupplierPayment[]
+  purchaseLots         PurchaseLot[]
+  poItemCategories     PoItemCategory[]
+  purchaseReturnItems  PurchaseReturnItem[]
+  purchaseOrders       PurchaseOrder[]
+  poItems              PoItem[]
+  goodsReceiptNotes    GoodsReceiptNote[]
+  grnItems             GrnItem[]
+  purchaseRequisitions PurchaseRequisition[]
+  prItems              PrItem[]
+  approvalHistory      ApprovalHistory[]
+  hallmarkingBatches   HallmarkingBatch[]
+  hallmarkingItems     HallmarkingItem[]
+  repairJobs           RepairJob[]
+  repairTransactions   RepairTransaction[]
+  designs              Design[]
+  designFiles          DesignFile[]
+  bomItems             BomItem[]
+  bomProcesses         BomProcess[]
+  costEstimates        CostEstimate[]
+  suppliers            Supplier[]
+  metalStocks          MetalStock[]
+  stoneLots            StoneLot[]
+  stoneLotSplits       StoneLotSplit[]
+  consumables          Consumable[]
+  consumableTxns       ConsumableTransaction[]
+  salesOrders          SalesOrder[]
+  orderItems           OrderItem[]
+  materialReservations MaterialReservation[]
+  clientNotifications  ClientNotification[]
+  jobCards             JobCard[]
+  jobProcesses         JobProcess[]
+  wipTracking          WipTracking[]
+  qcCheckpoints        QcCheckpoint[]
+  artisans             Artisan[]
+  karigarLedgers       KarigarLedger[]
+  processTolerances    ProcessTolerance[]
+  subcontractorInvoices SubcontractorInvoice[]
+  hardwareDevices      HardwareDevice[]
+  metalRates           MetalRate[]
+  priceMasters         PriceMaster[]
+  jewelryTagMaterials  JewelryTagMaterial[]
+  makingCharges        MakingCharge[]
+  tagEstimates         TagEstimate[]
+  tagEstimateItems     TagEstimateItem[]
+  estimateTemplates    EstimateTemplate[]
+  stockAuditItems      StockAuditItem[]
+  branchTransferItems  BranchTransferItem[]
+  salesReturnItems     SalesReturnItem[]
+  exportDocuments      ExportDocument[]
+  taxInvoices          TaxInvoice[]
+  systemConfigs        SystemConfig[]
+  userBranchAccess     UserBranchAccess[]
+  companyInvitations   CompanyInvitation[]
+  designCategories     DesignCategory[]
+  karatMasters         KaratMaster[]
+  productCategories    ProductCategory[]
+  subCategories        SubCategory[]
+  collections          Collection[]
+  materialCodes        MaterialCode[]
+  stockTypes           StockType[]
+  stoneTypes           StoneType[]
+  stoneGrades          StoneGrade[]
+
+  @@map("companies")
+}
+
+// Membership: ties a global User identity to one Company, with a company-owned Role and a
+// branch-access configuration (UserBranchAccess). One User may hold several CompanyUser rows
+// (one per company they work with) — see the multi-tenant blueprint's Option B reasoning.
+// username is optional and company-scoped (unique per company) — the "Username" half of the
+// login concept for companies that want short, non-email handles; email (on User) stays the
+// durable, globally-unique identity underneath (see blueprint §3's explicit email decision).
+model CompanyUser {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id])
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  roleId      String
+  role        Role     @relation(fields: [roleId, companyId], references: [id, companyId])
+  username    String?
+  // Company-specific employee data (moved off the global User in Phase 2 of company isolation).
+  // employeeId is unique PER COMPANY: Company A and Company B may each have an "E001".
+  employeeId  String?
+  department  String?
+  phone       String?
+  lastLoginAt DateTime?
+  // Explicit "sees every branch" flag — deliberately NOT "zero UserBranchAccess rows = unrestricted"
+  // (an ambiguous, fail-OPEN default). Default false: a membership with no branch grants and
+  // allBranches=false sees zero branches — fail-closed.
+  allBranches Boolean  @default(false)
+  isActive    Boolean  @default(true)
+  isDefault   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  branchAccess       UserBranchAccess[]
+  acceptedInvitation CompanyInvitation?
+
+  @@unique([companyId, userId])
+  @@unique([companyId, username])
+  @@unique([companyId, employeeId])
+  // Target of UserBranchAccess's composite FK — lets the DATABASE reject a grant whose companyId
+  // differs from the membership's own company.
+  @@unique([id, companyId])
+  @@index([userId])
+  @@map("company_users")
+}
+
+// One explicit branch grant for a restricted (allBranches=false) CompanyUser.
+// A grant of one branch to one company membership. companyId is stored directly (RLS + a plain
+// tenant filter) AND tied to both parents by COMPOSITE foreign keys — (companyUserId, companyId)
+// -> company_users(id, companyId) and (branchId, companyId) -> branches(id, companyId) — so the
+// database itself makes it impossible for a grant to link a membership of one company to a branch
+// of another, independent of any application check.
+model UserBranchAccess {
+  id            String      @id @default(cuid())
+  companyId     String
+  company       Company     @relation(fields: [companyId], references: [id])
+  companyUserId String
+  companyUser   CompanyUser @relation(fields: [companyUserId, companyId], references: [id, companyId], onDelete: Cascade)
+  branchId      String
+  branch        Branch      @relation(fields: [branchId, companyId], references: [id, companyId])
+  createdAt     DateTime    @default(now())
+
+  @@unique([companyUserId, branchId])
+  @@index([branchId])
+  @@index([companyId])
+  @@map("user_branch_access")
+}
+
+// Atomic, company-scoped, concurrency-safe document numbering — replaces the old global
+// "find latest matching prefix + 1" scan (shared/numbering.ts). Keyed by
+// (companyId, documentType, financialYear); financialYear is null for counters that aren't
+// year-scoped (e.g. tagNumber, whose "year" is really a (stockType, category) prefix baked
+// into documentType instead — see shared/numberSequence.ts).
+model NumberSequence {
+  id            String   @id @default(cuid())
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id])
+  documentType  String
+  financialYear Int?
+  lastValue     Int      @default(0)
+  updatedAt     DateTime @updatedAt
+
+  @@unique([companyId, documentType, financialYear])
+  @@map("number_sequences")
+}
+
+// User is a GLOBAL identity — deliberately NOT company-scoped (no companyId here). Company
+// membership, role, and branch access all live on CompanyUser instead. See the multi-tenant
+// blueprint §3 for the full reasoning (one person, one identity, N company memberships).
+// GLOBAL LOGIN IDENTITY ONLY: email, password hash, display name, active flag. Every fact about the
+// person INSIDE one company (employee id, department, phone, username, role, branch access, last
+// login there) lives on that company's CompanyUser membership row — so one person can belong to
+// several companies without either company seeing the other's data about them.
+model User {
+  id         String    @id @default(cuid())
+  email      String    @unique
+  password   String
+  name       String
+  isActive   Boolean   @default(true)
+  // Platform-level only — never exposed to a company (it would reveal activity in OTHER companies).
+  // A company sees CompanyUser.lastLoginAt instead, which is that company's own.
+  lastLogin  DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  companyMemberships       CompanyUser[]
+  auditLogs                AuditLog[]
+  karigarIssues            KarigarLedger[]       @relation("IssuedBy")
+  qcSignoffs               QcCheckpoint[]
+  wipEntries               WipTracking[]
+  requestedRequisitions    PurchaseRequisition[] @relation("PRRequester")
+  approvedRequisitions     PurchaseRequisition[] @relation("PRApprover")
+  performedApprovals       ApprovalHistory[]
+  submittedPOs             PurchaseOrder[]       @relation("POSubmitter")
+  approvedPOs              PurchaseOrder[]       @relation("POApprover")
+  tagsCreated              JewelryTag[]          @relation("TagCreatedBy")
+  transfersRequested       BranchTransfer[]      @relation("TransferRequester")
+  transfersApproved        BranchTransfer[]      @relation("TransferApprover")
+  invoicesSold             SalesInvoice[]
+  stockAuditsStarted       StockAudit[]
+  tagTemplatesCreated      TagTemplate[]
+  tagEstimatesCreated      TagEstimate[]
+  estimateTemplatesCreated EstimateTemplate[]
+  invitationsSent          CompanyInvitation[]   @relation("InvitationInviter")
+  platformAuditLogs        PlatformAuditLog[]
+
+  @@map("users")
+}
+
+// companyId is nullable, not required: audit entries are written from every service in the
+// codebase, including modules that aren't tenant-scoped yet (manufacturing/outsourcing/design —
+// dormant per CLAUDE.md — and procurement's PO/GRN/PR, still pending the 81-model rollout). A
+// row whose underlying table has no companyId of its own has no honest value to stamp here
+// either. NULL is also the fail-safe choice for the RLS policy below: `"companyId" = <session>`
+// never matches NULL, so an unscoped historical entry simply never appears in ANY company's
+// scoped view — it doesn't leak, it just isn't attributable yet.
+model AuditLog {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id])
+  tableName String
+  recordId  String
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  action    String
+  oldValues Json?
+  newValues Json?
+  ipAddress String?
+  userAgent String?
+  timestamp DateTime @default(now())
+
+  @@index([companyId])
+  @@index([tableName, recordId])
+  @@index([userId])
+  @@index([timestamp])
+  @@map("audit_logs")
+}
+
+// Audit events that belong to the TRIVO PLATFORM, not to any company (e.g. a company being
+// provisioned or suspended by an operator, or legacy audit rows that could not be attributed to a
+// company without guessing). Deliberately a SEPARATE table with no companyId: a company audit
+// event must never be written here, and this table is never exposed through any company route or
+// granted to the tenant runtime DB role (see prisma/production-rls-roles.sql). Written only via
+// createPlatformAuditEntry() in middleware/audit.ts.
+model PlatformAuditLog {
+  id          String   @id @default(cuid())
+  actorUserId String?
+  actor       User?    @relation(fields: [actorUserId], references: [id])
+  action      String
+  subjectType String?
+  subjectId   String?
+  metadata    Json?
+  timestamp   DateTime @default(now())
+
+  @@index([timestamp])
+  @@index([action])
+  @@map("platform_audit_logs")
+}
+
+// An explicit, pending offer for a person to join ONE company. This replaces the old behaviour
+// where createCompanyUser silently attached whichever global User already owned an email: a
+// membership is only ever created when the RECIPIENT accepts (proving control of the invitation via
+// its one-time token, and — if they already have a login — that login's password).
+//
+// The raw token is shown to the inviting admin exactly once (there is no email provider wired yet;
+// an email sender can deliver the same token later) and only its SHA-256 hash is stored. The
+// employee fields are staged here and only become a CompanyUser at acceptance.
+model CompanyInvitation {
+  id          String    @id @default(cuid())
+  companyId   String
+  company     Company   @relation(fields: [companyId], references: [id])
+  email       String // normalised lower-case: the address this invitation was issued to
+  roleId      String
+  role        Role      @relation(fields: [roleId, companyId], references: [id, companyId])
+  allBranches Boolean   @default(false)
+  branchIds   String[] // this company's branches; re-validated at acceptance
+  username    String?
+  employeeId  String?
+  department  String?
+  phone       String?
+  tokenHash   String    @unique
+  status      String    @default("PENDING") // PENDING | ACCEPTED | REVOKED (expiry is computed from expiresAt)
+  expiresAt   DateTime
+  // NULL for an invitation issued by a TRIVO platform operator (e.g. the first admin of a company,
+  // when that email already has a login elsewhere) — recorded in platform_audit_logs instead.
+  invitedById String?
+  invitedBy   User?     @relation("InvitationInviter", fields: [invitedById], references: [id])
+  acceptedAt  DateTime?
+  acceptedCompanyUserId String?      @unique
+  acceptedCompanyUser   CompanyUser? @relation(fields: [acceptedCompanyUserId], references: [id])
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([companyId, email])
+  @@index([companyId, status])
+  @@map("company_invitations")
+}
+
+// companyId direct — Phase 3. A physical scale/barcode/RFID device is registered to one
+// company's own branch counter — this is live (RS232 scale integration), not dormant.
+model HardwareDevice {
+  id         String    @id @default(cuid())
+  companyId  String
+  company    Company   @relation(fields: [companyId], references: [id])
+  deviceType String
+  deviceId   String
+  port       String?
+  baudRate   Int?
+  ipAddress  String?
+  location   String?
+  // The branch this device physically sits in (optional: NULL = company-wide). A branch-restricted user
+  // only sees / reads devices in their own branches. Tied to the branch by a composite FK so a device can
+  // never point at another company's branch.
+  branchId   String?
+  branch     Branch?   @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  isActive   Boolean   @default(true)
+  lastPing   DateTime?
+  metadata   Json?
+  createdAt  DateTime  @default(now())
+
+  @@unique([companyId, deviceId])
+  @@index([companyId])
+  @@index([branchId])
+  @@map("hardware_devices")
+}
+
+// Company-scoped key/value settings — each company owns its own copy of every key (unique on
+// [companyId, key], not on key alone), so one company changing e.g. DEFAULT_GOLD_MARGIN never
+// changes it for another. Previously a global table (a single `key @unique` row shared by every
+// company); see migration 20260924010000_system_config_tenant_scope.
+model SystemConfig {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id])
+  key       String
+  value     String
+  category  String
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, key])
+  @@index([companyId])
+  @@map("system_configs")
+}
+
+// ═══════════════════════════════════════════════════
+// MODULE 1: PRODUCT DESIGN & CAD/BOM VAULT
+// ═══════════════════════════════════════════════════
+
+model DesignCategory {
+  id      String   @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+  code    String
+  name    String
+  designs Design[]
+
+  @@unique([companyId, code])
+  @@index([companyId])
+  @@map("design_categories")
+}
+
+// companyId direct — Phase 3. Design/BOM/CostEstimate are dormant manufacturing modules (see
+// CLAUDE.md) but are scoped now for architectural completeness, per the Phase 3 rollout — a
+// piece's design lineage (JewelryTag.designId) must never resolve across a company boundary if
+// this module is ever activated.
+model Design {
+  id             String         @id @default(cuid())
+  companyId      String
+  company        Company        @relation(fields: [companyId], references: [id])
+  designCode     String
+  name           String
+  category       DesignCategory @relation(fields: [categoryId], references: [id])
+  categoryId     String
+  metalKarat     String
+  grossWeightMin Decimal        @db.Decimal(10, 4)
+  grossWeightMax Decimal        @db.Decimal(10, 4)
+  netWeightMin   Decimal        @db.Decimal(10, 4)
+  netWeightMax   Decimal        @db.Decimal(10, 4)
+  description    String?
+  status         String         @default("DRAFT")
+  version        Int            @default(1)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  designFiles   DesignFile[]
+  bomItems      BomItem[]
+  bomProcesses  BomProcess[]
+  costEstimates CostEstimate[]
+  orderItems    OrderItem[]
+  jobCards      JobCard[]
+  jewelryTags   JewelryTag[]
+
+  @@unique([companyId, designCode])
+  @@index([companyId])
+  @@index([status])
+  @@map("designs")
+}
+
+model DesignFile {
+  id         String   @id @default(cuid())
+  companyId  String
+  company    Company  @relation(fields: [companyId], references: [id])
+  design     Design   @relation(fields: [designId], references: [id], onDelete: Cascade)
+  designId   String
+  fileType   String
+  fileName   String
+  filePath   String
+  fileSize   BigInt?
+  mimeType   String?
+  version    Int      @default(1)
+  isActive   Boolean  @default(true)
+  uploadedAt DateTime @default(now())
+
+  @@index([companyId])
+  @@map("design_files")
+}
+
+model BomItem {
+  id             String  @id @default(cuid())
+  companyId      String
+  company        Company @relation(fields: [companyId], references: [id])
+  design         Design  @relation(fields: [designId], references: [id], onDelete: Cascade)
+  designId       String
+  materialType   String
+  materialCode   String
+  materialName   String
+  quantity       Decimal @db.Decimal(10, 4)
+  unit           String
+  karat          String?
+  quality        String?
+  sieveSize      String?
+  wastagePercent Decimal @default(0) @db.Decimal(5, 2)
+  sequence       Int     @default(0)
+
+  @@index([companyId])
+  @@map("bom_items")
+}
+
+model BomProcess {
+  id                String  @id @default(cuid())
+  companyId         String
+  company           Company @relation(fields: [companyId], references: [id])
+  design            Design  @relation(fields: [designId], references: [id], onDelete: Cascade)
+  designId          String
+  processName       String
+  sequence          Int
+  makingChargeType  String
+  makingChargeValue Decimal @db.Decimal(10, 2)
+  wastagePercent    Decimal @default(0) @db.Decimal(5, 2)
+  estimatedMinutes  Int?
+  isOutsourced      Boolean @default(false)
+
+  @@index([companyId])
+  @@map("bom_processes")
+}
+
+// companyId direct — Phase 3. A daily metal rate is each jeweler's OWN quoted/entered rate (used
+// directly in pricing — resolveMetalRate feeds createInvoice/createTagFromGrnItem/
+// createOldGoldExchange), not a shared public market feed with one true value — two companies
+// legitimately enter different rates. Every existing caller already carries a ctx.
+model MetalRate {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id])
+  date        DateTime @db.Date
+  karat       String
+  purity      Decimal  @db.Decimal(6, 4)
+  ratePerGram Decimal  @db.Decimal(12, 4)
+  currency    String   @default("INR")
+  source      String?
+  createdAt   DateTime @default(now())
+
+  @@unique([companyId, date, karat, currency])
+  @@index([companyId, date])
+  @@map("metal_rates")
+}
+
+// Fixed karat/purity list (C1). karat/metalKarat columns elsewhere (JewelryTag, PoItem,
+// MetalRate, MemoItem, InvoiceItem) stay free-text — this is the validation source of
+// truth for those writes, not a schema-wide FK migration.
+model KaratMaster {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+  code      String // "24K", "22K", "18K", "14K", "SILVER", "PT"
+  metalType String // GOLD | SILVER | PLATINUM
+  purity    Decimal  @db.Decimal(6, 4)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@unique([companyId, code])
+  @@index([companyId])
+  @@map("karat_master")
+}
+
+model CostEstimate {
+  id             String   @id @default(cuid())
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id])
+  design         Design   @relation(fields: [designId], references: [id])
+  designId       String
+  estimateNumber String
+  metalSpotRate  Decimal  @db.Decimal(12, 4)
+  metalCost      Decimal  @db.Decimal(12, 2)
+  stoneCost      Decimal  @db.Decimal(12, 2)
+  makingCharges  Decimal  @db.Decimal(12, 2)
+  wastageAmount  Decimal  @db.Decimal(12, 2)
+  totalCost      Decimal  @db.Decimal(12, 2)
+  marginPercent  Decimal  @db.Decimal(5, 2)
+  sellingPrice   Decimal  @db.Decimal(12, 2)
+  currency       String   @default("INR")
+  validUntil     DateTime
+  status         String   @default("DRAFT")
+  notes          String?
+  createdAt      DateTime @default(now())
+
+  @@unique([companyId, estimateNumber])
+  @@index([companyId])
+  @@map("cost_estimates")
+}
+
+// ═══════════════════════════════════════════════════
+// MODULE 2: PURCHASE & PROCUREMENT CONTROL
+// ═══════════════════════════════════════════════════
+
+// companyId direct — Phase 3. Reversed from the earlier "keep Supplier global" call: Supplier
+// carries real company-private data (GSTIN, PAN, bank account/IFSC, credit terms) — the same
+// class of private business-relationship data as Client, which is already company-scoped. It is
+// NOT reference/taxonomy data like ProductCategory or KaratMaster, so it doesn't belong in that
+// bucket.
+model Supplier {
+  id           String   @id @default(cuid())
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id])
+  supplierCode String
+  name         String
+  type         String
+  gstNumber    String?
+  panNumber    String?
+  address      String?
+  city         String?
+  state        String?
+  pincode      String?
+  contactName  String?
+  phone        String?
+  email        String?
+  bankName     String?
+  bankAccount  String?
+  bankIfsc     String?
+  creditLimit  Decimal? @db.Decimal(12, 2)
+  currentDue   Decimal  @default(0) @db.Decimal(12, 2)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  purchaseOrders PurchaseOrder[]
+  artisans       Artisan[]
+  returns        PurchaseReturn[]
+  payments       SupplierPayment[]
+
+  @@unique([companyId, supplierCode])
+  @@index([companyId])
+  // composite-FK target: lets the database refuse a child that points at another company's Supplier
+  @@unique([id, companyId])
+  @@map("suppliers")
+}
+
+// Goods sent back to a supplier (D3) — mirrors SalesReturn on the buy side. Scoped to tagged
+// finished-goods pieces only (JewelryTag.grnItemId set): the live post-pivot business path.
+// Deliberately doesn't touch Supplier.currentDue, PoItem.receivedQty/receivedWt, or the original
+// GRN row — procurement never wired currentDue as a live balance in the first place (nothing to
+// reverse), and PO/GRN receipts stay historical, same "never rewrite history" rule as SalesReturn.
+// companyId direct — Phase 2b (procurement tenant scoping). Resolved from ctx, cross-checked
+// against every returned tag's own companyId (see createPurchaseReturn) the same way every
+// other Phase 2 write validates ownership before touching anything.
+// Money paid OUT to a supplier — the mirror of InvoicePayment. Posts Dr Accounts Payable / Cr Cash-or-Bank
+// and reduces Supplier.currentDue (the live payable: intake adds to it, a return and a payment reduce it).
+// Not tied to a specific bill: it is a payment on the supplier's account (referenceNo/notes say what for).
+model SupplierPayment {
+  id            String   @id @default(cuid())
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id])
+  paymentNumber String
+  supplier      Supplier @relation(fields: [supplierId, companyId], references: [id, companyId])
+  supplierId    String
+  paymentDate   DateTime
+  amount        Decimal  @db.Decimal(12, 2)
+  mode          String
+  referenceNo   String?
+  notes         String?
+  createdById   String?
+  createdAt     DateTime @default(now())
+
+  @@unique([companyId, paymentNumber])
+  @@index([companyId])
+  @@index([supplierId])
+  @@map("supplier_payments")
+}
+
+model PurchaseReturn {
+  id           String   @id @default(cuid())
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id])
+  returnNumber String
+  supplier     Supplier @relation(fields: [supplierId, companyId], references: [id, companyId])
+  supplierId   String
+  returnDate   DateTime @default(now())
+  reason       String?
+  notes        String?
+  // totalAmount = value of the goods returned (excl. GST); taxAmount = the input GST reversed on
+  // them. What the supplier owes back (their credit/debit note) is the two together.
+  totalAmount  Decimal  @db.Decimal(12, 2)
+  taxAmount    Decimal  @default(0) @db.Decimal(12, 2)
+  createdAt    DateTime @default(now())
+
+  items PurchaseReturnItem[]
+
+  @@unique([companyId, returnNumber])
+  @@index([companyId])
+  // composite-FK target: lets the database refuse a child that points at another company's PurchaseReturn
+  @@unique([id, companyId])
+  @@map("purchase_returns")
+}
+
+model PurchaseReturnItem {
+  id        String         @id @default(cuid())
+  companyId String
+  company   Company        @relation(fields: [companyId], references: [id])
+  return    PurchaseReturn @relation(fields: [returnId, companyId], references: [id, companyId], onDelete: Cascade)
+  returnId  String
+  tag       JewelryTag     @relation(fields: [tagId, companyId], references: [id, companyId])
+  tagId     String
+  amount    Decimal        @db.Decimal(12, 2)
+  // Input GST reversed on this line — split the same way the original intake booked it.
+  cgst      Decimal        @default(0) @db.Decimal(12, 2)
+  sgst      Decimal        @default(0) @db.Decimal(12, 2)
+  igst      Decimal        @default(0) @db.Decimal(12, 2)
+
+  @@index([companyId])
+  @@map("purchase_return_items")
+}
+
+// companyId direct — Phase 2b. purchaseRequisitionId may point at a PR from the same company
+// only (enforced in convertToPO, mirroring the tag/branch cross-checks used everywhere else).
+model PurchaseOrder {
+  id                    String               @id @default(cuid())
+  companyId             String
+  company               Company              @relation(fields: [companyId], references: [id])
+  poNumber              String
+  supplier              Supplier             @relation(fields: [supplierId, companyId], references: [id, companyId])
+  supplierId            String
+  poType                String
+  status                String               @default("DRAFT")
+  orderDate             DateTime
+  expectedDate          DateTime?
+  currency              String               @default("INR")
+  exchangeRate          Decimal              @default(1) @db.Decimal(10, 4)
+  subtotal              Decimal              @default(0) @db.Decimal(12, 2)
+  taxAmount             Decimal              @default(0) @db.Decimal(12, 2)
+  totalAmount           Decimal              @default(0) @db.Decimal(12, 2)
+  notes                 String?
+  purchaseRequisitionId String?
+  purchaseRequisition   PurchaseRequisition? @relation(fields: [purchaseRequisitionId], references: [id])
+  submittedAt           DateTime?
+  submittedById         String?
+  submittedBy           User?                @relation("POSubmitter", fields: [submittedById], references: [id])
+  approvedAt            DateTime?
+  approvedById          String?
+  approvedBy            User?                @relation("POApprover", fields: [approvedById], references: [id])
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
+
+  poItems         PoItem[]
+  grns            GoodsReceiptNote[]
+  approvalHistory ApprovalHistory[]
+
+  @@unique([companyId, poNumber])
+  @@index([companyId])
+  @@index([status])
+  @@index([orderDate])
+  // composite-FK target: lets the database refuse a child that points at another company's PurchaseOrder
+  @@unique([id, companyId])
+  @@map("purchase_orders")
+}
+
+model PoItem {
+  id           String        @id @default(cuid())
+  companyId    String
+  company      Company       @relation(fields: [companyId], references: [id])
+  po           PurchaseOrder @relation(fields: [poId, companyId], references: [id, companyId], onDelete: Cascade)
+  poId         String
+  materialCode String
+  materialName String
+  materialType String
+  quantity     Decimal       @db.Decimal(10, 4)
+  weight       Decimal       @db.Decimal(10, 4)
+  // FINISHED_LOT lines only: the bag's net (metal) weight off the supplier's invoice. `weight` is the
+  // gross, so stone weight = weight - netWeight. Null on every other line.
+  netWeight    Decimal?      @db.Decimal(10, 4)
+  unit         String
+  karat        String?
+  ratePerUnit  Decimal       @db.Decimal(12, 4)
+  totalAmount  Decimal       @db.Decimal(12, 2)
+  receivedQty  Decimal       @default(0) @db.Decimal(10, 4)
+  receivedWt   Decimal       @default(0) @db.Decimal(10, 4)
+
+  // Input GST on this line, as charged on the supplier's bill. taxRate is a snapshot taken at PO
+  // time (like InvoiceItem.taxRate on the sell side) — a later HsnCode rate change never silently
+  // reprices a past purchase. 0 = no GST on the bill (unregistered supplier, or non-INR PO).
+  hsnCode   HsnCode? @relation(fields: [hsnCodeId], references: [id])
+  hsnCodeId String?
+  taxRate   Decimal  @default(0) @db.Decimal(5, 4)
+
+  grnItems GrnItem[]
+  // FINISHED_LOT lines only: what is in the bag, category by category (see PoItemCategory).
+  categories PoItemCategory[]
+
+  @@index([companyId])
+  // composite-FK target: lets the database refuse a child that points at another company's PoItem
+  @@unique([id, companyId])
+  @@map("po_items")
+}
+
+// One category's share of a FINISHED_LOT bag, as the supplier's invoice states it: e.g. Rings, 22K, gross
+// 40.000 g, stone 4.000 g, net 36.000 g, 12 pieces. A bag line carries one row per category (and per karat —
+// a karat is individual to its row). Gross/stone/net are the invoice's; pieces is optional (a supplier that
+// doesn't state a count leaves it null, and only the weights are tracked). Tagging a piece out of the bag
+// checks it against the row for its category (shared/purchaseLot.ts); the bag's cost, though, is one amount
+// on the line and is split across the pieces by net weight, not per category.
+model PoItemCategory {
+  id          String          @id @default(cuid())
+  companyId   String
+  company     Company         @relation(fields: [companyId], references: [id])
+  poItem      PoItem          @relation(fields: [poItemId, companyId], references: [id, companyId], onDelete: Cascade)
+  poItemId    String
+  category    ProductCategory @relation(fields: [categoryId, companyId], references: [id, companyId], onDelete: Restrict)
+  categoryId  String
+  karat       String
+  grossWeight Decimal         @db.Decimal(10, 4)
+  stoneWeight Decimal         @default(0) @db.Decimal(10, 4)
+  netWeight   Decimal         @db.Decimal(10, 4)
+  pieces      Int?
+  // Cost rates for this category, entered ONCE on the PO and pre-filled on every tag cut from it (each tag
+  // may still change them): metal cost ₹ per gram of net weight, making charge ₹ per gram, value-addition %
+  // of the metal value — the same three inputs the tag's Materials and MC & VA tabs take. All optional.
+  costRate    Decimal?        @db.Decimal(12, 4)
+  mcRate      Decimal?        @db.Decimal(12, 4)
+  vaPercent   Decimal?        @db.Decimal(5, 2)
+
+  @@unique([poItemId, categoryId, karat])
+  @@index([companyId])
+  @@index([categoryId])
+  @@map("po_item_categories")
+}
+
+model GoodsReceiptNote {
+  id            String        @id @default(cuid())
+  companyId     String
+  company       Company       @relation(fields: [companyId], references: [id])
+  grnNumber     String
+  po            PurchaseOrder @relation(fields: [poId, companyId], references: [id, companyId])
+  poId          String
+  receivedDate  DateTime
+  invoiceNumber String?
+  invoiceDate   DateTime?
+  status        String        @default("PENDING")
+  verifiedBy    String?
+  verifiedAt    DateTime?
+  notes         String?
+  createdAt     DateTime      @default(now())
+
+  // Receiving branch — required for FINISHED_GOODS lines, since those become a
+  // JewelryTag at a specific branch. Nullable so existing raw-material GRNs are unaffected.
+  branchId String?
+  branch   Branch? @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+
+  grnItems GrnItem[]
+
+  @@unique([companyId, grnNumber])
+  @@index([companyId])
+  @@index([branchId])
+  // Phase 4 Part N: reports.router.ts's dashboard "today's GRNs" count filters by
+  // companyId+createdAt.
+  @@index([companyId, createdAt])
+  // composite-FK target: lets the database refuse a child that points at another company's GoodsReceiptNote
+  @@unique([id, companyId])
+  @@map("goods_receipt_notes")
+}
+
+model GrnItem {
+  id              String           @id @default(cuid())
+  companyId       String
+  company         Company          @relation(fields: [companyId], references: [id])
+  grn             GoodsReceiptNote @relation(fields: [grnId, companyId], references: [id, companyId], onDelete: Cascade)
+  grnId           String
+  poItem          PoItem           @relation(fields: [poItemId, companyId], references: [id, companyId])
+  poItemId        String
+  invoiceQty      Decimal          @db.Decimal(10, 4)
+  invoiceWeight   Decimal          @db.Decimal(10, 4)
+  scaleWeight     Decimal          @db.Decimal(10, 4)
+  acceptedWeight  Decimal          @db.Decimal(10, 4)
+  variance        Decimal          @db.Decimal(10, 4)
+  variancePercent Decimal          @db.Decimal(5, 2)
+  isVerified      Boolean          @default(false)
+  batchNumber     String?
+
+  // Back-reference for FINISHED_GOODS lines: the single JewelryTag this receipt became.
+  jewelryTag JewelryTag?
+  // Back-reference for FINISHED_LOT lines: the lot (bag) this receipt opened, tagged piece by piece.
+  purchaseLot PurchaseLot?
+
+  // Input GST booked when this line was tagged into stock (createTagFromGrnItem): the taxable value
+  // (= the tag's costPrice) and the CGST/SGST or IGST split, by supplier state vs company state.
+  // Null/0 until tagged. This is what the purchase GST register reads, and what a purchase return
+  // reverses — so it is written once, at intake, and never recomputed.
+  taxableValue Decimal? @db.Decimal(12, 2)
+  inputCgst    Decimal  @default(0) @db.Decimal(12, 2)
+  inputSgst    Decimal  @default(0) @db.Decimal(12, 2)
+  inputIgst    Decimal  @default(0) @db.Decimal(12, 2)
+
+  @@index([companyId])
+  // composite-FK target: lets the database refuse a lot that points at another company's GrnItem
+  @@unique([id, companyId])
+  @@map("grn_items")
+}
+
+// A bag of finished pieces bought on ONE supplier invoice line (a category's worth: e.g. 14 rings, 22K,
+// 110.300 g net, ₹3,20,000) and tagged one piece at a time afterwards. Opened by createGRN when a
+// FINISHED_LOT PO line is received — that is also when the payable and input GST are booked (the whole
+// bill is owed the moment the goods arrive, not as each piece happens to get tagged), so tagging a piece
+// out of a lot moves no money: it only allocates a share of `totalCost` to that tag's costPrice.
+// What has been tagged so far is never stored as a counter — it is the live sum over the lot's tags, so a
+// later weight correction on a tag can't leave a stale total behind. `version` is only a row-lock token.
+model PurchaseLot {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id])
+  grnItemId   String   @unique
+  grnItem     GrnItem  @relation(fields: [grnItemId, companyId], references: [id, companyId], onDelete: Restrict)
+  label       String                      // the PO line's material name, e.g. "22K Gold Rings"
+  karat       String?                     // legacy single-karat lots only; a bag's karats live on its category rows
+  pieces      Int?                        // total piece count — only when every category row states one
+  grossWeight Decimal  @db.Decimal(10, 4)
+  netWeight   Decimal  @db.Decimal(10, 4)
+  totalCost   Decimal  @db.Decimal(12, 2) // taxable value of the whole lot; GST is on grn_items
+  status      String   @default("OPEN")   // OPEN | CLOSED
+  closedAt    DateTime?
+  closeNote   String?
+  version     Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  tags JewelryTag[]
+
+  @@unique([grnItemId, companyId])
+  @@index([companyId, status])
+  // composite-FK target: lets the database refuse a tag that points at another company's lot
+  @@unique([id, companyId])
+  @@map("purchase_lots")
+}
+
+// ═══════════════════════════════════════════════════
+// MODULE 3: INVENTORY & DIAMOND ASSORTMENT
+// ═══════════════════════════════════════════════════
+
+// companyId direct — Phase 3. A company's own physical metal vault (live: D4 old-gold-exchange
+// already writes here today, not just dormant manufacturing).
+model MetalStock {
+  id             String   @id @default(cuid())
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id])
+  stockCode      String
+  materialName   String
+  karat          String
+  purity         Decimal  @db.Decimal(6, 4)
+  grossWeight    Decimal  @db.Decimal(12, 4)
+  netWeight      Decimal  @db.Decimal(12, 4)
+  availableWt    Decimal  @db.Decimal(12, 4)
+  location       String?
+  sourceType     String
+  sourceRef      String?
+  avgCostPerGram Decimal  @db.Decimal(12, 4)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  reservations    MaterialReservation[]
+  oldGoldExchange OldGoldExchange?
+
+  @@unique([companyId, stockCode])
+  @@index([companyId])
+  @@index([karat])
+  @@index([location])
+  @@map("metal_stocks")
+}
+
+// A customer's old/used gold piece taken in and valued (D4) — credits the customer's own balance
+// (Client.currentBalance, same field a sale debits and a SalesReturn credits) as a standing store
+// credit redeemable against any future purchase, and adds the melted-down weight to the Metal
+// Vault (MetalStock, via the existing addMetalStock()) so the metal itself is tracked.
+model OldGoldExchange {
+  id               String      @id @default(cuid())
+  // Denormalized from clientId (Client is company-owned) — Phase 2 of the multi-tenant
+  // migration. Stamped from the authenticated tenant context, always cross-checked against
+  // the resolved client's own companyId at write time (see sales.service.ts).
+  companyId        String
+  company          Company     @relation(fields: [companyId], references: [id])
+  exchangeNumber   String
+  client           Client      @relation(fields: [clientId, companyId], references: [id, companyId])
+  clientId         String
+  exchangeDate     DateTime    @default(now())
+  description      String
+  karat            String
+  grossWeight      Decimal     @db.Decimal(10, 4)
+  stoneWeight      Decimal     @default(0) @db.Decimal(10, 4)
+  netWeight        Decimal     @db.Decimal(10, 4)
+  // MetalRate snapshot at exchangeDate — like costPrice on JewelryTag, a later rate change must
+  // not silently reprice a past exchange.
+  ratePerGram      Decimal     @db.Decimal(12, 4)
+  deductionPercent Decimal     @default(0) @db.Decimal(5, 2)
+  valuedAmount     Decimal     @db.Decimal(12, 2)
+  metalStockId     String?     @unique
+  metalStock       MetalStock? @relation(fields: [metalStockId], references: [id])
+  notes            String?
+  createdAt        DateTime    @default(now())
+
+  @@unique([companyId, exchangeNumber])
+  @@index([companyId])
+  @@map("old_gold_exchanges")
+}
+
+// companyId direct — Phase 3. A company's own physical stone/diamond inventory.
+model StoneLot {
+  id           String   @id @default(cuid())
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id])
+  lotNumber    String
+  stoneType    String
+  shape        String
+  color        String?
+  clarity      String?
+  cut          String?
+  caratWeight  Decimal  @db.Decimal(10, 4)
+  pieces       Int
+  sieveSize    String?
+  certNumber   String?
+  certLab      String?
+  avgCostPerCt Decimal  @db.Decimal(12, 4)
+  totalCost    Decimal  @db.Decimal(12, 2)
+  availableCts Decimal  @db.Decimal(10, 4)
+  availablePcs Int
+  location     String?
+  status       String   @default("AVAILABLE")
+  sourceRef    String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  parentSplits StoneLotSplit[]       @relation("ParentLot")
+  childSplits  StoneLotSplit[]       @relation("ChildLot")
+  reservations MaterialReservation[]
+
+  @@unique([companyId, lotNumber])
+  @@index([companyId])
+  @@index([stoneType, status])
+  @@map("stone_lots")
+}
+
+model StoneLotSplit {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id])
+  parentLot   StoneLot @relation("ParentLot", fields: [parentLotId], references: [id])
+  parentLotId String
+  childLot    StoneLot @relation("ChildLot", fields: [childLotId], references: [id])
+  childLotId  String
+  splitWeight Decimal  @db.Decimal(10, 4)
+  splitPieces Int
+  splitDate   DateTime @default(now())
+  reason      String?
+
+  @@index([companyId])
+  @@map("stone_lot_splits")
+}
+
+// companyId direct — Phase 3. A company's own consumable-supplies inventory.
+model Consumable {
+  id           String   @id @default(cuid())
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id])
+  itemCode     String
+  name         String
+  category     String
+  currentQty   Decimal  @db.Decimal(12, 4)
+  unit         String
+  reorderLevel Decimal  @db.Decimal(12, 4)
+  location     String?
+  avgCost      Decimal? @db.Decimal(12, 4)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  transactions ConsumableTransaction[]
+
+  @@unique([companyId, itemCode])
+  @@index([companyId])
+  @@map("consumables")
+}
+
+model ConsumableTransaction {
+  id           String     @id @default(cuid())
+  companyId    String
+  company      Company    @relation(fields: [companyId], references: [id])
+  consumable   Consumable @relation(fields: [consumableId], references: [id])
+  consumableId String
+  type         String
+  quantity     Decimal    @db.Decimal(12, 4)
+  balanceAfter Decimal    @db.Decimal(12, 4)
+  reference    String?
+  notes        String?
+  createdAt    DateTime   @default(now())
+
+  @@index([companyId])
+  @@map("consumable_transactions")
+}
+
+// ═══════════════════════════════════════════════════
+// MODULE 4: ORDER MANAGEMENT & MATERIAL RESERVATION
+// ═══════════════════════════════════════════════════
+
+model Client {
+  id             String   @id @default(cuid())
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id])
+  clientCode     String
+  name           String
+  type           String
+  gstNumber      String?
+  panNumber      String?
+  // Form 60 (the declaration a customer with no PAN gives instead) is on file. With panNumber, this is
+  // what lets a sale over ₹2,00,000 go through — see shared/compliance.ts assertPanIfRequired.
+  form60Received Boolean  @default(false)
+  // "Door No" — the building/house/flat line of the address; street/area beyond that still
+  // has nowhere else to go, so it stays folded in here too, same as before this pair existed.
+  address        String?
+  city           String?
+  district       String?
+  state          String?
+  pincode        String?
+  country        String   @default("India")
+  phone          String?
+  email          String?
+  contactPerson  String?
+  creditLimit    Decimal? @db.Decimal(12, 2)
+  currentBalance Decimal  @default(0) @db.Decimal(12, 2)
+  pricingTier    String   @default("STANDARD")
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+
+  salesOrders      SalesOrder[]
+  memoOuts         MemoOut[]
+  salesInvoices    SalesInvoice[]
+  salesReturns     SalesReturn[]
+  oldGoldExchanges OldGoldExchange[]
+  payments         InvoicePayment[]
+  repairJobs       RepairJob[]
+  manufacturedTags JewelryTag[]
+
+  @@unique([companyId, clientCode])
+  @@index([companyId])
+  // composite-FK target: lets the database refuse a child that points at another company's Client
+  @@unique([id, companyId])
+  @@map("clients")
+}
+
+// companyId direct — Phase 3. SalesOrder is a PRODUCTION order (CLAUDE.md: not a retail/
+// wholesale sale — do not use it for counter/dealer selling), dormant, but scoped for
+// architectural completeness. Denormalized from Client, same reasoning as everywhere else.
+model SalesOrder {
+  id                  String    @id @default(cuid())
+  companyId           String
+  company             Company   @relation(fields: [companyId], references: [id])
+  orderNumber         String
+  client              Client    @relation(fields: [clientId], references: [id])
+  clientId            String
+  orderDate           DateTime
+  deliveryDate        DateTime?
+  priority            String    @default("NORMAL")
+  status              String    @default("PENDING")
+  specialInstructions String?
+  advanceAmount       Decimal   @default(0) @db.Decimal(12, 2)
+  advanceType         String?
+  advanceRef          String?
+  totalEstimated      Decimal?  @db.Decimal(12, 2)
+  currency            String    @default("INR")
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  orderItems    OrderItem[]
+  reservations  MaterialReservation[]
+  notifications ClientNotification[]
+  jobCards      JobCard[]
+
+  @@unique([companyId, orderNumber])
+  @@index([companyId])
+  @@index([status, orderDate])
+  @@map("sales_orders")
+}
+
+model OrderItem {
+  id             String     @id @default(cuid())
+  companyId      String
+  company        Company    @relation(fields: [companyId], references: [id])
+  order          SalesOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId        String
+  design         Design     @relation(fields: [designId], references: [id])
+  designId       String
+  quantity       Int
+  customizations Json?
+  referencePhoto String?
+  unitPrice      Decimal    @db.Decimal(12, 2)
+  totalPrice     Decimal    @db.Decimal(12, 2)
+  status         String     @default("PENDING")
+
+  jobCards JobCard[]
+
+  @@index([companyId])
+  @@map("order_items")
+}
+
+model MaterialReservation {
+  id              String      @id @default(cuid())
+  companyId       String
+  company         Company     @relation(fields: [companyId], references: [id])
+  order           SalesOrder  @relation(fields: [orderId], references: [id])
+  orderId         String
+  reservationType String
+  metalStock      MetalStock? @relation(fields: [metalStockId], references: [id])
+  metalStockId    String?
+  stoneLot        StoneLot?   @relation(fields: [stoneLotId], references: [id])
+  stoneLotId      String?
+  reservedWeight  Decimal     @db.Decimal(10, 4)
+  reservedPieces  Int?
+  status          String      @default("ACTIVE")
+  reservedAt      DateTime    @default(now())
+
+  @@index([companyId])
+  @@map("material_reservations")
+}
+
+model ClientNotification {
+  id        String     @id @default(cuid())
+  companyId String
+  company   Company    @relation(fields: [companyId], references: [id])
+  order     SalesOrder @relation(fields: [orderId], references: [id])
+  orderId   String
+  type      String
+  milestone String
+  message   String
+  phone     String?
+  email     String?
+  sentAt    DateTime?
+  status    String     @default("PENDING")
+  error     String?
+
+  @@index([companyId])
+  @@map("client_notifications")
+}
+
+// ═══════════════════════════════════════════════════
+// MODULE 5: IN-HOUSE MANUFACTURING & WIP
+// ═══════════════════════════════════════════════════
+
+// companyId direct — Phase 3. Dormant (manufacturing), scoped for architectural completeness.
+model JobCard {
+  id             String      @id @default(cuid())
+  companyId      String
+  company        Company     @relation(fields: [companyId], references: [id])
+  jobNumber      String
+  order          SalesOrder? @relation(fields: [orderId], references: [id])
+  orderId        String?
+  orderItem      OrderItem?  @relation(fields: [orderItemId], references: [id])
+  orderItemId    String?
+  design         Design      @relation(fields: [designId], references: [id])
+  designId       String
+  batchSize      Int         @default(1)
+  jobType        String      @default("PRODUCTION")
+  status         String      @default("CREATED")
+  rfidTag        String?     @unique
+  barcodeData    String?     @unique
+  issuedWeight   Decimal     @db.Decimal(10, 4)
+  returnedWeight Decimal     @default(0) @db.Decimal(10, 4)
+  scrapWeight    Decimal     @default(0) @db.Decimal(10, 4)
+  netWeight      Decimal?    @db.Decimal(10, 4)
+  currentProcess String?
+  priority       String      @default("NORMAL")
+  notes          String?
+  completedAt    DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  processes        JobProcess[]
+  wipTracking      WipTracking[]
+  qcCheckpoints    QcCheckpoint[]
+  repairJobs       RepairJob[]
+  hallmarkingItems HallmarkingItem[]
+  jewelryTags      JewelryTag[]
+
+  @@unique([companyId, jobNumber])
+  @@index([companyId])
+  @@index([status])
+  // Phase 4 Part N: covers reports.router.ts's dashboard/wip-summary counts and
+  // manufacturing.service.ts's getFactoryFloorStatus — all filter by companyId+status together.
+  @@index([companyId, status])
+  @@map("job_cards")
+}
+
+model JobProcess {
+  id              String    @id @default(cuid())
+  companyId       String
+  company         Company   @relation(fields: [companyId], references: [id])
+  jobCard         JobCard   @relation(fields: [jobCardId], references: [id], onDelete: Cascade)
+  jobCardId       String
+  processName     String
+  sequence        Int
+  assignedArtisan String?
+  workstation     String?
+  status          String    @default("PENDING")
+  startTime       DateTime?
+  endTime         DateTime?
+  issuedWeight    Decimal?  @db.Decimal(10, 4)
+  returnedWeight  Decimal?  @db.Decimal(10, 4)
+  lossWeight      Decimal?  @db.Decimal(10, 4)
+  lossPercent     Decimal?  @db.Decimal(5, 2)
+  notes           String?
+
+  wipEntries   WipTracking[]
+  qcCheckpoint QcCheckpoint?
+
+  @@index([companyId])
+  @@map("job_processes")
+}
+
+model WipTracking {
+  id             String     @id @default(cuid())
+  companyId      String
+  company        Company    @relation(fields: [companyId], references: [id])
+  jobCard        JobCard    @relation(fields: [jobCardId], references: [id])
+  jobCardId      String
+  process        JobProcess @relation(fields: [processId], references: [id])
+  processId      String
+  worker         User       @relation(fields: [workerId], references: [id])
+  workerId       String
+  issuedWeight   Decimal    @db.Decimal(10, 4)
+  returnedWeight Decimal    @default(0) @db.Decimal(10, 4)
+  scrapWeight    Decimal    @default(0) @db.Decimal(10, 4)
+  lossWeight     Decimal    @default(0) @db.Decimal(10, 4)
+  lossPercent    Decimal    @default(0) @db.Decimal(5, 2)
+  scaleReading   Decimal?   @db.Decimal(10, 4)
+  deviceId       String?
+  timestamp      DateTime   @default(now())
+
+  @@index([companyId])
+  @@index([jobCardId, processId])
+  @@map("wip_tracking")
+}
+
+model QcCheckpoint {
+  id            String     @id @default(cuid())
+  companyId     String
+  company       Company    @relation(fields: [companyId], references: [id])
+  jobCard       JobCard    @relation(fields: [jobCardId], references: [id])
+  jobCardId     String
+  process       JobProcess @relation(fields: [processId], references: [id])
+  processId     String     @unique
+  inspector     User       @relation(fields: [inspectorId], references: [id])
+  inspectorId   String
+  result        String
+  checklistData Json?
+  defects       Json?
+  stoneCount    Int?
+  stoneSecure   Boolean    @default(true)
+  notes         String?
+  signedAt      DateTime   @default(now())
+
+  @@index([companyId])
+  @@map("qc_checkpoints")
+}
+
+// ═══════════════════════════════════════════════════
+// MODULE 6: OUTSOURCING & JOB WORK CONTROL
+// ═══════════════════════════════════════════════════
+
+// companyId direct — Phase 3. A karigar (subcontractor) is a company's own labour relationship —
+// same private-business-relationship class as Supplier/Client. Dormant (outsourcing module).
+model Artisan {
+  id              String    @id @default(cuid())
+  companyId       String
+  company         Company   @relation(fields: [companyId], references: [id])
+  artisanCode     String
+  name            String
+  type            String
+  specializations String[]
+  phone           String?
+  address         String?
+  supplier        Supplier? @relation(fields: [supplierId], references: [id])
+  supplierId      String?
+  metalBalance    Decimal   @default(0) @db.Decimal(10, 4)
+  isActive        Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+
+  ledgerEntries KarigarLedger[]
+  invoices      SubcontractorInvoice[]
+
+  @@unique([companyId, artisanCode])
+  @@index([companyId])
+  @@map("artisans")
+}
+
+model KarigarLedger {
+  id              String   @id @default(cuid())
+  companyId       String
+  company         Company  @relation(fields: [companyId], references: [id])
+  artisan         Artisan  @relation(fields: [artisanId], references: [id])
+  artisanId       String
+  date            DateTime
+  transactionType String
+  metalType       String
+  karat           String?
+  issuedWeight    Decimal  @default(0) @db.Decimal(10, 4)
+  returnedWeight  Decimal  @default(0) @db.Decimal(10, 4)
+  scrapWeight     Decimal  @default(0) @db.Decimal(10, 4)
+  lossWeight      Decimal  @default(0) @db.Decimal(10, 4)
+  lossPercent     Decimal  @default(0) @db.Decimal(5, 2)
+  balanceAfter    Decimal  @db.Decimal(10, 4)
+  jobCardRef      String?
+  issuedBy        User     @relation("IssuedBy", fields: [issuedById], references: [id])
+  issuedById      String
+  notes           String?
+  createdAt       DateTime @default(now())
+
+  @@index([companyId])
+  @@index([artisanId, date])
+  @@map("karigar_ledger")
+}
+
+// companyId direct — Phase 3. A manufacturing QC tolerance/wastage POLICY (max loss %, deduction
+// rate) is a business decision each company sets for itself, not a universal engineering
+// constant — same reasoning as MakingCharge, not KaratMaster.
+model ProcessTolerance {
+  id             String  @id @default(cuid())
+  companyId      String
+  company        Company @relation(fields: [companyId], references: [id])
+  processName    String
+  maxLossPercent Decimal @db.Decimal(5, 2)
+  deductionRate  Decimal @db.Decimal(10, 4)
+  alertThreshold Decimal @db.Decimal(5, 2)
+
+  @@unique([companyId, processName])
+  @@index([companyId])
+  @@map("process_tolerances")
+}
+
+model SubcontractorInvoice {
+  id            String    @id @default(cuid())
+  companyId     String
+  company       Company   @relation(fields: [companyId], references: [id])
+  invoiceNumber String
+  artisan       Artisan   @relation(fields: [artisanId], references: [id])
+  artisanId     String
+  invoiceDate   DateTime
+  periodFrom    DateTime
+  periodTo      DateTime
+  chargeType    String
+  grossAmount   Decimal   @db.Decimal(12, 2)
+  deductions    Decimal   @default(0) @db.Decimal(12, 2)
+  netPayable    Decimal   @db.Decimal(12, 2)
+  status        String    @default("DRAFT")
+  items         Json?
+  paidAt        DateTime?
+  paymentRef    String?
+  notes         String?
+  createdAt     DateTime  @default(now())
+
+  @@unique([companyId, invoiceNumber])
+  @@index([companyId])
+  @@map("subcontractor_invoices")
+}
+
+// ═══════════════════════════════════════════════════
+// MODULE 7: QUALITY ASSURANCE, REPAIRS & COMPLIANCE
+// ═══════════════════════════════════════════════════
+
+// companyId direct — Phase 2b. Required (no live data predates this migration — see CLAUDE.md —
+// so there's no historical-row ambiguity to accommodate with a nullable column here).
+model HallmarkingBatch {
+  id          String    @id @default(cuid())
+  companyId   String
+  company     Company   @relation(fields: [companyId], references: [id])
+  batchNumber String
+  centerName  String
+  sentDate    DateTime
+  returnDate  DateTime?
+  status      String    @default("SENT")
+  itemCount   Int
+  notes       String?
+  createdAt   DateTime  @default(now())
+
+  items HallmarkingItem[]
+
+  @@unique([companyId, batchNumber])
+  @@index([companyId])
+  // composite-FK target: lets the database refuse a child that points at another company's HallmarkingBatch
+  @@unique([id, companyId])
+  @@map("hallmarking_batches")
+}
+
+// G2: a hallmarking item used to require a JobCard (manufacturing lineage), so a purchased
+// finished-goods piece (no JobCard — see CLAUDE.md §3) could never be sent for hallmarking.
+// jobCardId is now optional and tagId is the bought-in alternative; createHallmarkingBatch
+// enforces "at least one of the two" at the app layer (no DB CHECK constraint — same style as
+// every other optional-FK pair in this schema, e.g. JewelryTag.jobCardId/designId).
+model HallmarkingItem {
+  id              String           @id @default(cuid())
+  companyId       String
+  company         Company          @relation(fields: [companyId], references: [id])
+  batch           HallmarkingBatch @relation(fields: [batchId, companyId], references: [id, companyId])
+  batchId         String
+  jobCard         JobCard?         @relation(fields: [jobCardId], references: [id])
+  jobCardId       String?
+  tag             JewelryTag?      @relation(fields: [tagId, companyId], references: [id, companyId], onDelete: Restrict)
+  tagId           String?
+  huid            String?
+  bisStamp        String?
+  karat           String
+  netWeight       Decimal          @db.Decimal(10, 4)
+  inscriptionCode String?
+  isVerified      Boolean          @default(false)
+
+  @@index([companyId])
+  @@map("hallmarking_items")
+}
+
+// G1: extended for the post-pivot "customer brings a piece in to fix" flow, on top of the
+// original manufacturing QC-failure/rework use. clientName/originalJobCardId are untouched
+// (still free-text/optional, for that older flow) — clientId and tagId are the new, optional
+// links to a real Client and the actual JewelryTag under repair. receivedDate/deliveredDate give
+// explicit "in/out" tracking beyond the generic status string; invoiceId (set once billed via
+// billRepairJob) makes charging idempotent — a repair can't be billed twice.
+model RepairJob {
+  id                String        @id @default(cuid())
+  companyId         String
+  company           Company       @relation(fields: [companyId], references: [id])
+  repairNumber      String
+  originalJobCard   JobCard?      @relation(fields: [originalJobCardId], references: [id])
+  originalJobCardId String?
+  client            Client?       @relation(fields: [clientId, companyId], references: [id, companyId], onDelete: Restrict)
+  clientId          String?
+  tag               JewelryTag?   @relation(fields: [tagId, companyId], references: [id, companyId], onDelete: Restrict)
+  tagId             String?
+  repairType        String
+  returnReason      String
+  clientName        String?
+  status            String        @default("RECEIVED")
+  additionalMetal   Decimal       @default(0) @db.Decimal(10, 4)
+  metalRecovered    Decimal       @default(0) @db.Decimal(10, 4)
+  repairCost        Decimal?      @db.Decimal(12, 2)
+  estimatedDays     Int?
+  receivedDate      DateTime      @default(now())
+  deliveredDate     DateTime?
+  invoice           SalesInvoice? @relation(fields: [invoiceId, companyId], references: [id, companyId], onDelete: Restrict)
+  invoiceId         String?       @unique
+  notes             String?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  transactions RepairTransaction[]
+
+  @@unique([companyId, repairNumber])
+  @@index([companyId])
+  // the relation is one-to-one (invoiceId is @unique), so its composite-FK form needs a matching composite unique
+  @@unique([invoiceId, companyId])
+  @@map("repair_jobs")
+}
+
+model RepairTransaction {
+  id          String    @id @default(cuid())
+  companyId   String
+  company     Company   @relation(fields: [companyId], references: [id])
+  repairJob   RepairJob @relation(fields: [repairJobId], references: [id])
+  repairJobId String
+  type        String
+  weight      Decimal?  @db.Decimal(10, 4)
+  pieces      Int?
+  costValue   Decimal?  @db.Decimal(12, 2)
+  notes       String?
+  createdAt   DateTime  @default(now())
+
+  @@index([companyId])
+  @@map("repair_transactions")
+}
+
+// ═══════════════════════════════════════════════════
+// MODULE 8: SALES, WHOLESALING & EXPORT
+// ═══════════════════════════════════════════════════
+
+model MemoOut {
+  id             String   @id @default(cuid())
+  // Direct, required — Phase 2 of the multi-tenant migration. branchId is stamped from the
+  // branch the memo is physically sent out from (never inferred from a tag afterward — this
+  // is exactly the fix for convertMemoToInvoice's earlier "derive branch from the first
+  // resolved tag" workaround: the memo now carries its own branch from the moment it's
+  // created, so conversion reads it directly instead of guessing).
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id])
+  branchId       String
+  branch         Branch   @relation(fields: [branchId, companyId], references: [id, companyId])
+  memoNumber     String
+  client         Client   @relation(fields: [clientId, companyId], references: [id, companyId])
+  clientId       String
+  sentDate       DateTime
+  returnDeadline DateTime
+  status         String   @default("OUT")
+  totalValue     Decimal  @default(0) @db.Decimal(12, 2)
+  alertSent      Boolean  @default(false)
+  notes          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  items MemoItem[]
+
+  @@unique([companyId, memoNumber])
+  @@index([companyId, branchId])
+  @@index([status, returnDeadline])
+  // Phase 4 Part N: checkMemoAlerts (sales.service.ts) queries exactly this shape scoped by
+  // companyId (fixed to be company-scoped in Phase 4 Part D — see that function's own comment);
+  // the existing (status, returnDeadline) index has no companyId prefix, so it can't narrow to one
+  // company before scanning every company's OUT-status memos.
+  @@index([companyId, status, returnDeadline])
+  // composite-FK target: lets the database refuse a child that points at another company's MemoOut
+  @@unique([id, companyId])
+  @@map("memo_outs")
+}
+
+model MemoItem {
+  id             String      @id @default(cuid())
+  // Denormalized from the parent MemoOut at create time.
+  companyId      String
+  company        Company     @relation(fields: [companyId], references: [id])
+  memo           MemoOut     @relation(fields: [memoId, companyId], references: [id, companyId], onDelete: Cascade)
+  memoId         String
+  productCode    String
+  description    String
+  huid           String?
+  karat          String?
+  pieces         Int
+  grossWeight    Decimal     @db.Decimal(10, 4)
+  netGoldWeight  Decimal     @db.Decimal(10, 4)
+  stoneWeight    Decimal     @default(0) @db.Decimal(10, 4)
+  estimatedValue Decimal     @db.Decimal(12, 2)
+  returnedPieces Int         @default(0)
+  status         String      @default("OUT")
+  tagId          String?
+  tag            JewelryTag? @relation(fields: [tagId, companyId], references: [id, companyId], onDelete: Restrict)
+
+  @@index([companyId])
+  @@map("memo_items")
+}
+
+model Branch {
+  id           String   @id @default(cuid())
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id])
+  branchCode   String
+  name         String
+  address      String?
+  city         String?
+  state        String?
+  phone        String?
+  email        String?
+  managerName  String?
+  isHeadOffice Boolean  @default(false)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  tags              JewelryTag[]
+  transfersFrom     BranchTransfer[]   @relation("FromBranch")
+  transfersTo       BranchTransfer[]   @relation("ToBranch")
+  goodsReceiptNotes GoodsReceiptNote[]
+  stockAudits       StockAudit[]
+  branchAccess      UserBranchAccess[]
+  hardwareDevices   HardwareDevice[]
+  salesInvoices     SalesInvoice[]
+  memoOuts          MemoOut[]
+
+  @@unique([companyId, branchCode])
+  @@unique([id, companyId]) // composite-FK target for UserBranchAccess
+  @@index([companyId])
+  @@map("branches")
+}
+
+// A physical stock count for one branch (E3) — snapshots that branch's IN_STOCK tags as
+// "expected," staff scan pieces to check them off. Report-only: closing an audit never mutates
+// JewelryTag.status or branchId — a missing/unexpected finding is a fact recorded here for a
+// person to act on later (e.g. via retireTag or a branch transfer), not an automatic side effect.
+model StockAudit {
+  id          String    @id @default(cuid())
+  // Direct — Phase 2 of the multi-tenant migration. Denormalized from branchId (validated to
+  // match at creation) so this table can be filtered/RLS'd without a join up to branches.
+  companyId   String
+  company     Company   @relation(fields: [companyId], references: [id])
+  auditNumber String
+  branch      Branch    @relation(fields: [branchId, companyId], references: [id, companyId])
+  branchId    String
+  status      String    @default("IN_PROGRESS") // IN_PROGRESS | COMPLETED
+  startedById String
+  startedBy   User      @relation(fields: [startedById], references: [id])
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+  notes       String?
+
+  items StockAuditItem[]
+
+  @@unique([companyId, auditNumber])
+  @@index([companyId, branchId])
+  // composite-FK target: lets the database refuse a child that points at another company's StockAudit
+  @@unique([id, companyId])
+  @@map("stock_audits")
+}
+
+model StockAuditItem {
+  id        String     @id @default(cuid())
+  companyId String
+  company   Company    @relation(fields: [companyId], references: [id])
+  audit     StockAudit @relation(fields: [auditId, companyId], references: [id, companyId], onDelete: Cascade)
+  auditId   String
+  tag       JewelryTag @relation(fields: [tagId, companyId], references: [id, companyId])
+  tagId     String
+  // true = system expected this tag IN_STOCK at this branch when the audit started. A row with
+  // expected=true, found=false at completion means "missing"; expected=false, found=true means
+  // "found something the system didn't expect here" (wrong branch, or not IN_STOCK at all).
+  expected Boolean
+  found    Boolean    @default(false)
+  foundAt  DateTime?
+
+  @@unique([auditId, tagId])
+  @@index([companyId])
+  @@map("stock_audit_items")
+}
+
+model JewelryTag {
+  id             String           @id @default(cuid())
+  // Direct, denormalized company ownership — NOT purely inferred through Branch. Every write
+  // path (createTag, createTagFromGrnItem) stamps this from the authenticated tenant context,
+  // and every read path filters on it explicitly (see tagging.service.ts) rather than trusting
+  // a join through branchId alone. See the multi-tenant blueprint's RLS-denormalization rule.
+  companyId      String
+  company        Company          @relation(fields: [companyId], references: [id])
+  tagNumber      String
+  jobCardId      String?
+  jobCard        JobCard?         @relation(fields: [jobCardId], references: [id])
+  designId       String?
+  design         Design?          @relation(fields: [designId], references: [id])
+  // Purchase lineage for finished goods bought (not manufactured) into stock — one tag per GRN item.
+  grnItemId      String?          @unique
+  grnItem        GrnItem?         @relation(fields: [grnItemId], references: [id])
+  // Purchase lineage for a piece tagged out of a bought-in lot (bag) — many tags per lot, unlike
+  // grnItemId. costPrice on such a tag is its allocated share of the lot's cost, fixed at creation.
+  purchaseLotId  String?
+  purchaseLot    PurchaseLot?     @relation(fields: [purchaseLotId, companyId], references: [id, companyId], onDelete: Restrict)
+  branchId       String
+  branch         Branch           @relation(fields: [branchId, companyId], references: [id, companyId])
+  name           String
+  makeType       String           @default("GOLD")
+  metalType      String
+  metalKarat     String?
+  grossWeight    Decimal          @db.Decimal(10, 4)
+  netWeight      Decimal          @db.Decimal(10, 4)
+  stoneWeight    Decimal          @default(0) @db.Decimal(10, 4)
+  huid           String?
+  settingType    String?
+  costPrice      Decimal          @default(0) @db.Decimal(12, 2)
+  sellingPrice   Decimal          @default(0) @db.Decimal(12, 2)
+  // The making-charge rate (₹/gram) and VA/wastage% actually decided for this piece at tagging
+  // time — auto-suggested from the MakingCharge master but overridable there, and the final,
+  // possibly-overridden value is what gets saved here. Null only for tags that predate this column
+  // (or came in via GRN intake, which has no MC/VA step) — every downstream consumer that reflects
+  // this piece's price (Estimation, direct-invoice PER_GRAM pricing) must prefer these over a fresh
+  // master lookup when present, so a later master-rate change never silently re-prices a piece an
+  // executive already decided on.
+  saleMcRate     Decimal?         @db.Decimal(12, 4)
+  saleVaPercent  Decimal?         @db.Decimal(5, 2)
+  // The MC & VA tab's Cost side (what was actually paid in labour/wastage, on top of the material
+  // rows' own cost) — added so editing a tag can round-trip Cost Price exactly, the same way
+  // saleMcRate/saleVaPercent already let Selling Price round-trip. Previously this pair only ever
+  // existed inside the browser form: it got folded into costPrice at save time and then had
+  // nowhere to be read back from, so re-opening a tag for edit always showed it blank, and saving
+  // again (even for an unrelated field) silently dropped the markup back out of costPrice. Null
+  // for tags created before this column (or via GRN intake, which has no MC/VA step at all).
+  costMcRate     Decimal?         @db.Decimal(12, 4)
+  costVaPercent  Decimal?         @db.Decimal(5, 2)
+  status         String           @default("IN_STOCK")
+  notes          String?
+  // Nullable at the DB level only for backward compatibility with tags created before this
+  // existed — application code requires both this and categoryId for every new tag (see
+  // createTag/createTagFromGrnItem), since the tag number format depends on both codes.
+  stockTypeId    String?
+  stockType      StockType?       @relation(fields: [stockTypeId, companyId], references: [id, companyId], onDelete: Restrict)
+  categoryId     String?
+  category       ProductCategory? @relation(fields: [categoryId, companyId], references: [id, companyId], onDelete: Restrict)
+  subCategoryId  String?
+  subCategory    SubCategory?     @relation(fields: [subCategoryId, companyId], references: [id, companyId], onDelete: Restrict)
+  collectionId   String?
+  collection     Collection?      @relation(fields: [collectionId, companyId], references: [id, companyId], onDelete: Restrict)
+  // Which vendor/manufacturer this piece was sourced from — a Client (type "MANUFACTURER"),
+  // reusing the party master rather than a separate table (CLAUDE.md: reuse and extend).
+  manufacturerId String?
+  manufacturer   Client?          @relation(fields: [manufacturerId, companyId], references: [id, companyId], onDelete: Restrict)
+  createdById    String
+  createdBy      User             @relation("TagCreatedBy", fields: [createdById], references: [id])
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  memoItems           MemoItem[]
+  transferItems       BranchTransferItem[]
+  materials           JewelryTagMaterial[]
+  // A tag can appear on more than one InvoiceItem over its lifetime — sold, then returned (D1)
+  // flips it back to IN_STOCK, then it can be sold again on a later invoice. No longer 1:1.
+  invoiceItems        InvoiceItem[]
+  salesReturnItems    SalesReturnItem[]
+  purchaseReturnItems PurchaseReturnItem[]
+  stockAuditItems     StockAuditItem[]
+  repairJobs          RepairJob[]
+  hallmarkingItems    HallmarkingItem[]
+  estimates           TagEstimate[]
+
+  @@unique([companyId, tagNumber])
+  @@index([companyId, branchId, status])
+  @@index([status])
+  @@index([branchId])
+  @@index([purchaseLotId])
+  // composite-FK target: lets the database refuse a child that points at another company's JewelryTag
+  @@unique([id, companyId])
+  @@map("jewelry_tags")
+}
+
+model BranchTransfer {
+  id             String    @id @default(cuid())
+  // Direct — Phase 2. Both fromBranch/toBranch are additionally, explicitly validated at the
+  // service layer to belong to this SAME companyId (a same-company-on-both-ends invariant no
+  // FK alone can express) — see tagging.service.ts: createTransfer().
+  companyId      String
+  company        Company   @relation(fields: [companyId], references: [id])
+  transferNumber String
+  fromBranchId   String
+  fromBranch     Branch    @relation("FromBranch", fields: [fromBranchId, companyId], references: [id, companyId])
+  toBranchId     String
+  toBranch       Branch    @relation("ToBranch", fields: [toBranchId, companyId], references: [id, companyId])
+  status         String    @default("DRAFT")
+  requestedById  String
+  requestedBy    User      @relation("TransferRequester", fields: [requestedById], references: [id])
+  approvedById   String?
+  approvedBy     User?     @relation("TransferApprover", fields: [approvedById], references: [id])
+  approvedAt     DateTime?
+  dispatchedAt   DateTime?
+  receivedAt     DateTime?
+  notes          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  items BranchTransferItem[]
+
+  @@unique([companyId, transferNumber])
+  @@index([companyId])
+  @@index([status])
+  // composite-FK target: lets the database refuse a child that points at another company's BranchTransfer
+  @@unique([id, companyId])
+  @@map("branch_transfers")
+}
+
+model BranchTransferItem {
+  id         String         @id @default(cuid())
+  companyId  String
+  company    Company        @relation(fields: [companyId], references: [id])
+  transfer   BranchTransfer @relation(fields: [transferId, companyId], references: [id, companyId], onDelete: Cascade)
+  transferId String
+  tag        JewelryTag     @relation(fields: [tagId, companyId], references: [id, companyId])
+  tagId      String
+
+  @@index([companyId])
+  @@map("branch_transfer_items")
+}
+
+// ═══════════════════════════════════════════════════
+// MASTERS — Reference Data
+// ═══════════════════════════════════════════════════
+
+model ProductCategory {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+  code      String
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  subCategories SubCategory[]
+  jewelryTags   JewelryTag[]
+  makingCharges MakingCharge[]
+  invoiceItems  InvoiceItem[]
+  poItemCategories PoItemCategory[]
+
+  @@unique([companyId, code])
+  @@index([companyId])
+  // composite-FK target: lets the database refuse a child that points at another company's ProductCategory
+  @@unique([id, companyId])
+  @@map("product_categories")
+}
+
+model SubCategory {
+  id         String          @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+  code       String
+  name       String
+  categoryId String
+  category   ProductCategory @relation(fields: [categoryId, companyId], references: [id, companyId])
+  isActive   Boolean         @default(true)
+  createdAt  DateTime        @default(now())
+
+  jewelryTags JewelryTag[]
+
+  @@unique([companyId, code])
+  @@index([companyId])
+  // composite-FK target: lets the database refuse a child that points at another company's SubCategory
+  @@unique([id, companyId])
+  @@map("sub_categories")
+}
+
+model Collection {
+  id          String   @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+  code        String
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  jewelryTags JewelryTag[]
+
+  @@unique([companyId, code])
+  @@index([companyId])
+  // composite-FK target: lets the database refuse a child that points at another company's Collection
+  @@unique([id, companyId])
+  @@map("collections")
+}
+
+model MaterialCode {
+  id           String   @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+  code         String
+  name         String
+  materialType String
+  // Karat/purity this material code represents (KaratMaster.code convention, e.g. "22K" for a
+  // "G22" gold code) — only meaningful for materialType "METAL". Free-text string, not a FK, to
+  // match every other karat field in the app (JewelryTag.metalKarat, InvoiceItem.karat). Drives
+  // two things: NewTagPage.tsx auto-derives the tag's own metalKarat from whichever METAL
+  // material row carries the most weight, and MakingCharge resolution matches on it (see
+  // MakingCharge.karat) so wastage/VA can vary by karat, not just by category.
+  karat        String?
+  unit         String   @default("GM")
+  description  String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  tagMaterials  JewelryTagMaterial[]
+  makingCharges MakingCharge[]
+
+  @@unique([companyId, code])
+  @@index([companyId])
+  // composite-FK target: lets the database refuse a child that points at another company's MaterialCode
+  @@unique([id, companyId])
+  @@map("material_codes")
+}
+
+model HsnCode {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  description String?
+  gstRate     Decimal  @db.Decimal(5, 4)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  invoiceItems InvoiceItem[]
+  poItems      PoItem[]
+
+  @@map("hsn_codes")
+}
+
+// A saved thermal-label layout for the TSC TTP-244 Pro (TSPL). `layout` holds the element list
+// (bound-field/literal text, barcode, QR, box/line) in mm coordinates — converted to 203dpi dots
+// only at generation time (tsplGenerator.ts), so the same row also drives the visual designer's
+// on-screen canvas. One row can carry a `front` and `back` wing for a two-wing paper tag; a
+// single-wing template just uses `front`.
+model TagTemplate {
+  id          String   @id @default(cuid())
+  // Direct — Phase 2. isDefault is scoped per company at the service layer (setting one
+  // default unsets any other default WITHIN THE SAME company only).
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id])
+  name        String
+  isDefault   Boolean  @default(false)
+  widthMm     Decimal  @db.Decimal(6, 2)
+  heightMm    Decimal  @db.Decimal(6, 2)
+  gapMm       Decimal  @default(2.0) @db.Decimal(6, 2)
+  layout      Json
+  createdById String?
+  createdBy   User?    @relation(fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([companyId])
+  @@map("tag_templates")
+}
+
+// A saved, immutable price quote worked up for a specific JewelryTag — read-only breakdown of its
+// materials, editable rates/making-charge/VA to work up a customer quote. Deliberately a snapshot,
+// not a live view: saving one never writes back to JewelryTag/JewelryTagMaterial (same cost-price
+// immutability principle CLAUDE.md already applies to JewelryTag.costPrice), and every save creates
+// a new row instead of overwriting the last one, giving a natural history of quotes for a tag.
+// companyId direct — Phase 3. A saved price quote against a company-owned JewelryTag — live,
+// operational, money-related data.
+model TagEstimate {
+  id               String            @id @default(cuid())
+  companyId        String
+  company          Company           @relation(fields: [companyId], references: [id])
+  tagId            String
+  tag              JewelryTag        @relation(fields: [tagId, companyId], references: [id, companyId])
+  estimateNumber   String
+  items            TagEstimateItem[]
+  // Making-charge (flat ₹/gram labour rate) + VA/wastage (% of metal value) — same two-sided
+  // cost/sale shape as NewTagPage.tsx's MC & VA tab, applied once against total metal weight/value
+  // rather than per material line (see estimation.service.ts for the exact formula).
+  costMcRate       Decimal?          @db.Decimal(12, 4)
+  costVaPercent    Decimal?          @db.Decimal(5, 2)
+  saleMcRate       Decimal?          @db.Decimal(12, 4)
+  saleVaPercent    Decimal?          @db.Decimal(5, 2)
+  totalCostAmount  Decimal           @db.Decimal(12, 2)
+  totalSaleAmount  Decimal           @db.Decimal(12, 2)
+  // Indicative GST on the estimate — snapshotted at save time (same "a later rate change must
+  // never silently reprice a past record" principle as InvoiceItem.taxRate/PriceMaster), not
+  // read live from HsnCode. Matches the flat 3% jewellery rate already hardcoded for INR sales
+  // elsewhere (NewSalePage.tsx, DEFAULT_HSN_CODE); non-INR estimates get 0, same convention.
+  taxRate          Decimal           @default(0.03) @db.Decimal(5, 4)
+  gstAmount        Decimal           @db.Decimal(12, 2)
+  netPayableAmount Decimal           @db.Decimal(12, 2)
+  currency         String            @default("INR")
+  validUntil       DateTime?
+  notes            String?
+  createdById      String?
+  createdBy        User?             @relation(fields: [createdById], references: [id])
+  createdAt        DateTime          @default(now())
+
+  // Hand-off to the billing counter. OPEN (just a quote) -> SENT (the estimator sent it to billing; it now
+  // shows up in the billing screen's estimate search) -> INVOICED (billed; invoiceId says which invoice —
+  // one estimate can only be billed once). The customer name/phone are optional and exist only so the biller
+  // can find "Ramesh's estimate" by name.
+  status           String            @default("OPEN")
+  sentToBillingAt  DateTime?
+  sentById         String?
+  customerName     String?
+  customerPhone    String?
+  invoice          SalesInvoice?     @relation(fields: [invoiceId, companyId], references: [id, companyId], onDelete: Restrict)
+  invoiceId        String?
+
+  @@unique([companyId, estimateNumber])
+  @@index([companyId, status])
+  @@index([companyId])
+  @@index([tagId])
+  // composite-FK target: lets the database refuse a child that points at another company's TagEstimate
+  @@unique([id, companyId])
+  @@map("tag_estimates")
+}
+
+// One material line snapshotted onto a TagEstimate at save time — same field shape as
+// JewelryTagMaterial's own rate/amount columns, but copied, not referenced, so a later edit to the
+// tag's real materials (or the master rate cards) never reprices a past quote.
+model TagEstimateItem {
+  id           String      @id @default(cuid())
+  companyId    String
+  company      Company     @relation(fields: [companyId], references: [id])
+  estimateId   String
+  estimate     TagEstimate @relation(fields: [estimateId, companyId], references: [id, companyId], onDelete: Cascade)
+  code         String
+  materialType String
+  name         String?
+  weight       Decimal     @db.Decimal(10, 4)
+  unit         String      @default("GM")
+  costRate     Decimal?    @db.Decimal(12, 4)
+  costAmount   Decimal?    @db.Decimal(12, 2)
+  saleRate     Decimal?    @db.Decimal(12, 4)
+  saleAmount   Decimal?    @db.Decimal(12, 2)
+
+  @@index([companyId])
+  @@map("tag_estimate_items")
+}
+
+// A saved print layout for a customer-facing estimate document (paper size configurable per
+// template, not fixed to A4 — see widthMm/heightMm below), designed via a drag-and-drop
+// canvas — same shape/precedent as TagTemplate (thermal label layout) but for the Estimation
+// module's printout, which prints from `estimation.router.ts`, not tagging. `layout` holds a flat
+// element list (bound-field/literal text, box/line) in mm coordinates plus one repeating
+// "materialsTable" element whose row count follows the estimate's own item count — never a fixed
+// number of rows, since a piece's material list varies. Sale-side data only: matches the rest of
+// the Estimation module's "no cost data, ever" contract.
+// companyId direct — Phase 3. Same treatment as TagTemplate (thermal label layout) — each
+// company customizes its own estimate print layout.
+model EstimateTemplate {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     Company  @relation(fields: [companyId], references: [id])
+  name        String
+  isDefault   Boolean  @default(false)
+  // Configurable, not fixed to A4 — the real printer this prints to may be a narrow continuous-
+  // roll receipt/thermal printer (e.g. an Epson POS unit), not a sheet-fed A4 printer. heightMm is
+  // still stored (the designer canvas needs a bounded height to lay out against, and it seeds the
+  // print CSS's min-height), but content is free to run longer than it on an actual roll.
+  widthMm     Decimal  @db.Decimal(6, 2)
+  heightMm    Decimal  @db.Decimal(6, 2)
+  layout      Json
+  createdById String?
+  createdBy   User?    @relation(fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([companyId])
+  @@map("estimate_templates")
+}
+
+// GST state-code master. Client.state / Branch.state / Supplier.state are free text (customer-
+// entered state names) — this table lets sales code resolve that free text to the 2-digit GST
+// state code needed to compare against COMPANY_STATE_CODE for CGST/SGST vs IGST (see B2).
+model StateMaster {
+  id       String   @id @default(cuid())
+  code     String   @unique
+  name     String   @unique
+  aliases  String[] @default([])
+  isActive Boolean  @default(true)
+
+  @@map("state_master")
+}
+
+// How a piece is held — e.g. "Ready Stock", "Approval Stock", "Karigar Stock". Its `code` is
+// meant to be short (a single letter is the common case, e.g. "R"/"A"/"K") since it becomes the
+// first segment of the tag number (see NumberGen.tag in shared/numbering.ts): a tag number is
+// StockType.code + ProductCategory.code + a 5-digit sequence scoped to that exact combination —
+// e.g. "RRNG00001" for the first Ready-stock Ring.
+model StockType {
+  id          String   @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+  code        String
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  jewelryTags JewelryTag[]
+
+  @@unique([companyId, code])
+  @@index([companyId])
+  // composite-FK target: lets the database refuse a child that points at another company's StockType
+  @@unique([id, companyId])
+  @@map("stock_types")
+}
+
+model StoneType {
+  id          String   @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+  code        String
+  name        String
+  // Base gem identity only — e.g. one "Diamond" row, one "Ruby" row. Grading attributes
+  // (shape/color/clarity/cut/quality) live on StoneGrade instead: a single stone type is
+  // reused across every shape/clarity/cut combination rather than needing a separate row
+  // per combination (Round-VVS-EF, Baguette-VVS-EF, ... would otherwise all need their own
+  // StoneType). 'DIAMOND' vs 'STONE' (colored stone) still lives here since it's intrinsic
+  // to the gem itself, not a per-grade attribute.
+  itemType    String   @default("STONE")
+  // Default measurement unit for this gem — carats for stone/diamond pieces (the common case),
+  // grams for anything bought/tracked by weight instead (e.g. a bulk colour-stone lot). Mirrors
+  // MaterialCode.unit's GM/CT/PC pattern; tagging reads this to set a picked stone row's unit
+  // instead of always hardcoding CT.
+  unit        String   @default("CT")
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  stoneGrades StoneGrade[]
+
+  @@unique([companyId, code])
+  @@index([companyId])
+  // composite-FK target: lets the database refuse a child that points at another company's StoneType
+  @@unique([id, companyId])
+  @@map("stone_types")
+}
+
+// A specific, reusable shape/color/clarity/cut (diamond) or quality (colored stone)
+// combination for a StoneType — defined once (e.g. "Diamond — Round D VVS1 Excellent"),
+// then referenced by any number of PriceMaster rows over time (repricing the same
+// combination) and by JewelryTagMaterial (valuing a purchased stone against it). This is
+// the reuse layer: Price Master only ever picks a Grade and sets a price, it never re-enters
+// classification.
+model StoneGrade {
+  id          String    @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+  stoneTypeId String
+  stoneType   StoneType @relation(fields: [stoneTypeId, companyId], references: [id, companyId])
+  shape       String?
+  color       String?
+  clarity     String?
+  cut         String?
+  quality     String?
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+
+  priceMasters PriceMaster[]
+  tagMaterials JewelryTagMaterial[]
+
+  @@index([stoneTypeId])
+  @@index([companyId])
+  // composite-FK target: lets the database refuse a child that points at another company's StoneGrade
+  @@unique([id, companyId])
+  @@map("stone_grades")
+}
+
+// companyId direct — Phase 3. A stone rate card is a company's own pricing policy (like
+// MakingCharge), not a universal market constant — two companies legitimately price the same
+// StoneGrade differently.
+model PriceMaster {
+  id            String     @id @default(cuid())
+  companyId     String
+  company       Company    @relation(fields: [companyId], references: [id])
+  itemType      String
+  stoneGradeId  String
+  stoneGrade    StoneGrade @relation(fields: [stoneGradeId, companyId], references: [id, companyId])
+  // Snapshot of the Grade's classification at write time — same "don't let a later master
+  // edit silently reprice/reclassify history" reasoning as the HSN taxRate snapshot on
+  // InvoiceItem.
+  shape         String?
+  color         String?
+  clarity       String?
+  cut           String?
+  weightFrom    Decimal?   @db.Decimal(10, 4)
+  weightTo      Decimal?   @db.Decimal(10, 4)
+  quality       String?
+  pricePerCarat Decimal    @db.Decimal(12, 4)
+  priceUnit     String     @default("PER_CARAT")
+  effectiveDate DateTime   @default(now())
+  notes         String?
+  isActive      Boolean    @default(true)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  @@index([companyId])
+  @@index([itemType, stoneGradeId])
+  @@map("price_masters")
+}
+
+model JewelryTagMaterial {
+  id             String        @id @default(cuid())
+  companyId      String
+  company        Company       @relation(fields: [companyId], references: [id])
+  tagId          String
+  tag            JewelryTag    @relation(fields: [tagId, companyId], references: [id, companyId], onDelete: Cascade)
+  materialCodeId String?
+  materialCode   MaterialCode? @relation(fields: [materialCodeId, companyId], references: [id, companyId], onDelete: Restrict)
+  // Bridges a stone row to the PriceMaster rate card (C4) without disturbing materialCode, which
+  // stays the generic material catalogue used elsewhere (incl. dormant manufacturing BOM). Only
+  // meaningful for a non-METAL row; additive/nullable so nothing existing is affected. Points at
+  // a specific Grade (shape/color/clarity/cut or quality), not the raw StoneType, so valuation
+  // by weight matches the exact combination rather than an arbitrary grade of that gem.
+  stoneGradeId   String?
+  stoneGrade     StoneGrade?   @relation(fields: [stoneGradeId, companyId], references: [id, companyId], onDelete: Restrict)
+  code           String
+  materialType   String
+  size           String?
+  pieces         Int?
+  weight         Decimal       @db.Decimal(10, 4)
+  unit           String        @default("GM")
+  costRate       Decimal?      @db.Decimal(12, 4)
+  costAmount     Decimal?      @db.Decimal(12, 2)
+  saleRate       Decimal?      @db.Decimal(12, 4)
+  saleAmount     Decimal?      @db.Decimal(12, 2)
+
+  @@index([companyId])
+  @@map("jewelry_tag_materials")
+}
+
+// companyId direct — Phase 3. A company's own making-charge/VA% pricing policy, not universal
+// reference data.
+model MakingCharge {
+  id                 String           @id @default(cuid())
+  companyId          String
+  company            Company          @relation(fields: [companyId], references: [id])
+  materialCodeId     String?
+  materialCode       MaterialCode?    @relation(fields: [materialCodeId, companyId], references: [id, companyId], onDelete: Restrict)
+  // Karat/purity match dimension (KaratMaster.code convention, e.g. "18K"/"22K") — separate from
+  // materialCodeId, which stays the generic-material flat-rate lookup (non-metal rows on the
+  // Materials tab, e.g. clasps/findings). A METAL row's karat comes from its MaterialCode's own
+  // `karat` field (see MaterialCode.karat below); this column is what a making-charge row itself
+  // is pinned to, e.g. "22K gold necklaces carry 18% VA, 18K carries 22%". Null = any karat.
+  karat              String?
+  categoryId         String?
+  category           ProductCategory? @relation(fields: [categoryId, companyId], references: [id, companyId], onDelete: Restrict)
+  makeType           String?
+  wastagePercent     Decimal          @default(0) @db.Decimal(5, 2)
+  saleWastagePercent Decimal          @default(0) @db.Decimal(5, 2)
+  makingCharge       Decimal          @default(0) @db.Decimal(12, 4)
+  makingChargeType   String           @default("PER_GRAM")
+  effectiveDate      DateTime         @default(now())
+  notes              String?
+  isActive           Boolean          @default(true)
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  @@index([companyId])
+  @@index([isActive])
+  @@map("making_charges")
+}
+
+model SalesInvoice {
+  id             String    @id @default(cuid())
+  // Direct, never inferred from clientId or from line items (see the multi-tenant blueprint's
+  // §7 finding: an invoice header previously had no branch at all, and company must not be
+  // inferred through a possibly-shared Client row). Stamped from the authenticated tenant
+  // context at creation; branchId is a required business field validated against the caller's
+  // branch access — see createInvoice() in sales.service.ts.
+  companyId      String
+  company        Company   @relation(fields: [companyId], references: [id])
+  branchId       String
+  branch         Branch    @relation(fields: [branchId, companyId], references: [id, companyId])
+  invoiceNumber  String
+  client         Client    @relation(fields: [clientId, companyId], references: [id, companyId])
+  clientId       String
+  salesPerson    User?     @relation(fields: [salesPersonId], references: [id])
+  salesPersonId  String?
+  terms          String?
+  invoiceDate    DateTime
+  dueDate        DateTime?
+  invoiceType    String
+  currency       String    @default("INR")
+  exchangeRate   Decimal   @default(1) @db.Decimal(10, 4)
+  subtotal       Decimal   @db.Decimal(12, 2)
+  discountAmount Decimal   @default(0) @db.Decimal(12, 2)
+  otherCharges   Decimal   @default(0) @db.Decimal(12, 2)
+  taxAmount      Decimal   @default(0) @db.Decimal(12, 2)
+  totalAmount    Decimal   @db.Decimal(12, 2)
+  paidAmount     Decimal   @default(0) @db.Decimal(12, 2)
+  balanceDue     Decimal   @db.Decimal(12, 2)
+  status         String    @default("DRAFT")
+  notes          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  items      InvoiceItem[]
+  taxDetails TaxInvoice?
+  // Estimates that were billed on this invoice (TagEstimate.invoiceId).
+  billedEstimates TagEstimate[]
+  exportDocs ExportDocument[]
+  payments   InvoicePayment[]
+  returns    SalesReturn[]
+  repairJob  RepairJob?
+
+  @@unique([companyId, invoiceNumber])
+  @@index([companyId, branchId])
+  @@index([status, invoiceDate])
+  // Phase 4 Part N: reports.router.ts's dashboard "recent invoices" query filters by
+  // companyId+createdAt and sorts by createdAt — neither existing index carries createdAt.
+  @@index([companyId, createdAt])
+  // composite-FK target: lets the database refuse a child that points at another company's SalesInvoice
+  @@unique([id, companyId])
+  @@map("sales_invoices")
+}
+
+model InvoiceItem {
+  id             String       @id @default(cuid())
+  // Denormalized from the parent SalesInvoice at create time (never independently supplied) —
+  // needed so InvoiceItem can carry its own RLS policy without a correlated subquery up to
+  // sales_invoices on every row. See the multi-tenant blueprint's RLS-denormalization rule.
+  companyId      String
+  company        Company      @relation(fields: [companyId], references: [id])
+  invoice        SalesInvoice @relation(fields: [invoiceId, companyId], references: [id, companyId], onDelete: Cascade)
+  invoiceId      String
+  productCode    String
+  description    String
+  huid           String?
+  karat          String?
+  quantity       Int
+  grossWeight    Decimal      @db.Decimal(10, 4)
+  netGoldWeight  Decimal      @db.Decimal(10, 4)
+  stoneWeight    Decimal      @default(0) @db.Decimal(10, 4)
+  rateType       String
+  goldRate       Decimal      @db.Decimal(12, 4)
+  makingCharge   Decimal      @db.Decimal(12, 2)
+  // Value-addition % (a.k.a. "VA" — trade jargon already used informally in NewTagPage.tsx for
+  // the MakingCharge master's wastagePercent). Same formula: effective making charge is marked
+  // up by this percent, matching the one precedent for this concept already in the codebase.
+  wastagePercent Decimal      @default(0) @db.Decimal(5, 2)
+  stoneValue     Decimal      @default(0) @db.Decimal(12, 2)
+  unitPrice      Decimal      @db.Decimal(12, 2)
+  totalPrice     Decimal      @db.Decimal(12, 2)
+
+  // GST rate looked up from HsnCode at sale time and copied onto the line (like costPrice on
+  // JewelryTag) — a later change to the HSN master must not silently reprice past invoices.
+  hsnCode   HsnCode? @relation(fields: [hsnCodeId], references: [id])
+  hsnCodeId String?
+  taxRate   Decimal  @db.Decimal(5, 4)
+
+  // Optional link to real inventory (JewelryTag). Nullable: free-text lines (making-charge-only
+  // adjustments, gift-wrap fees, historical entries) still coexist during the transition — tagged
+  // and untagged lines are both legal. Not unique (D1): a returned tag flips back to IN_STOCK and
+  // can be sold again, appearing on a second InvoiceItem later — the IN_STOCK gate in
+  // createInvoice, not a DB-level uniqueness, is what prevents double-selling a currently-SOLD tag.
+  tagId String?
+  tag   JewelryTag? @relation(fields: [tagId, companyId], references: [id, companyId], onDelete: Restrict)
+
+  // Category snapshot for the per-invoice category summary. Reuses the same ProductCategory
+  // master JewelryTag already carries — tagged lines inherit the tag's category; free-text lines
+  // may set one explicitly. Snapshotted like hsnCodeId so a later tag/category edit doesn't
+  // silently reclassify a past invoice line.
+  categoryId String?
+  category   ProductCategory? @relation(fields: [categoryId, companyId], references: [id, companyId], onDelete: Restrict)
+
+  returnItems SalesReturnItem[]
+
+  @@index([tagId])
+  @@index([companyId])
+  // composite-FK target: lets the database refuse a child that points at another company's InvoiceItem
+  @@unique([id, companyId])
+  @@map("invoice_items")
+}
+
+model InvoicePayment {
+  id            String        @id @default(cuid())
+  // Direct — Phase 2. Denormalized from clientId (always present, unlike invoiceId).
+  companyId     String
+  company       Company       @relation(fields: [companyId], references: [id])
+  paymentNumber String
+  // Nullable (F2): a standalone/on-account payment isn't against any one invoice yet. clientId is
+  // stored directly on every row (not just resolved through invoice.clientId) so both kinds query
+  // uniformly for a client statement (F4) without a conditional join.
+  invoice       SalesInvoice? @relation(fields: [invoiceId, companyId], references: [id, companyId], onDelete: Restrict)
+  invoiceId     String?
+  client        Client        @relation(fields: [clientId, companyId], references: [id, companyId])
+  clientId      String
+  paymentDate   DateTime
+  amount        Decimal       @db.Decimal(12, 2)
+  mode          String
+  referenceNo   String?
+  forexRate     Decimal?      @db.Decimal(10, 4)
+  forexGainLoss Decimal?      @db.Decimal(12, 2)
+  notes         String?
+  createdAt     DateTime      @default(now())
+
+  @@unique([companyId, paymentNumber])
+  @@index([companyId])
+  @@map("invoice_payments")
+}
+
+// A completed retail sale reversed (D1) — the customer brought a piece back. Deliberately a new,
+// separate record referencing the original invoice rather than an edit to it: SalesInvoice/
+// InvoiceItem stay exactly as originally issued (see CLAUDE.md's "never rewrite history" rule).
+model SalesReturn {
+  id           String       @id @default(cuid())
+  // Direct — Phase 2.
+  companyId    String
+  company      Company      @relation(fields: [companyId], references: [id])
+  returnNumber String
+  invoice      SalesInvoice @relation(fields: [invoiceId, companyId], references: [id, companyId])
+  invoiceId    String
+  client       Client       @relation(fields: [clientId, companyId], references: [id, companyId])
+  clientId     String
+  returnDate   DateTime     @default(now())
+  reason       String?
+  notes        String?
+  totalAmount  Decimal      @db.Decimal(12, 2)
+  createdAt    DateTime     @default(now())
+
+  items SalesReturnItem[]
+
+  @@unique([companyId, returnNumber])
+  @@index([companyId])
+  // composite-FK target: lets the database refuse a child that points at another company's SalesReturn
+  @@unique([id, companyId])
+  @@map("sales_returns")
+}
+
+model SalesReturnItem {
+  id            String      @id @default(cuid())
+  companyId     String
+  company       Company     @relation(fields: [companyId], references: [id])
+  return        SalesReturn @relation(fields: [returnId, companyId], references: [id, companyId], onDelete: Cascade)
+  returnId      String
+  invoiceItem   InvoiceItem @relation(fields: [invoiceItemId, companyId], references: [id, companyId])
+  invoiceItemId String
+  tag           JewelryTag  @relation(fields: [tagId, companyId], references: [id, companyId])
+  tagId         String
+  amount        Decimal     @db.Decimal(12, 2)
+
+  @@index([companyId])
+  @@map("sales_return_items")
+}
+
+model ExportDocument {
+  id           String       @id @default(cuid())
+  companyId    String
+  company      Company      @relation(fields: [companyId], references: [id])
+  invoice      SalesInvoice @relation(fields: [invoiceId, companyId], references: [id, companyId])
+  invoiceId    String
+  documentType String
+  documentData Json
+  irn          String?
+  ewbNumber    String?
+  generatedAt  DateTime     @default(now())
+
+  @@index([companyId])
+  @@map("export_documents")
+}
+
+// ═══════════════════════════════════════════════════
+// MODULE 9: INTEGRATED FINANCIAL ACCOUNTING
+// ═══════════════════════════════════════════════════
+
+// Company-owned — Phase 2. Each company gets its OWN copy of the 35-account chart, seeded from
+// the fixed seedChartOfAccounts() template at company-creation time (same template/copy pattern
+// as RoleTemplate -> Role, deliberately, for the exact same nullable-unique-constraint reasons —
+// see the multi-tenant blueprint's Role-uniqueness correction). shared/ledgerAccounts.ts's
+// LEDGER_ACCOUNT codes ('1101' etc.) now resolve within one company's own rows, never globally.
+model Account {
+  id        String    @id @default(cuid())
+  companyId String
+  company   Company   @relation(fields: [companyId], references: [id])
+  code      String
+  name      String
+  type      String
+  subType   String?
+  parent    Account?  @relation("AccountHierarchy", fields: [parentId], references: [id])
+  parentId  String?
+  children  Account[] @relation("AccountHierarchy")
+  balance   Decimal   @default(0) @db.Decimal(14, 2)
+  currency  String    @default("INR")
+  isSystem  Boolean   @default(false)
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+
+  journalLines JournalLine[]
+
+  @@unique([companyId, code])
+  @@index([companyId, type])
+  @@map("accounts")
+}
+
+model JournalEntry {
+  id            String      @id @default(cuid())
+  // Direct — no reliable single parent to inherit from (referenceType/referenceId is an
+  // untyped polymorphic pointer, not a real FK) — stamped from the caller's tenant context.
+  companyId     String
+  company       Company     @relation(fields: [companyId], references: [id])
+  entryNumber   String
+  date          DateTime
+  description   String
+  referenceType String?
+  referenceId   String?
+  costCenter    CostCenter? @relation(fields: [costCenterId], references: [id])
+  costCenterId  String?
+  isPosted      Boolean     @default(false)
+  postedAt      DateTime?
+  totalDebit    Decimal     @db.Decimal(14, 2)
+  totalCredit   Decimal     @db.Decimal(14, 2)
+  createdAt     DateTime    @default(now())
+
+  lines JournalLine[]
+
+  @@unique([companyId, entryNumber])
+  @@index([companyId, date, isPosted])
+  @@index([date, isPosted])
+  @@map("journal_entries")
+}
+
+model JournalLine {
+  id        String       @id @default(cuid())
+  // Denormalized from the parent JournalEntry.
+  companyId String
+  company   Company      @relation(fields: [companyId], references: [id])
+  entry     JournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  entryId   String
+  account   Account      @relation(fields: [accountId], references: [id])
+  accountId String
+  debit     Decimal      @default(0) @db.Decimal(14, 2)
+  credit    Decimal      @default(0) @db.Decimal(14, 2)
+  narration String?
+
+  @@index([companyId])
+  @@map("journal_lines")
+}
+
+model CostCenter {
+  id         String       @id @default(cuid())
+  companyId  String
+  company    Company      @relation(fields: [companyId], references: [id])
+  code       String
+  name       String
+  department String
+  parent     CostCenter?  @relation("CCHierarchy", fields: [parentId], references: [id])
+  parentId   String?
+  children   CostCenter[] @relation("CCHierarchy")
+  isActive   Boolean      @default(true)
+
+  journalEntries JournalEntry[]
+
+  @@unique([companyId, code])
+  @@index([companyId])
+  @@map("cost_centers")
+}
+
+model TaxInvoice {
+  id            String       @id @default(cuid())
+  companyId     String
+  company       Company      @relation(fields: [companyId], references: [id])
+  invoice       SalesInvoice @relation(fields: [invoiceId, companyId], references: [id, companyId])
+  invoiceId     String       @unique
+  gstin         String
+  placeOfSupply String
+  reverseCharge Boolean      @default(false)
+  taxableAmount Decimal      @db.Decimal(12, 2)
+  cgst          Decimal      @default(0) @db.Decimal(12, 2)
+  sgst          Decimal      @default(0) @db.Decimal(12, 2)
+  igst          Decimal      @default(0) @db.Decimal(12, 2)
+  cess          Decimal      @default(0) @db.Decimal(12, 2)
+  totalTax      Decimal      @db.Decimal(12, 2)
+  isEInvoice    Boolean      @default(false)
+  irn           String?
+  ackNumber     String?
+  ackDate       DateTime?
+  qrCodeData    String?
+  ewbNumber     String?
+  ewbValidUntil DateTime?
+
+  @@index([companyId])
+  // the relation is one-to-one (invoiceId is @unique), so its composite-FK form needs a matching composite unique
+  @@unique([invoiceId, companyId])
+  @@map("tax_invoices")
+}
+
+model PurchaseRequisition {
+  id                   String            @id @default(cuid())
+  companyId            String
+  company              Company           @relation(fields: [companyId], references: [id])
+  prNumber             String
+  department           String
+  status               String            @default("DRAFT") // DRAFT | SUBMITTED | APPROVED | REJECTED | CONVERTED
+  notes                String?
+  totalEstimatedAmount Decimal           @default(0) @db.Decimal(12, 2)
+  requestedById        String
+  requestedBy          User              @relation("PRRequester", fields: [requestedById], references: [id])
+  approvedById         String?
+  approvedBy           User?             @relation("PRApprover", fields: [approvedById], references: [id])
+  approvedAt           DateTime?
+  convertedPoId        String?
+  items                PrItem[]
+  approvalHistory      ApprovalHistory[] @relation("PRHistory")
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+  purchaseOrders       PurchaseOrder[]
+
+  @@unique([companyId, prNumber])
+  @@index([companyId])
+  @@map("purchase_requisitions")
+}
+
+model PrItem {
+  id                   String              @id @default(cuid())
+  companyId            String
+  company              Company             @relation(fields: [companyId], references: [id])
+  prId                 String
+  pr                   PurchaseRequisition @relation(fields: [prId], references: [id], onDelete: Cascade)
+  materialCode         String
+  materialName         String
+  materialType         String
+  karat                String?
+  quantity             Decimal             @db.Decimal(10, 4)
+  weight               Decimal             @db.Decimal(10, 4)
+  unit                 String
+  estimatedRate        Decimal             @db.Decimal(12, 4)
+  totalEstimatedAmount Decimal             @db.Decimal(12, 2)
+
+  @@index([companyId])
+  @@map("pr_items")
+}
+
+model ApprovalHistory {
+  id            String   @id @default(cuid())
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id])
+  referenceType String // "PR" | "PO"
+  referenceId   String // General ID for query indexing
+  action        String // "SUBMITTED" | "APPROVED" | "REJECTED" | "CONVERTED"
+  comments      String?
+  performedById String
+  performedBy   User     @relation(fields: [performedById], references: [id])
+  createdAt     DateTime @default(now())
+
+  purchaseRequisitionId String?
+  purchaseRequisition   PurchaseRequisition? @relation("PRHistory", fields: [purchaseRequisitionId], references: [id], onDelete: Cascade)
+  purchaseOrderId       String?
+  purchaseOrder         PurchaseOrder?       @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([referenceType, referenceId])
+  @@map("approval_history")
+}
