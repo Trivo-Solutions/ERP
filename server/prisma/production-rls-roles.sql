@@ -45,7 +45,7 @@ SELECT format('CREATE ROLE trivo_platform LOGIN PASSWORD %L NOSUPERUSER NOCREATE
   WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trivo_platform') \gexec
 
 SELECT format('CREATE ROLE trivo_backup LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS NOREPLICATION CONNECTION LIMIT 3', :'backup_pw')
-  WHERE :'backup_pw' <> '' AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trivo_backup') gexec
+  WHERE :'backup_pw' <> '' AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trivo_backup') \gexec
 
 -- Per-role guard rails (apply to every new session of that role).
 --   statement_timeout                    a runaway query is cancelled instead of pinning a connection
@@ -64,7 +64,7 @@ ALTER ROLE trivo_platform SET lock_timeout = '15s';
 CREATE DATABASE :"db" OWNER trivo_owner ENCODING 'UTF8' TEMPLATE template0;
 REVOKE ALL ON DATABASE :"db" FROM PUBLIC;
 GRANT CONNECT ON DATABASE :"db" TO trivo_runtime, trivo_platform;
-SELECT format('GRANT CONNECT ON DATABASE %I TO trivo_backup', :'db') WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trivo_backup') gexec
+SELECT format('GRANT CONNECT ON DATABASE %I TO trivo_backup', :'db') WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trivo_backup') \gexec
 ALTER DATABASE :"db" SET log_min_duration_statement = 500;   -- log anything slower than 500ms
 
 \connect :"db"
@@ -73,4 +73,4 @@ ALTER DATABASE :"db" SET log_min_duration_statement = 500;   -- log anything slo
 ALTER SCHEMA public OWNER TO trivo_owner;
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO trivo_runtime, trivo_platform;
-SELECT 'GRANT USAGE ON SCHEMA public TO trivo_backup' WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trivo_backup') gexec
+SELECT 'GRANT USAGE ON SCHEMA public TO trivo_backup' WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trivo_backup') \gexec

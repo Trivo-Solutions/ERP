@@ -3,6 +3,9 @@ import { z } from 'zod';
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.string().default('3001').transform(Number),
+  // Interface to bind. Set 127.0.0.1 when a local reverse proxy fronts the API, so the port (incl. the operator
+  // /platform API) is not reachable from the network. Unset = all interfaces.
+  HOST: z.string().optional(),
   CLIENT_URL: z.string().default('http://localhost:5173'),
   DATABASE_URL: z.string(),
   REDIS_URL: z.string().default('redis://localhost:6379'),

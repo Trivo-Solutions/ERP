@@ -21,11 +21,13 @@ async function bootstrap() {
 
     await hardwareService.initialize();
 
-    httpServer.listen(env.PORT, () => {
-      logger.info(`🚀 TRIVO ERP Server running on port ${env.PORT}`);
+    const onListening = () => {
+      logger.info(`🚀 TRIVO ERP Server running on ${env.HOST ?? '*'}:${env.PORT}`);
       logger.info(`📦 Environment: ${env.NODE_ENV}`);
       logger.info(`🌐 Client URL: ${env.CLIENT_URL}`);
-    });
+    };
+    if (env.HOST) httpServer.listen(env.PORT, env.HOST, onListening);
+    else httpServer.listen(env.PORT, onListening);
 
     const shutdown = async (signal: string) => {
       logger.info(`${signal} received — shutting down gracefully`);
