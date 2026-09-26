@@ -4,18 +4,22 @@ import {
   Grid, MenuItem, TextField, Chip, Dialog, DialogTitle, DialogContent, DialogActions,
   Drawer, Stack, Divider, IconButton, Alert, CircularProgress,
 } from '@mui/material';
-import { Add, Close, CheckCircle, Cancel, Send } from '@mui/icons-material';
+import { Add, Close, CheckCircle, Cancel, Send, Delete as DeleteIcon } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm, Controller, useFieldArray } from 'react-hook-form';
 import { useSnackbar } from 'notistack';
-import { apiGet, apiPost } from '../../api/client';
+import { apiGet, apiPost, apiDelete } from '../../api/client';
 import { PageHeader } from '../../components/common/PageHeader';
 import { StatusChip } from '../../components/common/StatusChip';
 import { useAuthStore } from '../../store/auth.store';
 import { SelectField } from '../../components/fields/SelectField';
 import { computeMakingAmount } from '../../utils/estimateCalc';
+import { AddSupplierDialog } from '../../components/common/AddSupplierDialog';
 
 const PO_APPROVAL_THRESHOLD = 500000;
+
+// Only a PO that has received nothing can go (the server enforces this too and answers 409 otherwise).
+const DELETABLE_PO_STATUSES = ['DRAFT', 'PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'CANCELLED'];
 
 function fmt(n: number) {
   return '₹' + n.toLocaleString('en-IN', { maximumFractionDigits: 2 });
@@ -82,6 +86,19 @@ function POApprovalDrawer({ poId, onClose }: { poId: string; onClose: () => void
     onSuccess: () => { setCommentDialog(null); enqueueSnackbar('PO rejected', { variant: 'success' }); },
     onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' }),
   });
+
+  const deleteMutation = useMutation({
+    mutationFn: () => apiDelete(`/procurement/orders/${poId}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['purchase-orders'] });
+      enqueueSnackbar('Purchase order deleted', { variant: 'success' });
+      onClose();
+    },
+    onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' }),
+  });
+  const confirmDelete = () => {
+    if (window.confirm(`Delete purchase order ${po?.poNumber}? This cannot be undone.`)) deleteMutation.mutate();
+  };
 
   const totalAmount = Number(po?.totalAmount ?? 0);
   const taxAmount = Number(po?.taxAmount ?? 0);
@@ -215,6 +232,10 @@ function POApprovalDrawer({ poId, onClose }: { poId: string; onClose: () => void
                     onClick={() => setCommentDialog('reject')}>Reject</Button>
                 </>
               )}
+              {DELETABLE_PO_STATUSES.includes(po.status) && (po.grns?.length ?? 0) === 0 && hasPermission('po:create') && (
+                <Button color="error" startIcon={<DeleteIcon />} sx={{ ml: 'auto' }}
+                  disabled={deleteMutation.isPending} onClick={confirmDelete}>Delete</Button>
+              )}
             </Stack>
           </>
         )}
@@ -274,59 +295,73 @@ function LotCategoryRows({ control, setValue, getValues, idx, categories, karats
   }, 0);
   const gap = implied - bagAmount;
   const rateOff = anyRates && bagAmount > 0 && Math.abs(gap) > bagAmount * 0.01;
+  // Table cells: no floating labels — the column header names the field, so every row lines up.
   const weightField = (j: number, k: 'grossWeight' | 'stoneWeight' | 'netWeight', label: string) => (
     <Controller name={at(j, k) as any} control={control}
       render={({ field }) => (
-        <TextField {...field} fullWidth size="small" label={label} type="number" inputProps={{ step: 0.001, min: 0 }}
+        <TextField {...field} fullWidth size="small" type="number" inputProps={{ step: 0.001, min: 0, 'aria-label': label }}
           onChange={(e) => { field.onChange(e); relink(j, k, e.target.value); }} />
       )} />
   );
+  const numField = (j: number, k: string, label: string, inputProps: object) => (
+    <Controller name={at(j, k) as any} control={control}
+      render={({ field }) => <TextField {...field} fullWidth size="small" type="number"
+        inputProps={{ ...inputProps, 'aria-label': label }} />} />
+  );
+  const head = { fontSize: '0.7rem', py: 0.75, px: 0.75 } as const;
+  const cell = { py: 0.75, px: 0.75, borderBottom: 'none' } as const;
 
   return (
-    <Box sx={{ mt: 1, pl: 1.5, borderLeft: 3, borderColor: 'primary.light' }}>
-      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-        What is in this bag, category by category — enter any two of gross / stone / net. Piece count is optional: give it if the invoice does,
-        otherwise only the weights are tracked.
-      </Typography>
-      {fields.map((f, j) => (
-        <Grid container spacing={1} key={f.id} alignItems="center" sx={{ mb: 1 }}>
-          <Grid item xs={3}>
-            <Controller name={at(j, 'categoryId') as any} control={control}
-              render={({ field }) => <SelectField {...field} size="small" label="Category" emptyLabel="Select…"
-                options={categories.map((c: any) => ({ value: c.id, label: c.name }))} />} />
-          </Grid>
-          <Grid item xs={1.5}>
-            <Controller name={at(j, 'karat') as any} control={control}
-              render={({ field }) => <SelectField {...field} size="small" label="Karat"
-                options={karats.map((k: any) => ({ value: k.code, label: k.code }))} />} />
-          </Grid>
-          <Grid item xs={1.8}>{weightField(j, 'grossWeight', 'Gross (g)')}</Grid>
-          <Grid item xs={1.8}>{weightField(j, 'stoneWeight', 'Stone (g)')}</Grid>
-          <Grid item xs={1.8}>{weightField(j, 'netWeight', 'Net (g)')}</Grid>
-          <Grid item xs={1.4}>
-            <Controller name={at(j, 'pieces') as any} control={control}
-              render={({ field }) => <TextField {...field} fullWidth size="small" label="Pieces" type="number" inputProps={{ min: 1, step: 1 }} placeholder="optional" />} />
-          </Grid>
-          <Grid item xs={0.7}>
-            <IconButton size="small" color="error" disabled={fields.length === 1} onClick={() => remove(j)}><Close fontSize="small" /></IconButton>
-          </Grid>
-          {/* Entered once here, pre-filled on every tag cut from this category (each tag can still change them). */}
-          <Grid item xs={3}><Typography variant="caption" color="text.secondary" sx={{ pl: 1 }}>Cost rates (optional) →</Typography></Grid>
-          <Grid item xs={2.4}>
-            <Controller name={at(j, 'costRate') as any} control={control}
-              render={({ field }) => <TextField {...field} fullWidth size="small" label="Metal cost ₹/g" type="number" inputProps={{ step: 0.01, min: 0 }} />} />
-          </Grid>
-          <Grid item xs={2.4}>
-            <Controller name={at(j, 'mcRate') as any} control={control}
-              render={({ field }) => <TextField {...field} fullWidth size="small" label="Making ₹/g" type="number" inputProps={{ step: 0.01, min: 0 }} />} />
-          </Grid>
-          <Grid item xs={2.4}>
-            <Controller name={at(j, 'vaPercent') as any} control={control}
-              render={({ field }) => <TextField {...field} fullWidth size="small" label="VA %" type="number" inputProps={{ step: 0.01, min: 0, max: 100 }} />} />
-          </Grid>
-        </Grid>
-      ))}
-      <Stack direction="row" spacing={2} alignItems="center">
+    <Box sx={{ mt: 1, pl: 2, borderLeft: 3, borderColor: 'primary.light' }}>
+      <Table size="small" sx={{ tableLayout: 'fixed', minWidth: 900 }}>
+        <TableHead>
+          <TableRow>
+            <TableCell colSpan={6} sx={head} />
+            <TableCell colSpan={3} align="center" sx={{ ...head, borderBottom: 1, borderColor: 'divider' }}>Cost rates (optional)</TableCell>
+            <TableCell sx={{ ...head, width: 48 }} />
+          </TableRow>
+          <TableRow>
+            <TableCell sx={{ ...head, width: '19%' }}>Category</TableCell>
+            <TableCell sx={{ ...head, width: '8%' }}>Karat</TableCell>
+            <TableCell sx={{ ...head, width: '11%' }}>Gross (g)</TableCell>
+            <TableCell sx={{ ...head, width: '11%' }}>Stone (g)</TableCell>
+            <TableCell sx={{ ...head, width: '11%' }}>Net (g)</TableCell>
+            <TableCell sx={{ ...head, width: '8%' }}>Pieces</TableCell>
+            <TableCell sx={{ ...head, width: '11%' }}>Metal ₹/g</TableCell>
+            <TableCell sx={{ ...head, width: '11%' }}>Making ₹/g</TableCell>
+            <TableCell sx={{ ...head, width: '8%' }}>VA %</TableCell>
+            <TableCell sx={head} />
+          </TableRow>
+        </TableHead>
+        <TableBody>
+          {fields.map((f, j) => (
+            <TableRow key={f.id}>
+              <TableCell sx={cell}>
+                <Controller name={at(j, 'categoryId') as any} control={control}
+                  render={({ field }) => <SelectField {...field} size="small" emptyLabel="Select…" inputProps={{ 'aria-label': 'Category' }}
+                    options={categories.map((c: any) => ({ value: c.id, label: c.name }))} />} />
+              </TableCell>
+              <TableCell sx={cell}>
+                <Controller name={at(j, 'karat') as any} control={control}
+                  render={({ field }) => <SelectField {...field} size="small" inputProps={{ 'aria-label': 'Karat' }}
+                    options={karats.map((k: any) => ({ value: k.code, label: k.code }))} />} />
+              </TableCell>
+              <TableCell sx={cell}>{weightField(j, 'grossWeight', 'Gross (g)')}</TableCell>
+              <TableCell sx={cell}>{weightField(j, 'stoneWeight', 'Stone (g)')}</TableCell>
+              <TableCell sx={cell}>{weightField(j, 'netWeight', 'Net (g)')}</TableCell>
+              <TableCell sx={cell}>{numField(j, 'pieces', 'Pieces', { min: 1, step: 1 })}</TableCell>
+              {/* Entered once here, pre-filled on every tag cut from this category (each tag can still change them). */}
+              <TableCell sx={cell}>{numField(j, 'costRate', 'Metal cost ₹/g', { step: 0.01, min: 0 })}</TableCell>
+              <TableCell sx={cell}>{numField(j, 'mcRate', 'Making ₹/g', { step: 0.01, min: 0 })}</TableCell>
+              <TableCell sx={cell}>{numField(j, 'vaPercent', 'VA %', { step: 0.01, min: 0, max: 100 })}</TableCell>
+              <TableCell sx={{ ...cell, textAlign: 'right' }}>
+                <IconButton size="small" color="error" disabled={fields.length === 1} onClick={() => remove(j)}><Close fontSize="small" /></IconButton>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+      <Stack direction="row" spacing={2} alignItems="center" sx={{ mt: 1 }}>
         <Button size="small" startIcon={<Add />} onClick={() => append({ ...BLANK_CATEGORY })}>Add category</Button>
         <Typography variant="caption" color={off ? 'error' : 'text.secondary'} sx={{ fontFamily: 'monospace' }}>
           Categories total {total.toFixed(3)} g{bagGross > 0 ? ` of the bag's ${bagGross.toFixed(3)} g` : ''}{off ? ' — they must add up to the bag' : ''}
@@ -348,6 +383,7 @@ function LotCategoryRows({ control, setValue, getValues, idx, categories, karats
 function CreatePODialog({ open, onClose, suppliers }: { open: boolean; onClose: () => void; suppliers: any[] }) {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
+  const [supplierOpen, setSupplierOpen] = useState(false);
 
   const { data: approvedPRs } = useQuery({
     queryKey: ['prs-approved'],
@@ -430,11 +466,12 @@ function CreatePODialog({ open, onClose, suppliers }: { open: boolean; onClose: 
   const handleClose = () => { onClose(); reset(); };
 
   return (
-    <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth>
+    <>
+    <Dialog open={open} onClose={handleClose} maxWidth="xl" fullWidth>
       <form onSubmit={handleSubmit((d) => mutation.mutate(d))}>
         <DialogTitle fontWeight={700}>Create Purchase Order</DialogTitle>
-        <DialogContent sx={{ pt: 2 }}>
-          <Grid container spacing={2} sx={{ mb: 2 }}>
+        <DialogContent sx={{ pt: 4 }}>
+          <Grid container spacing={3} sx={{ mb: 3 }}>
             {prs.length > 0 && (
               <Grid item xs={12}>
                 <Controller name="prId" control={control}
@@ -448,12 +485,18 @@ function CreatePODialog({ open, onClose, suppliers }: { open: boolean; onClose: 
               </Grid>
             )}
             <Grid item xs={6}>
-              <Controller name="supplierId" control={control} rules={{ required: true }}
-                render={({ field, fieldState }) => (
-                  <TextField {...field} select fullWidth label="Supplier" error={!!fieldState.error}>
-                    {suppliers.map((s: any) => <MenuItem key={s.id} value={s.id}>{s.supplierCode} — {s.name}</MenuItem>)}
-                  </TextField>
-                )} />
+              <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start' }}>
+                <Controller name="supplierId" control={control} rules={{ required: true }}
+                  render={({ field, fieldState }) => (
+                    <SelectField {...field} label="Supplier" error={!!fieldState.error} emptyLabel="Select supplier"
+                      options={suppliers.map((s: any) => ({ value: s.id, label: `${s.supplierCode} — ${s.name}` }))} />
+                  )} />
+                {/* New supplier without leaving this PO: a dialog over it, so nothing already typed here is lost. */}
+                <IconButton color="primary" title="Add new supplier" aria-label="Add new supplier"
+                  onClick={() => setSupplierOpen(true)} sx={{ mt: 0.5 }}>
+                  <Add />
+                </IconButton>
+              </Box>
             </Grid>
             <Grid item xs={3}>
               <Controller name="poType" control={control}
@@ -471,78 +514,105 @@ function CreatePODialog({ open, onClose, suppliers }: { open: boolean; onClose: 
             </Grid>
           </Grid>
 
-          <Typography variant="subtitle2" fontWeight={700} gutterBottom>Line Items</Typography>
-          {fields.map((field, idx) => {
-            const type = watchedItems?.[idx]?.materialType;
-            const isLot = type === 'FINISHED_LOT';
-            return (
-            <Box key={field.id} sx={{ mb: 1 }}>
-            <Grid container spacing={1.5} alignItems="center">
-              <Grid item xs={2}>
-                <Controller name={`items.${idx}.materialCode`} control={control}
-                  render={({ field }) => <TextField {...field} fullWidth size="small" label="Code" />} />
-              </Grid>
-              <Grid item xs={3}>
-                <Controller name={`items.${idx}.materialName`} control={control}
-                  render={({ field }) => <TextField {...field} fullWidth size="small" label="Material Name" />} />
-              </Grid>
-              <Grid item xs={2}>
-                <Controller name={`items.${idx}.materialType`} control={control}
-                  render={({ field }) => (
-                    <SelectField {...field} size="small" label="Type"
-                      onChange={(e) => {
-                        field.onChange(e);
-                        // A finished piece is always one piece: qty 1, unit PC (the server rejects anything else).
-                        if (e.target.value === 'FINISHED_GOODS') {
-                          setValue(`items.${idx}.quantity`, 1);
-                          setValue(`items.${idx}.unit`, 'PC');
-                        }
-                        // A bag is one unit; what is in it is entered category by category underneath.
-                        if (e.target.value === 'FINISHED_LOT') {
-                          setValue(`items.${idx}.quantity`, 1);
-                          setValue(`items.${idx}.unit`, 'BAG');
-                          if ((getValues(`items.${idx}.categories`) ?? []).length === 0) setValue(`items.${idx}.categories`, [{ ...BLANK_CATEGORY }]);
-                        }
-                      }}
-                      options={[
-                        ...['METAL', 'DIAMOND', 'STONE', 'FINDING', 'CONSUMABLE'].map((t) => ({ value: t, label: t })),
-                        { value: 'FINISHED_GOODS', label: 'FINISHED PIECE (ready to sell)' },
-                        { value: 'FINISHED_LOT', label: 'FINISHED LOT (bag of pieces)' },
-                      ]} />
-                  )} />
-              </Grid>
-              <Grid item xs={1.5}>
-                <Controller name={`items.${idx}.weight`} control={control}
-                  render={({ field }) => <TextField {...field} fullWidth size="small" label={isLot ? 'Gross Wt (g)' : 'Weight (g)'} type="number" inputProps={{ step: 0.001 }} />} />
-              </Grid>
-              <Grid item xs={1}>
-                <Controller name={`items.${idx}.gstPercent`} control={control}
-                  render={({ field }) => <TextField {...field} fullWidth size="small" label="GST %" type="number" placeholder="auto" inputProps={{ step: 0.01, min: 0 }} />} />
-              </Grid>
-              <Grid item xs={1.5}>
-                {isLot ? (
-                  <Controller name={`items.${idx}.lotAmount`} control={control}
-                    render={({ field }) => <TextField {...field} fullWidth size="small" label="Lot Amount (₹)" type="number"
-                      title="The bag's total amount on the supplier's invoice, before GST" />} />
-                ) : (
-                  <Controller name={`items.${idx}.ratePerUnit`} control={control}
-                    render={({ field }) => <TextField {...field} fullWidth size="small" label={type === 'FINISHED_GOODS' ? 'Piece Price (₹)' : 'Rate/gm (₹)'} type="number" />} />
-                )}
-              </Grid>
-              <Grid item xs={1}>
-                <IconButton size="small" color="error" onClick={() => remove(idx)}><Close fontSize="small" /></IconButton>
-              </Grid>
-            </Grid>
-            {isLot && (
-              <LotCategoryRows control={control} setValue={setValue} getValues={getValues} idx={idx}
-                categories={categoryList} karats={karatList} bagGross={Number(watchedItems?.[idx]?.weight || 0)}
-                bagAmount={Number((watchedItems?.[idx] as any)?.lotAmount || 0)}
-                rows={(watchedItems?.[idx] as any)?.categories ?? []} />
-            )}
-            </Box>
-            );
-          })}
-          <Button size="small" startIcon={<Add />}
+          <Divider sx={{ mb: 2 }} />
+          <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1 }}>Line Items</Typography>
+          <Box sx={{ overflowX: 'auto' }}>
+          <Table size="small" sx={{ tableLayout: 'fixed', minWidth: 900 }}>
+            <TableHead>
+              <TableRow>
+                <TableCell sx={{ width: '11%' }}>Code</TableCell>
+                <TableCell sx={{ width: '22%' }}>Material Name</TableCell>
+                <TableCell sx={{ width: '22%' }}>Type</TableCell>
+                <TableCell sx={{ width: '13%' }}>Weight (g)</TableCell>
+                <TableCell sx={{ width: '9%' }}>GST %</TableCell>
+                <TableCell sx={{ width: '16%' }}>Rate / Amount (₹)</TableCell>
+                <TableCell sx={{ width: 56 }} />
+              </TableRow>
+            </TableHead>
+            {fields.map((field, idx) => {
+              const type = watchedItems?.[idx]?.materialType;
+              const isLot = type === 'FINISHED_LOT';
+              const cell = { py: 1, px: 0.75, borderBottom: isLot ? 'none' : undefined } as const;
+              return (
+                <TableBody key={field.id}>
+                  <TableRow>
+                    <TableCell sx={cell}>
+                      <Controller name={`items.${idx}.materialCode`} control={control}
+                        render={({ field }) => <TextField {...field} fullWidth size="small" inputProps={{ 'aria-label': 'Code' }} />} />
+                    </TableCell>
+                    <TableCell sx={cell}>
+                      <Controller name={`items.${idx}.materialName`} control={control}
+                        render={({ field }) => <TextField {...field} fullWidth size="small" inputProps={{ 'aria-label': 'Material Name' }} />} />
+                    </TableCell>
+                    <TableCell sx={cell}>
+                      <Controller name={`items.${idx}.materialType`} control={control}
+                        render={({ field }) => (
+                          <SelectField {...field} size="small" inputProps={{ 'aria-label': 'Type' }}
+                            onChange={(e) => {
+                              field.onChange(e);
+                              // A finished piece is always one piece: qty 1, unit PC (the server rejects anything else).
+                              if (e.target.value === 'FINISHED_GOODS') {
+                                setValue(`items.${idx}.quantity`, 1);
+                                setValue(`items.${idx}.unit`, 'PC');
+                              }
+                              // A bag is one unit; what is in it is entered category by category underneath.
+                              if (e.target.value === 'FINISHED_LOT') {
+                                setValue(`items.${idx}.quantity`, 1);
+                                setValue(`items.${idx}.unit`, 'BAG');
+                                if ((getValues(`items.${idx}.categories`) ?? []).length === 0) setValue(`items.${idx}.categories`, [{ ...BLANK_CATEGORY }]);
+                              }
+                            }}
+                            options={[
+                              ...['METAL', 'DIAMOND', 'STONE', 'FINDING', 'CONSUMABLE'].map((t) => ({ value: t, label: t })),
+                              { value: 'FINISHED_GOODS', label: 'FINISHED PIECE (ready to sell)' },
+                              { value: 'FINISHED_LOT', label: 'FINISHED LOT (bag of pieces)' },
+                            ]} />
+                        )} />
+                    </TableCell>
+                    <TableCell sx={cell}>
+                      <Controller name={`items.${idx}.weight`} control={control}
+                        render={({ field }) => <TextField {...field} fullWidth size="small" type="number" placeholder={isLot ? 'Bag gross' : undefined}
+                          inputProps={{ step: 0.001, 'aria-label': isLot ? 'Gross weight (g)' : 'Weight (g)' }} />} />
+                    </TableCell>
+                    <TableCell sx={cell}>
+                      <Controller name={`items.${idx}.gstPercent`} control={control}
+                        render={({ field }) => <TextField {...field} fullWidth size="small" type="number" placeholder="auto"
+                          inputProps={{ step: 0.01, min: 0, 'aria-label': 'GST %' }} />} />
+                    </TableCell>
+                    <TableCell sx={cell}>
+                      {isLot ? (
+                        <Controller name={`items.${idx}.lotAmount`} control={control}
+                          render={({ field }) => <TextField {...field} fullWidth size="small" type="number" placeholder="Lot amount"
+                            inputProps={{ 'aria-label': 'Lot Amount (₹)', title: "The bag's total amount on the supplier's invoice, before GST" }} />} />
+                      ) : (
+                        <Controller name={`items.${idx}.ratePerUnit`} control={control}
+                          render={({ field }) => <TextField {...field} fullWidth size="small" type="number"
+                            placeholder={type === 'FINISHED_GOODS' ? 'Piece price' : 'Rate/gm'}
+                            inputProps={{ 'aria-label': type === 'FINISHED_GOODS' ? 'Piece Price (₹)' : 'Rate/gm (₹)' }} />} />
+                      )}
+                    </TableCell>
+                    <TableCell sx={{ ...cell, textAlign: 'right' }}>
+                      <IconButton size="small" color="error" onClick={() => remove(idx)}><Close fontSize="small" /></IconButton>
+                    </TableCell>
+                  </TableRow>
+                  {isLot && (
+                    <TableRow>
+                      <TableCell colSpan={7} sx={{ pt: 0, pb: 2, px: 0.75 }}>
+                        <Box sx={{ overflowX: 'auto' }}>
+                          <LotCategoryRows control={control} setValue={setValue} getValues={getValues} idx={idx}
+                            categories={categoryList} karats={karatList} bagGross={Number(watchedItems?.[idx]?.weight || 0)}
+                            bagAmount={Number((watchedItems?.[idx] as any)?.lotAmount || 0)}
+                            rows={(watchedItems?.[idx] as any)?.categories ?? []} />
+                        </Box>
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              );
+            })}
+          </Table>
+          </Box>
+          <Button size="small" startIcon={<Add />} sx={{ mt: 1 }}
             onClick={() => append({ materialCode: '', materialName: '', materialType: 'METAL', quantity: 1, weight: 0, lotAmount: '', categories: [], unit: 'GM', karat: '22K', ratePerUnit: 0, gstPercent: '' })}>
             Add Line Item
           </Button>
@@ -553,6 +623,10 @@ function CreatePODialog({ open, onClose, suppliers }: { open: boolean; onClose: 
         </DialogActions>
       </form>
     </Dialog>
+    {/* A sibling of the PO dialog (not inside its <form>); on save the new supplier is selected here. */}
+    <AddSupplierDialog open={supplierOpen} onClose={() => setSupplierOpen(false)}
+      onCreated={(sup) => setValue('supplierId', sup.id, { shouldValidate: true, shouldDirty: true })} />
+    </>
   );
 }
 
@@ -564,6 +638,13 @@ export function PurchaseOrders() {
   const [createOpen, setCreateOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState('');
   const [selectedPOId, setSelectedPOId] = useState('');
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const deletePO = (po: any) => {
+    if (!window.confirm(`Delete purchase order ${po.poNumber}? This cannot be undone.`)) return;
+    apiDelete(`/procurement/orders/${po.id}`)
+      .then(() => { qc.invalidateQueries({ queryKey: ['purchase-orders'] }); enqueueSnackbar('Purchase order deleted', { variant: 'success' }); })
+      .catch((e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' }));
+  };
 
   const { data, isLoading } = useQuery({
     queryKey: ['purchase-orders', statusFilter],
@@ -609,11 +690,12 @@ export function PurchaseOrders() {
               <TableCell align="right">Total (₹)</TableCell>
               <TableCell>GRNs</TableCell>
               <TableCell>Status</TableCell>
+              <TableCell />
             </TableRow>
           </TableHead>
           <TableBody>
             {isLoading ? (
-              <TableRow><TableCell colSpan={7} align="center" sx={{ py: 4 }}>Loading...</TableCell></TableRow>
+              <TableRow><TableCell colSpan={8} align="center" sx={{ py: 4 }}>Loading...</TableCell></TableRow>
             ) : pos.map((po: any) => (
               <TableRow key={po.id} hover sx={{ cursor: 'pointer' }} onClick={() => setSelectedPOId(po.id)}>
                 <TableCell sx={{ fontFamily: 'monospace', fontSize: 12, fontWeight: 700, color: '#44C47A' }}>{po.poNumber}</TableCell>
@@ -623,10 +705,18 @@ export function PurchaseOrders() {
                 <TableCell align="right" sx={{ fontFamily: 'monospace' }}>{fmt(Number(po.totalAmount))}</TableCell>
                 <TableCell align="center">{po._count?.grns ?? 0}</TableCell>
                 <TableCell><StatusChip status={po.status} /></TableCell>
+                <TableCell align="right" sx={{ py: 0 }}>
+                  {DELETABLE_PO_STATUSES.includes(po.status) && !(po._count?.grns > 0) && hasPermission('po:create') && (
+                    <IconButton size="small" color="error" aria-label={`Delete ${po.poNumber}`}
+                      onClick={(e) => { e.stopPropagation(); deletePO(po); }}>
+                      <DeleteIcon fontSize="small" />
+                    </IconButton>
+                  )}
+                </TableCell>
               </TableRow>
             ))}
             {!isLoading && pos.length === 0 && (
-              <TableRow><TableCell colSpan={7} align="center" sx={{ py: 4 }}>No purchase orders</TableCell></TableRow>
+              <TableRow><TableCell colSpan={8} align="center" sx={{ py: 4 }}>No purchase orders</TableCell></TableRow>
             )}
           </TableBody>
         </Table>

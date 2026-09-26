@@ -1,4 +1,4 @@
-import { createTheme, alpha, Shadows } from '@mui/material/styles';
+import { createTheme, alpha, Shadows, Theme } from '@mui/material/styles';
 
 // ── Trivo Brand Palette ───────────────────────────────────────────────────────
 // Extracted from Trivo Logo 512.png
@@ -143,6 +143,27 @@ function buildComponents(mode: 'light' | 'dark') {
         root: {
           '& .MuiOutlinedInput-root': { borderRadius: 10 },
         },
+      },
+    },
+    // Every keyboard-first dropdown (SelectField / `SelectProps={{ native: true }}`) is a real <select>, whose
+    // popup the browser draws — so the theme can't restyle its shape, only what the browser lets through:
+    // colour-scheme (dark popup + scrollbar in dark mode), and the option/optgroup colours and font.
+    MuiNativeSelect: {
+      styleOverrides: {
+        select: ({ theme }: { theme: Theme }) => ({
+          colorScheme: mode,
+          '& option, & optgroup': {
+            backgroundColor: theme.palette.background.paper,
+            color: theme.palette.text.primary,
+            fontFamily: theme.typography.fontFamily,
+            fontSize: '0.9375rem',
+          },
+          '& option:checked': {
+            backgroundColor: alpha(EMERALD[500], 0.25),
+            color: theme.palette.text.primary,
+          },
+          '& option:disabled': { color: theme.palette.text.disabled },
+        }),
       },
     },
     MuiChip: {

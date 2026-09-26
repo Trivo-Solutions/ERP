@@ -2,7 +2,9 @@ import { Router, Request, Response } from 'express';
 import { authenticate } from '../../middleware/auth';
 import { requirePermission } from '../../middleware/rbac';
 import { resolveTenantContext, assertOwnedByCompany, assertOwnedIfPresent } from '../../middleware/tenant';
-import { tenantQuery } from '../../shared/tenantContext';
+import { tenantQuery, tenantTransaction } from '../../shared/tenantContext';
+import { Prisma } from '@prisma/client';
+import { AppError } from '../../middleware/error';
 
 export const mastersRouter = Router();
 // Every master below is company-owned (Phase 1 of full company isolation): each company has its
@@ -23,6 +25,23 @@ function pick(body: Record<string, unknown>, keys: readonly string[]): Record<st
 // code is always stored upper-case (it's a business code, and the per-company unique key).
 function withUpperCode<T extends Record<string, unknown>>(data: T): T {
   return typeof data.code === 'string' ? { ...data, code: data.code.toUpperCase() } : data;
+}
+
+// DELETE for a master row. A master is only removable while nothing references it: every FK from
+// tags/invoices/rates back to a master is ON DELETE RESTRICT, so the database itself refuses (P2003)
+// and history is never touched. An in-use row is turned into a clear 409 — deactivate it instead.
+async function deleteUnusedMaster(companyId: string, label: string, remove: Parameters<typeof tenantQuery<unknown>>[1]) {
+  try {
+    await tenantQuery(companyId, remove);
+  } catch (err) {
+    // Inside a batch the driver surfaces Postgres's own 23001/23503 as an unknown-request error rather than P2003.
+    const blockedByReference = (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2003') ||
+      (err instanceof Prisma.PrismaClientUnknownRequestError && /23001|23503|violates (RESTRICT|foreign key)/.test(err.message));
+    if (blockedByReference) {
+      throw new AppError(`${label} is in use and cannot be deleted. Deactivate it instead.`, 409);
+    }
+    throw err;
+  }
 }
 
 // ─── Stock Types (how a piece is held — Ready/Approval/Karigar stock, etc.) ────
@@ -53,6 +72,13 @@ mastersRouter.patch('/stock-types/:id', requirePermission('masters:manage'), asy
     tx.stockType.update({ where: { id: req.params.id }, data: withUpperCode(pick(req.body, STOCK_TYPE_FIELDS)) })
   );
   res.json({ success: true, data: item });
+});
+
+mastersRouter.delete('/stock-types/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+  const companyId = req.tenant!.companyId;
+  await assertOwnedByCompany('stockType', req.params.id, companyId, 'Stock type');
+  await deleteUnusedMaster(companyId, 'This stock type', (tx) => tx.stockType.delete({ where: { id: req.params.id } }));
+  res.json({ success: true, message: 'Stock type deleted' });
 });
 
 // ─── Product Categories ────────────────────────────────────────────────────────
@@ -87,6 +113,13 @@ mastersRouter.patch('/categories/:id', requirePermission('masters:manage'), asyn
     tx.productCategory.update({ where: { id: req.params.id }, data: withUpperCode(pick(req.body, CATEGORY_FIELDS)) })
   );
   res.json({ success: true, data: item });
+});
+
+mastersRouter.delete('/categories/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+  const companyId = req.tenant!.companyId;
+  await assertOwnedByCompany('productCategory', req.params.id, companyId, 'Category');
+  await deleteUnusedMaster(companyId, 'This category', (tx) => tx.productCategory.delete({ where: { id: req.params.id } }));
+  res.json({ success: true, message: 'Category deleted' });
 });
 
 // ─── Sub-categories ───────────────────────────────────────────────────────────
@@ -129,6 +162,13 @@ mastersRouter.patch('/subcategories/:id', requirePermission('masters:manage'), a
   res.json({ success: true, data: item });
 });
 
+mastersRouter.delete('/subcategories/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+  const companyId = req.tenant!.companyId;
+  await assertOwnedByCompany('subCategory', req.params.id, companyId, 'Sub-category');
+  await deleteUnusedMaster(companyId, 'This sub-category', (tx) => tx.subCategory.delete({ where: { id: req.params.id } }));
+  res.json({ success: true, message: 'Sub-category deleted' });
+});
+
 // ─── Collections ──────────────────────────────────────────────────────────────
 
 const COLLECTION_FIELDS = ['code', 'name', 'description', 'isActive'] as const;
@@ -155,6 +195,13 @@ mastersRouter.patch('/collections/:id', requirePermission('masters:manage'), asy
     tx.collection.update({ where: { id: req.params.id }, data: withUpperCode(pick(req.body, COLLECTION_FIELDS)) })
   );
   res.json({ success: true, data: item });
+});
+
+mastersRouter.delete('/collections/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+  const companyId = req.tenant!.companyId;
+  await assertOwnedByCompany('collection', req.params.id, companyId, 'Collection');
+  await deleteUnusedMaster(companyId, 'This collection', (tx) => tx.collection.delete({ where: { id: req.params.id } }));
+  res.json({ success: true, message: 'Collection deleted' });
 });
 
 // ─── Material Codes ───────────────────────────────────────────────────────────
@@ -188,6 +235,13 @@ mastersRouter.patch('/material-codes/:id', requirePermission('masters:manage'), 
   res.json({ success: true, data: item });
 });
 
+mastersRouter.delete('/material-codes/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+  const companyId = req.tenant!.companyId;
+  await assertOwnedByCompany('materialCode', req.params.id, companyId, 'Material code');
+  await deleteUnusedMaster(companyId, 'This material code', (tx) => tx.materialCode.delete({ where: { id: req.params.id } }));
+  res.json({ success: true, message: 'Material code deleted' });
+});
+
 // ─── Karat / Purity Master ────────────────────────────────────────────────────
 
 const KARAT_FIELDS = ['code', 'metalType', 'purity', 'isActive'] as const;
@@ -195,7 +249,12 @@ const KARAT_FIELDS = ['code', 'metalType', 'purity', 'isActive'] as const;
 mastersRouter.get('/karats', requirePermission('masters:view'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   const data = await tenantQuery(companyId, (tx) =>
-    tx.karatMaster.findMany({ where: { companyId, isActive: true }, orderBy: { code: 'asc' } })
+    // Dropdowns want active karats only; the Masters page passes includeInactive so a removed
+    // (deactivated) karat stays visible there and can be re-activated.
+    tx.karatMaster.findMany({
+      where: { companyId, ...(req.query.includeInactive === 'true' ? {} : { isActive: true }) },
+      orderBy: { code: 'asc' },
+    })
   );
   res.json({ success: true, data });
 });
@@ -214,6 +273,31 @@ mastersRouter.patch('/karats/:id', requirePermission('masters:manage'), async (r
     tx.karatMaster.update({ where: { id: req.params.id }, data: withUpperCode(pick(req.body, KARAT_FIELDS)) })
   );
   res.json({ success: true, data: item });
+});
+
+mastersRouter.delete('/karats/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+  const companyId = req.tenant!.companyId;
+  await assertOwnedByCompany('karatMaster', req.params.id, companyId, 'Karat');
+  // Tags, rates, POs, invoices and making charges hold the karat as plain text (no FK), so the database
+  // can't guard it — check the usage here.
+  const used = await tenantTransaction(companyId, async (tx) => {
+    const { code } = await tx.karatMaster.findUniqueOrThrow({ where: { id: req.params.id } });
+    const counts = await Promise.all([
+      tx.jewelryTag.count({ where: { companyId, metalKarat: code } }),
+      tx.makingCharge.count({ where: { companyId, karat: code } }),
+      tx.materialCode.count({ where: { companyId, karat: code } }),
+      tx.metalRate.count({ where: { companyId, karat: code } }),
+      tx.poItem.count({ where: { companyId, karat: code } }),
+      tx.poItemCategory.count({ where: { companyId, karat: code } }),
+      tx.invoiceItem.count({ where: { companyId, karat: code } }),
+      tx.memoItem.count({ where: { companyId, karat: code } }),
+      tx.purchaseLot.count({ where: { companyId, karat: code } }),
+    ]);
+    return counts.reduce((a, b) => a + b, 0);
+  });
+  if (used > 0) throw new AppError('This karat is in use and cannot be deleted. Deactivate it instead.', 409);
+  await deleteUnusedMaster(companyId, 'This karat', (tx) => tx.karatMaster.delete({ where: { id: req.params.id } }));
+  res.json({ success: true, message: 'Karat deleted' });
 });
 
 // ─── Stone Types ──────────────────────────────────────────────────────────────
@@ -242,6 +326,13 @@ mastersRouter.patch('/stone-types/:id', requirePermission('masters:manage'), asy
     tx.stoneType.update({ where: { id: req.params.id }, data: withUpperCode(pick(req.body, STONE_TYPE_FIELDS)) })
   );
   res.json({ success: true, data: item });
+});
+
+mastersRouter.delete('/stone-types/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+  const companyId = req.tenant!.companyId;
+  await assertOwnedByCompany('stoneType', req.params.id, companyId, 'Stone type');
+  await deleteUnusedMaster(companyId, 'This stone type', (tx) => tx.stoneType.delete({ where: { id: req.params.id } }));
+  res.json({ success: true, message: 'Stone type deleted' });
 });
 
 // ─── Stone Grades (a reusable shape/color/clarity/cut, or quality, combination for a
@@ -296,6 +387,13 @@ mastersRouter.patch('/stone-grades/:id', requirePermission('masters:manage'), as
     tx.stoneGrade.update({ where: { id: req.params.id }, data: pick(req.body, STONE_GRADE_FIELDS) })
   );
   res.json({ success: true, data: item });
+});
+
+mastersRouter.delete('/stone-grades/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+  const companyId = req.tenant!.companyId;
+  await assertOwnedByCompany('stoneGrade', req.params.id, companyId, 'Stone grade');
+  await deleteUnusedMaster(companyId, 'This stone grade', (tx) => tx.stoneGrade.delete({ where: { id: req.params.id } }));
+  res.json({ success: true, message: 'Stone grade deleted' });
 });
 
 // ─── Price Master ─────────────────────────────────────────────────────────────

@@ -42,6 +42,18 @@ const ITEM_TYPES: Record<string, { label: string; color: 'primary' | 'secondary'
 const itemTypeLabel = (t?: string | null) => (t && ITEM_TYPES[t]?.label) || t || '—';
 const itemTypeColor = (t?: string | null) => (t && ITEM_TYPES[t]?.color) || 'default';
 
+// Delete for a master row. The server only deletes a row nothing references (tags, invoices, rates,
+// child rows); an in-use one comes back as a 409 whose message tells the user to deactivate it.
+function useMasterDelete() {
+  const { enqueueSnackbar } = useSnackbar();
+  return (path: string, label: string, onDone: () => void) => {
+    if (!window.confirm(`Delete this ${label}? This cannot be undone.`)) return;
+    apiDelete(path)
+      .then(() => { enqueueSnackbar(`${label} deleted`, { variant: 'success' }); onDone(); })
+      .catch((e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' }));
+  };
+}
+
 // ─── Inline add/edit form panel ───────────────────────────────────────────────
 
 function FormPanel({
@@ -168,17 +180,18 @@ function EditableCell({
 // needed a live Karat dropdown — GenericMasterSection's `fields` only support static options.
 
 function GenericMasterSection({
-  title, description, queryKey, apiPath, columns, fields,
+  title, description, queryKey, apiPath, listParams, invalidateKeys, columns, fields,
 }: {
-  title: string; description?: string; queryKey: string; apiPath: string;
+  title: string; description?: string; queryKey: string; apiPath: string; listParams?: Record<string, any>; invalidateKeys?: string[];
   columns: Array<{ key: string; label: string; render?: (row: any) => React.ReactNode; filterValue?: (row: any) => string }>;
   fields: Array<{ name: string; label: string; type?: string; required?: boolean; options?: string[] }>;
 }) {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
   const [selected, setSelected] = useState<any>(null);
+  const deleteMaster = useMasterDelete();
 
-  const { data, isLoading } = useQuery({ queryKey: [queryKey], queryFn: () => apiGet<any>(apiPath) });
+  const { data, isLoading } = useQuery({ queryKey: [queryKey], queryFn: () => apiGet<any>(apiPath, listParams) });
   const rows: any[] = (data as any)?.data ?? data ?? [];
 
   const defaultVals: any = {};
@@ -189,6 +202,7 @@ function GenericMasterSection({
     mutationFn: (data: any) => (selected ? apiPatch(`${apiPath}/${selected.id}`, data) : apiPost(apiPath, data)),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: [queryKey] });
+      invalidateKeys?.forEach((k) => qc.invalidateQueries({ queryKey: [k] }));
       enqueueSnackbar(selected ? 'Updated' : 'Created', { variant: 'success' });
       setSelected(null); reset(defaultVals);
     },
@@ -197,7 +211,10 @@ function GenericMasterSection({
 
   const toggleActive = (row: any) => {
     apiPatch(`${apiPath}/${row.id}`, { isActive: !row.isActive })
-      .then(() => qc.invalidateQueries({ queryKey: [queryKey] }))
+      .then(() => {
+        qc.invalidateQueries({ queryKey: [queryKey] });
+        invalidateKeys?.forEach((k) => qc.invalidateQueries({ queryKey: [k] }));
+      })
       .catch((e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' }));
   };
 
@@ -215,7 +232,12 @@ function GenericMasterSection({
       <Grid item xs={12} md={4}>
         <FormPanel title={selected ? `Edit ${title}` : `New ${title}`} isEdit={!!selected} saving={mutation.isPending}
           onAdd={handleSubmit((d) => mutation.mutate(d))} onUpdate={handleSubmit((d) => mutation.mutate(d))}
-          onClear={() => { setSelected(null); reset(defaultVals); }}>
+          onClear={() => { setSelected(null); reset(defaultVals); }}
+          onDelete={selected ? () => deleteMaster(`${apiPath}/${selected.id}`, title.toLowerCase(), () => {
+            qc.invalidateQueries({ queryKey: [queryKey] });
+            invalidateKeys?.forEach((k) => qc.invalidateQueries({ queryKey: [k] }));
+            setSelected(null); reset(defaultVals);
+          }) : undefined}>
           {fields.map((f) => (
             <Controller key={f.name} name={f.name} control={control} rules={{ required: f.required }}
               render={({ field, fieldState }) => {
@@ -268,6 +290,7 @@ function CategoriesTab() {
   const qc = useQueryClient();
   const [selectedCat, setSelectedCat] = useState<any>(null);
   const [selectedSub, setSelectedSub] = useState<any>(null);
+  const deleteMaster = useMasterDelete();
 
   const { data: catData, isLoading: catLoading } = useQuery({
     queryKey: ['master-categories'],
@@ -324,7 +347,11 @@ function CategoriesTab() {
             isEdit={!!selectedCat} saving={catMutation.isPending}
             onAdd={handleCatSubmit((d) => catMutation.mutate(d))}
             onUpdate={handleCatSubmit((d) => catMutation.mutate(d))}
-            onClear={() => { setSelectedCat(null); setSelectedSub(null); resetCat(catDefaults); }}>
+            onClear={() => { setSelectedCat(null); setSelectedSub(null); resetCat(catDefaults); }}
+            onDelete={selectedCat ? () => deleteMaster(`/masters/categories/${selectedCat.id}`, 'category', () => {
+              qc.invalidateQueries({ queryKey: ['master-categories'] });
+              setSelectedCat(null); setSelectedSub(null); resetCat(catDefaults);
+            }) : undefined}>
             <Controller name="code" control={catControl} rules={{ required: true }}
               render={({ field, fieldState }) => <TextField {...field} fullWidth size="small" label="Category Code *" error={!!fieldState.error} />} />
             <Controller name="name" control={catControl} rules={{ required: true }}
@@ -353,7 +380,12 @@ function CategoriesTab() {
             isEdit={!!selectedSub} saving={subMutation.isPending} disabled={!selectedCat}
             onAdd={handleSubSubmit((d) => subMutation.mutate(d))}
             onUpdate={handleSubSubmit((d) => subMutation.mutate(d))}
-            onClear={() => { setSelectedSub(null); resetSub(subDefaults); }}>
+            onClear={() => { setSelectedSub(null); resetSub(subDefaults); }}
+            onDelete={selectedSub ? () => deleteMaster(`/masters/subcategories/${selectedSub.id}`, 'sub-category', () => {
+              qc.invalidateQueries({ queryKey: ['master-subcategories'] });
+              qc.invalidateQueries({ queryKey: ['master-categories'] });
+              setSelectedSub(null); resetSub(subDefaults);
+            }) : undefined}>
             <Controller name="code" control={subControl} rules={{ required: true }}
               render={({ field, fieldState }) => <TextField {...field} fullWidth size="small" label="Sub-category Code *" disabled={!selectedCat} error={!!fieldState.error} />} />
             <Controller name="name" control={subControl} rules={{ required: true }}
@@ -397,6 +429,7 @@ function StoneTypesTab() {
   const qc = useQueryClient();
   const [selectedType, setSelectedType] = useState<any>(null);
   const [selectedGrade, setSelectedGrade] = useState<any>(null);
+  const deleteMaster = useMasterDelete();
 
   const { data: typeData, isLoading: typeLoading } = useQuery({
     queryKey: ['master-stone-types'], queryFn: () => apiGet<any>('/masters/stone-types'),
@@ -477,7 +510,11 @@ function StoneTypesTab() {
           <Typography variant="subtitle2" fontWeight={700}>Stone Types</Typography>
           <FormPanel title={selectedType ? `Edit — ${selectedType.code}` : 'New Stone Type'} isEdit={!!selectedType} saving={typeMutation.isPending}
             onAdd={handleTypeSubmit((d) => typeMutation.mutate(d))} onUpdate={handleTypeSubmit((d) => typeMutation.mutate(d))}
-            onClear={() => { setSelectedType(null); setSelectedGrade(null); resetType(typeDefaults); }}>
+            onClear={() => { setSelectedType(null); setSelectedGrade(null); resetType(typeDefaults); }}
+            onDelete={selectedType ? () => deleteMaster(`/masters/stone-types/${selectedType.id}`, 'stone type', () => {
+              qc.invalidateQueries({ queryKey: ['master-stone-types'] });
+              setSelectedType(null); setSelectedGrade(null); resetType(typeDefaults);
+            }) : undefined}>
             <Controller name="itemType" control={typeControl} rules={{ required: true }} render={({ field, fieldState }) => (
               <TextField {...field} select fullWidth size="small" label="Item Type *" error={!!fieldState.error} SelectProps={{ native: true }}>
                 <option value="" />
@@ -535,7 +572,11 @@ function StoneTypesTab() {
           <FormPanel title={selectedGrade ? 'Edit Stone Grade' : 'New Stone Grade'} isEdit={!!selectedGrade} saving={gradeMutation.isPending}
             disabled={!selectedType}
             onAdd={handleGradeSubmit((d) => gradeMutation.mutate(d))} onUpdate={handleGradeSubmit((d) => gradeMutation.mutate(d))}
-            onClear={() => { setSelectedGrade(null); resetGrade(gradeDefaults); }}>
+            onClear={() => { setSelectedGrade(null); resetGrade(gradeDefaults); }}
+            onDelete={selectedGrade ? () => deleteMaster(`/masters/stone-grades/${selectedGrade.id}`, 'stone grade', () => {
+              qc.invalidateQueries({ queryKey: ['master-stone-grades'] });
+              setSelectedGrade(null); resetGrade(gradeDefaults);
+            }) : undefined}>
             {/* Not gated by itemType — CZ (itemType STONE) still needs diamond-style shape/color/
                 clarity/cut, and a fancy-color diamond can want a quality note too. Every field is
                 optional, so just leave whichever don't apply to this gem blank. */}
@@ -795,6 +836,7 @@ function MaterialCodesTab() {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
   const [selected, setSelected] = useState<any>(null);
+  const deleteMaster = useMasterDelete();
 
   const { data: karatsData } = useQuery({ queryKey: ['karats'], queryFn: () => apiGet<any>('/masters/karats') });
   const karats: any[] = (karatsData as any)?.data ?? (karatsData as any) ?? [];
@@ -842,7 +884,11 @@ function MaterialCodesTab() {
         <Grid item xs={12} md={4}>
           <FormPanel title={selected ? 'Edit Material Code' : 'New Material Code'} isEdit={!!selected} saving={mutation.isPending}
             onAdd={handleSubmit((d) => mutation.mutate(d))} onUpdate={handleSubmit((d) => mutation.mutate(d))}
-            onClear={() => { setSelected(null); reset(defaultVals); }}>
+            onClear={() => { setSelected(null); reset(defaultVals); }}
+            onDelete={selected ? () => deleteMaster(`/masters/material-codes/${selected.id}`, 'material code', () => {
+              qc.invalidateQueries({ queryKey: ['master-material-codes'] });
+              setSelected(null); reset(defaultVals);
+            }) : undefined}>
             <Controller name="code" control={control} rules={{ required: true }} render={({ field, fieldState }) => (
               <TextField {...field} fullWidth size="small" label="Code (e.g. G22, FIND-01) *" error={!!fieldState.error} />
             )} />
@@ -1277,6 +1323,7 @@ const SECTIONS: Array<{ key: string; label: string; icon: React.ReactNode }> = [
   { key: 'stockTypes', label: 'Stock Types', icon: <Inventory2 fontSize="small" /> },
   { key: 'clients', label: 'Clients', icon: <Business fontSize="small" /> },
   { key: 'collections', label: 'Collections', icon: <CollectionsIcon fontSize="small" /> },
+  { key: 'karats', label: 'Karats', icon: <Diamond fontSize="small" /> },
   { key: 'materialCodes', label: 'Material Codes', icon: <Diamond fontSize="small" /> },
   { key: 'stoneTypes', label: 'Stone Types', icon: <AutoAwesome fontSize="small" /> },
   { key: 'priceMaster', label: 'Price Master', icon: <AttachMoney fontSize="small" /> },
@@ -1352,6 +1399,22 @@ export function MastersPage() {
                 { name: 'code', label: 'Code (e.g. BRD)', required: true },
                 { name: 'name', label: 'Name (e.g. Bridal)', required: true },
                 { name: 'description', label: 'Description', type: 'textarea' },
+              ]} />
+          )}
+
+          {section === 'karats' && (
+            <GenericMasterSection title="Karat" queryKey="master-karats-manage" apiPath="/masters/karats"
+              listParams={{ includeInactive: 'true' }} invalidateKeys={['karats', 'master-karats']}
+              description="The karat / purity list offered in every Karat dropdown (PO lots, tags, rates, invoices). Add a new karat here; click a Status chip to remove one from the dropdowns (it is deactivated, not deleted — existing tags and invoices keep their karat). Avoid renaming a code that is already in use."
+              columns={[
+                { key: 'code', label: 'Karat', render: (r: any) => <Chip label={r.code} size="small" color="warning" /> },
+                { key: 'metalType', label: 'Metal' },
+                { key: 'purity', label: 'Purity', render: (r: any) => Number(r.purity).toFixed(4) },
+              ]}
+              fields={[
+                { name: 'code', label: 'Karat code (e.g. 22K, 925)', required: true },
+                { name: 'metalType', label: 'Metal *', required: true, options: ['GOLD', 'SILVER', 'PLATINUM'] },
+                { name: 'purity', label: 'Purity fraction (e.g. 0.9167 for 22K)', type: 'number', required: true },
               ]} />
           )}
 

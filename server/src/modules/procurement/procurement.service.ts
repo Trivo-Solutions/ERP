@@ -659,6 +659,36 @@ export async function rejectPO(id: string, ctx: TenantContext, userId: string, c
   return updated;
 }
 
+// A PO that has not received anything yet is only an intention — it books no stock and no journal — so it can
+// be removed outright. The moment a GRN exists (goods received, tags/lot opened, payable booked) it is a
+// record of something that happened and can no longer be deleted (the GRN's FK to the PO enforces this too).
+// Deleting a PO that came from a requisition puts that requisition back to APPROVED so it can be converted again.
+export async function deletePO(id: string, ctx: TenantContext, userId: string, canDeleteApproved: boolean) {
+  await assertOwnedByCompany('purchaseOrder', id, ctx.companyId, 'Purchase Order');
+  await tenantTransaction(ctx.companyId, async (tx) => {
+    const po = await tx.purchaseOrder.findUniqueOrThrow({
+      where: { id }, include: { _count: { select: { grns: true } } },
+    });
+    if (po._count.grns > 0) {
+      throw new AppError('This purchase order already has goods receipts and cannot be deleted.', 409);
+    }
+    if (['APPROVED', 'PENDING_APPROVAL'].includes(po.status) && !canDeleteApproved) {
+      throw new AppError('Deleting a submitted or approved purchase order needs the approve permission.', 403);
+    }
+    if (!['DRAFT', 'PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'CANCELLED'].includes(po.status)) {
+      throw new AppError(`A ${po.status} purchase order cannot be deleted.`, 409);
+    }
+    if (po.purchaseRequisitionId) {
+      await tx.purchaseRequisition.updateMany({
+        where: { id: po.purchaseRequisitionId, companyId: ctx.companyId, status: 'CONVERTED' },
+        data: { status: 'APPROVED', convertedPoId: null },
+      });
+    }
+    await tx.purchaseOrder.delete({ where: { id } });
+  });
+  await createAuditEntry('purchase_orders', id, userId, 'DELETE', undefined, undefined, ctx.companyId);
+}
+
 // ─── Supplier Performance ─────────────────────────────────────────────────────
 
 // Supplier is now company-owned (Phase 3 — reversed from the earlier "keep it global" call, see

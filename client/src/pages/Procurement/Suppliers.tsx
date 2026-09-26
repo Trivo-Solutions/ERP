@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Box, Card, Table, TableHead, TableBody, TableRow, TableCell, Typography, Button,
-  Grid, Chip, Dialog, DialogTitle, DialogContent, DialogActions, TextField, MenuItem,
+  Grid, Chip, Dialog, DialogTitle, DialogContent, DialogActions, TextField,
   Tabs, Tab, Stack, CircularProgress,
 } from '@mui/material';
 import { Add, TrendingUp, LocalShipping, Scale, CurrencyRupee } from '@mui/icons-material';
@@ -15,8 +15,7 @@ import { usePermissions } from '../../hooks/usePermissions';
 import { SelectField } from '../../components/fields/SelectField';
 import { CurrencyField } from '../../components/fields/CurrencyField';
 import { DateField } from '../../components/fields/DateField';
-
-const SUPPLIER_TYPES = ['METAL_REFINER', 'STONE_DEALER', 'FINDINGS_VENDOR', 'KARIGAR', 'OTHER'];
+import { AddSupplierDialog } from '../../components/common/AddSupplierDialog';
 
 function fmt(n: number) {
   return '₹' + n.toLocaleString('en-IN', { maximumFractionDigits: 0 });
@@ -147,10 +146,6 @@ function SupplierList() {
     queryFn: () => apiGet<any[]>('/procurement/suppliers'),
   });
 
-  const { control, handleSubmit, reset } = useForm({
-    defaultValues: { name: '', type: 'METAL_REFINER', gstNumber: '', panNumber: '', phone: '', email: '', city: '', state: '' },
-  });
-
   const payForm = useForm({
     defaultValues: { amount: '' as string | number, mode: 'BANK_TRANSFER', paymentDate: new Date().toISOString().split('T')[0], referenceNo: '', notes: '' },
   });
@@ -166,17 +161,6 @@ function SupplierList() {
       enqueueSnackbar('Payment recorded', { variant: 'success' });
     },
     onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed to record payment', { variant: 'error' }),
-  });
-
-  const mutation = useMutation({
-    mutationFn: (data: any) => apiPost('/procurement/suppliers', data),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['suppliers'] });
-      setCreateOpen(false);
-      reset();
-      enqueueSnackbar('Supplier added', { variant: 'success' });
-    },
-    onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' }),
   });
 
   return (
@@ -229,55 +213,7 @@ function SupplierList() {
         </Box>
       </Card>
 
-      <Dialog open={createOpen} onClose={() => setCreateOpen(false)} maxWidth="sm" fullWidth>
-        <form onSubmit={handleSubmit((d) => mutation.mutate(d))}>
-          <DialogTitle fontWeight={700}>Add Supplier</DialogTitle>
-          <DialogContent sx={{ pt: 2 }}>
-            <Grid container spacing={2}>
-              <Grid item xs={8}>
-                <Controller name="name" control={control} rules={{ required: true }}
-                  render={({ field }) => <TextField {...field} fullWidth label="Company Name" />} />
-              </Grid>
-              <Grid item xs={4}>
-                <Controller name="type" control={control}
-                  render={({ field }) => (
-                    <TextField {...field} select fullWidth label="Type">
-                      {SUPPLIER_TYPES.map((t) => <MenuItem key={t} value={t}>{t}</MenuItem>)}
-                    </TextField>
-                  )} />
-              </Grid>
-              <Grid item xs={6}>
-                <Controller name="gstNumber" control={control}
-                  render={({ field }) => <TextField {...field} fullWidth label="GSTIN" />} />
-              </Grid>
-              <Grid item xs={6}>
-                <Controller name="phone" control={control}
-                  render={({ field }) => <TextField {...field} fullWidth label="Phone" />} />
-              </Grid>
-              <Grid item xs={6}>
-                <Controller name="email" control={control}
-                  render={({ field }) => <TextField {...field} fullWidth label="Email" type="email" />} />
-              </Grid>
-              <Grid item xs={6}>
-                <Controller name="panNumber" control={control}
-                  render={({ field }) => <TextField {...field} fullWidth label="PAN" />} />
-              </Grid>
-              <Grid item xs={3}>
-                <Controller name="city" control={control}
-                  render={({ field }) => <TextField {...field} fullWidth label="City" />} />
-              </Grid>
-              <Grid item xs={3}>
-                <Controller name="state" control={control}
-                  render={({ field }) => <TextField {...field} fullWidth label="State" helperText="Used for CGST/SGST vs IGST when GSTIN is blank" />} />
-              </Grid>
-            </Grid>
-          </DialogContent>
-          <DialogActions sx={{ p: 2.5 }}>
-            <Button onClick={() => setCreateOpen(false)}>Cancel</Button>
-            <Button type="submit" variant="contained" disabled={mutation.isPending}>Save</Button>
-          </DialogActions>
-        </form>
-      </Dialog>
+      <AddSupplierDialog open={createOpen} onClose={() => setCreateOpen(false)} />
 
       {/* Money out to a supplier: Dr Accounts Payable / Cr Cash-or-Bank, reduces the payable above. */}
       <Dialog open={!!paySupplier} onClose={() => setPaySupplier(null)} maxWidth="xs" fullWidth>

@@ -157,6 +157,13 @@ procurementRouter.post('/orders/:id/reject', requirePermission('po:approve'), as
   res.json({ success: true, data: po });
 });
 
+procurementRouter.delete('/orders/:id', requirePermission('po:create'), async (req: Request, res: Response) => {
+  const perms = new Set(req.user!.permissions);
+  const canDeleteApproved = perms.has('*') || perms.has('po:*') || perms.has('po:approve');
+  await svc.deletePO(req.params.id, req.tenant!, req.user!.userId, canDeleteApproved);
+  res.json({ success: true, message: 'Purchase order deleted' });
+});
+
 // Supplier Performance
 procurementRouter.get('/suppliers/performance', requirePermission('po:view'), async (req: Request, res: Response) => {
   res.json({ success: true, data: await svc.getSuppliersPerformance(req.tenant!) });
