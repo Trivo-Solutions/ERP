@@ -6,7 +6,7 @@ import {
 import { Download } from '@mui/icons-material';
 import { useQuery } from '@tanstack/react-query';
 import { apiGet } from '../../api/client';
-import { PageHeader } from '../../components/common/PageHeader';
+import { PageHeader, PageActions } from '../../components/common/PageHeader';
 import { exportToCsv } from '../../utils/exportToCsv';
 
 function money(n: number) {
@@ -36,24 +36,7 @@ export function SalesRegister() {
 
   return (
     <Box>
-      <PageHeader title="Sales Register" subtitle="Every retail + wholesale invoice in a period"
-        breadcrumbs={[{ label: 'Reports', path: '/reports/sales-register' }, { label: 'Sales Register' }]}
-        actions={rows.length > 0 ? [{
-          label: 'Export CSV', icon: <Download />,
-          onClick: () => exportToCsv('sales-register', [
-            { header: 'Invoice #', value: (r: any) => r.invoiceNumber },
-            { header: 'Date', value: (r: any) => new Date(r.invoiceDate).toLocaleDateString('en-IN') },
-            { header: 'Type', value: (r: any) => r.invoiceType },
-            { header: 'Client', value: (r: any) => `${r.client.clientCode} — ${r.client.name}` },
-            { header: 'Salesperson', value: (r: any) => r.salesPerson ?? '' },
-            { header: 'Items', value: (r: any) => r.itemCount },
-            { header: 'Subtotal', value: (r: any) => r.subtotal },
-            { header: 'Tax', value: (r: any) => r.taxAmount },
-            { header: 'Total', value: (r: any) => r.totalAmount },
-            { header: 'Balance Due', value: (r: any) => r.balanceDue },
-            { header: 'Status', value: (r: any) => r.status },
-          ], rows),
-        }] : []} />
+      <PageHeader title="Sales Register" />
 
       <Card sx={{ p: 2, mb: 2 }}>
         <Grid container spacing={2} alignItems="center">
@@ -71,6 +54,24 @@ export function SalesRegister() {
               <MenuItem value="">All</MenuItem>
               {(staff ?? []).map((s: any) => <MenuItem key={s.id} value={s.id}>{s.name}</MenuItem>)}
             </TextField>
+          </Grid>
+          <Grid item sx={{ ml: 'auto', alignSelf: 'center' }}>
+            <PageActions actions={rows.length > 0 ? [{
+          label: 'Export CSV', icon: <Download />,
+          onClick: () => exportToCsv('sales-register', [
+            { header: 'Invoice #', value: (r: any) => r.invoiceNumber },
+            { header: 'Date', value: (r: any) => new Date(r.invoiceDate).toLocaleDateString('en-IN') },
+            { header: 'Type', value: (r: any) => r.invoiceType },
+            { header: 'Client', value: (r: any) => `${r.client.clientCode} — ${r.client.name}` },
+            { header: 'Salesperson', value: (r: any) => r.salesPerson ?? '' },
+            { header: 'Items', value: (r: any) => r.itemCount },
+            { header: 'Subtotal', value: (r: any) => r.subtotal },
+            { header: 'Tax', value: (r: any) => r.taxAmount },
+            { header: 'Total', value: (r: any) => r.totalAmount },
+            { header: 'Balance Due', value: (r: any) => r.balanceDue },
+            { header: 'Status', value: (r: any) => r.status },
+          ], rows),
+        }] : []} />
           </Grid>
         </Grid>
       </Card>

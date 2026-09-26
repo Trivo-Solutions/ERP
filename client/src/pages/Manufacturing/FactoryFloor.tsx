@@ -50,7 +50,7 @@ export function FactoryFloor() {
 
   return (
     <Box>
-      <PageHeader title="Factory Floor — Live WIP" subtitle="Real-time production tracking across all process stations" />
+      <PageHeader title="Factory Floor — Live WIP" />
 
       {/* KPIs */}
       <Grid container spacing={2} sx={{ mb: 3 }}>

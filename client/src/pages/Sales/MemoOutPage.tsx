@@ -426,8 +426,7 @@ export function MemoOutPage() {
 
   return (
     <Box>
-      <PageHeader title="Approval Memos" subtitle="Send jewelry pieces on approval — track returns and convert to invoices"
-        breadcrumbs={[{ label: 'Sales', path: '/sales/memos' }, { label: 'Approval Memos' }]}
+      <PageHeader title="Approval Memos"
         actions={[
           { label: 'Check Aging Alerts', onClick: () => alertMutation.mutate(), variant: 'outlined' as const },
           { label: 'Send on Approval', icon: <Add />, onClick: () => setCreateOpen(true) },

@@ -17,8 +17,7 @@ export function DealerAging() {
 
   return (
     <Box>
-      <PageHeader title="Dealer Aging" subtitle="Outstanding balances by age, and who's over their credit limit"
-        breadcrumbs={[{ label: 'Finance', path: '/finance/journals' }, { label: 'Dealer Aging' }]} />
+      <PageHeader title="Dealer Aging" />
 
       <Card>
         <Box sx={{ overflowX: 'auto' }}>

@@ -37,8 +37,6 @@ export function KarigarBalances() {
     <Box>
       <PageHeader
         title="Karigar Metal Balances"
-        subtitle="Running weight outstanding with each artisan — pending return to vault"
-        breadcrumbs={[{ label: 'Reports', path: '/reports/wip' }, { label: 'Karigar Balances' }]}
       />
 
       <Grid container spacing={2} sx={{ mb: 2 }}>

@@ -55,8 +55,7 @@ export function RepairJobs() {
 
   return (
     <Box>
-      <PageHeader title="Repair Jobs" subtitle="Customer repairs and QC-failure rework, with cost tracking and billing"
-        breadcrumbs={[{ label: 'Quality', path: '/quality/hallmarking' }, { label: 'Repairs' }]}
+      <PageHeader title="Repair Jobs"
         actions={[{ label: 'New Repair', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
       <Card>
         <Box sx={{ overflowX: 'auto' }}>

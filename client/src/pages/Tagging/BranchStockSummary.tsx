@@ -26,8 +26,7 @@ export function BranchStockSummary() {
 
   return (
     <Box>
-      <PageHeader title="Branch Stock Summary" subtitle="IN_STOCK inventory across every branch, at a glance"
-        breadcrumbs={[{ label: 'Jewelry Tagging', path: '/tagging/tags' }, { label: 'Branch Stock Summary' }]} />
+      <PageHeader title="Branch Stock Summary" />
 
       <Card sx={{ mb: 2, p: 2 }}>
         <Typography variant="caption" color="text.secondary">Network Total (IN_STOCK)</Typography>

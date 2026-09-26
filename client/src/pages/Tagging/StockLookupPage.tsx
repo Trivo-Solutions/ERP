@@ -50,8 +50,7 @@ export function StockLookupPage() {
 
   return (
     <Box>
-      <PageHeader title="Stock Lookup" subtitle="Scan or search a tag to check its status and price — no sale started"
-        breadcrumbs={[{ label: 'Jewelry Tagging', path: '/tagging/tags' }, { label: 'Stock Lookup' }]} />
+      <PageHeader title="Stock Lookup" />
 
       <Card sx={{ mb: 2 }}>
         <CardContent>

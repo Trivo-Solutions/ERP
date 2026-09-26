@@ -40,8 +40,7 @@ export function MetalVault() {
 
   return (
     <Box>
-      <PageHeader title="Metal Vault" subtitle="Real-time precious metal inventory — gold, silver & platinum"
-        breadcrumbs={[{ label: 'Inventory', path: '/inventory/metals' }, { label: 'Metal Vault' }]}
+      <PageHeader title="Metal Vault"
         actions={[{ label: 'Add Metal Stock', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
 
       {scaleWeight !== null && <Alert severity="info" sx={{ mb: 2 }}><Scale sx={{ mr: 1, verticalAlign: 'middle' }} />Scale: <strong>{scaleWeight.toFixed(4)} g</strong></Alert>}

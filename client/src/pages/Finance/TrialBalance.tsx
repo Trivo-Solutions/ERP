@@ -12,8 +12,7 @@ export function TrialBalance() {
 
   return (
     <Box>
-      <PageHeader title="Trial Balance" subtitle="Real-time ledger balance verification"
-        breadcrumbs={[{ label: 'Finance', path: '/finance/journals' }, { label: 'Trial Balance' }]} />
+      <PageHeader title="Trial Balance" />
 
       {!isLoading && !balanced && (
         <Box sx={{ p: 2, bgcolor: 'error.light', borderRadius: 2, mb: 2 }}>

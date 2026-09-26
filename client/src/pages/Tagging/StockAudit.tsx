@@ -256,8 +256,7 @@ export function StockAudit() {
   if (selectedAuditId) {
     return (
       <Box>
-        <PageHeader title="Stock Audit" subtitle="Scan pieces at this branch and reconcile against system stock"
-          breadcrumbs={[{ label: 'Jewelry Tagging', path: '/tagging/tags' }, { label: 'Stock Audit' }]} />
+        <PageHeader title="Stock Audit" />
         <AuditDetail auditId={selectedAuditId} onBack={() => setSelectedAuditId('')} />
       </Box>
     );
@@ -265,8 +264,7 @@ export function StockAudit() {
 
   return (
     <Box>
-      <PageHeader title="Stock Audit" subtitle="Physical stock count, per branch — scan and reconcile against system stock"
-        breadcrumbs={[{ label: 'Jewelry Tagging', path: '/tagging/tags' }, { label: 'Stock Audit' }]} />
+      <PageHeader title="Stock Audit" />
 
       <StartAuditCard onStarted={setSelectedAuditId} />
 

@@ -18,8 +18,7 @@ export function PnLStatement() {
 
   return (
     <Box>
-      <PageHeader title="Profit & Loss Statement" subtitle="Real-time P&L from integrated double-entry ledger"
-        breadcrumbs={[{ label: 'Finance', path: '/finance/journals' }, { label: 'P&L' }]} />
+      <PageHeader title="Profit & Loss Statement" />
 
       <Card sx={{ mb: 2, p: 1.5 }}>
         <Grid container spacing={2} alignItems="center">

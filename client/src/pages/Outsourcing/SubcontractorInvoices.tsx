@@ -8,8 +8,7 @@ export function SubcontractorInvoices() {
   const { data, isLoading } = useQuery({ queryKey: ['subcon-invoices'], queryFn: () => apiGet<any[]>('/outsourcing/invoices') });
   return (
     <Box>
-      <PageHeader title="Sub-Contractor Invoices" subtitle="Automated labor payout invoices with excess-loss deductions"
-        breadcrumbs={[{ label: 'Outsourcing', path: '/outsourcing/ledger' }, { label: 'Invoices' }]} />
+      <PageHeader title="Sub-Contractor Invoices" />
       <Card>
         <Box sx={{ overflowX: 'auto' }}>
         <Table size="small">

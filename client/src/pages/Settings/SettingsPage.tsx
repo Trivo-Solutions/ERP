@@ -13,8 +13,7 @@ export function SettingsPage() {
 
   return (
     <Box>
-      <PageHeader title="System Settings" subtitle="RBAC roles, process tolerances, categories & immutable audit trail"
-        breadcrumbs={[{ label: 'Settings', path: '/settings' }]} />
+      <PageHeader title="System Settings" />
 
       <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 2 }}>
         <Tab label="Roles & Permissions" />

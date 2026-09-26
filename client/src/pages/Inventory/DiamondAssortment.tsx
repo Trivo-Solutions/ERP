@@ -35,8 +35,7 @@ export function DiamondAssortment() {
 
   return (
     <Box>
-      <PageHeader title="Diamond & Stone Assortment" subtitle="Track loose stone parcels by 4Cs, sieve size & certification"
-        breadcrumbs={[{ label: 'Inventory', path: '/inventory/metals' }, { label: 'Stones' }]}
+      <PageHeader title="Diamond & Stone Assortment"
         actions={[{ label: 'Add Stone Lot', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
 
       <Card>

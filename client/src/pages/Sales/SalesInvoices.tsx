@@ -337,8 +337,7 @@ export function SalesInvoices() {
 
   return (
     <Box>
-      <PageHeader title="Sales Invoices" subtitle="Tax invoices, export invoices with GST, e-invoice & packing list generation"
-        breadcrumbs={[{ label: 'Sales', path: '/sales/memos' }, { label: 'Invoices' }]}
+      <PageHeader title="Sales Invoices"
         actions={[{ label: 'New Sale', icon: <Add />, onClick: () => navigate('/sales/invoices/new') }]} />
       <Card>
         <Box sx={{ overflowX: 'auto' }}>

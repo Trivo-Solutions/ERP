@@ -6,7 +6,7 @@ import {
 import { Download } from '@mui/icons-material';
 import { useQuery } from '@tanstack/react-query';
 import { apiGet } from '../../api/client';
-import { PageHeader } from '../../components/common/PageHeader';
+import { PageHeader, PageActions } from '../../components/common/PageHeader';
 import { exportToCsv } from '../../utils/exportToCsv';
 
 function money(n: number) {
@@ -31,9 +31,24 @@ export function StockOnHand() {
 
   return (
     <Box>
-      <PageHeader title="Stock on Hand" subtitle="Sellable inventory (IN_STOCK) by branch and category"
-        breadcrumbs={[{ label: 'Reports', path: '/reports/stock-on-hand' }, { label: 'Stock on Hand' }]}
-        actions={rows.length > 0 ? [{
+      <PageHeader title="Stock on Hand" />
+
+      <Card sx={{ p: 2, mb: 2 }}>
+        <Grid container spacing={2}>
+          <Grid item xs={5}>
+            <TextField fullWidth size="small" select label="Branch" value={branchId} onChange={(e) => setBranchId(e.target.value)}>
+              <MenuItem value="">All Branches</MenuItem>
+              {(branches ?? []).map((b: any) => <MenuItem key={b.id} value={b.id}>{b.name}</MenuItem>)}
+            </TextField>
+          </Grid>
+          <Grid item xs={5}>
+            <TextField fullWidth size="small" select label="Category" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
+              <MenuItem value="">All Categories</MenuItem>
+              {(categories ?? []).map((c: any) => <MenuItem key={c.id} value={c.id}>{c.name}</MenuItem>)}
+            </TextField>
+          </Grid>
+          <Grid item sx={{ ml: 'auto', alignSelf: 'center' }}>
+            <PageActions actions={rows.length > 0 ? [{
           label: 'Export CSV', icon: <Download />,
           onClick: () => exportToCsv('stock-on-hand', [
             { header: 'Branch', value: (r: any) => r.branchName },
@@ -44,20 +59,6 @@ export function StockOnHand() {
             { header: 'Selling Value', value: (r: any) => r.sellingValue },
           ], rows),
         }] : []} />
-
-      <Card sx={{ p: 2, mb: 2 }}>
-        <Grid container spacing={2}>
-          <Grid item xs={6}>
-            <TextField fullWidth size="small" select label="Branch" value={branchId} onChange={(e) => setBranchId(e.target.value)}>
-              <MenuItem value="">All Branches</MenuItem>
-              {(branches ?? []).map((b: any) => <MenuItem key={b.id} value={b.id}>{b.name}</MenuItem>)}
-            </TextField>
-          </Grid>
-          <Grid item xs={6}>
-            <TextField fullWidth size="small" select label="Category" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
-              <MenuItem value="">All Categories</MenuItem>
-              {(categories ?? []).map((c: any) => <MenuItem key={c.id} value={c.id}>{c.name}</MenuItem>)}
-            </TextField>
           </Grid>
         </Grid>
       </Card>

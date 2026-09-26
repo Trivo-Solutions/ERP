@@ -499,8 +499,6 @@ export function GrnVerification() {
     <Box>
       <PageHeader
         title="GRN Verification"
-        subtitle="Cross-verify invoice weights vs scale readings before committing to vault"
-        breadcrumbs={[{ label: 'Procurement', path: '/procurement/orders' }, { label: 'GRN' }]}
         actions={[{ label: 'Create GRN', onClick: () => setCreateOpen(true) }]}
       />
 

@@ -331,8 +331,7 @@ export function Suppliers() {
 
   return (
     <Box>
-      <PageHeader title="Suppliers" subtitle="Manage supplier master records and track vendor performance"
-        breadcrumbs={[{ label: 'Procurement', path: '/procurement/orders' }, { label: 'Suppliers' }]} />
+      <PageHeader title="Suppliers" />
 
       <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 2, borderBottom: 1, borderColor: 'divider' }}>
         <Tab label="Supplier Directory" />

@@ -271,7 +271,6 @@ export function WorkflowPage() {
     <Box>
       <PageHeader
         title="Operations Workflow"
-        subtitle="Step-by-step guide for daily jewelry manufacturing operations"
       />
 
       {/* ── Alert bar ────────────────────────────────────────────────── */}

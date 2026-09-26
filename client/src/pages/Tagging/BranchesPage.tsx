@@ -120,8 +120,7 @@ export function BranchesPage() {
 
   return (
     <Box>
-      <PageHeader title="Branches" subtitle="Manage showroom and branch locations"
-        breadcrumbs={[{ label: 'Jewelry Tagging', path: '/tagging/tags' }, { label: 'Branches' }]}
+      <PageHeader title="Branches"
         actions={[{ label: 'Add Branch', icon: <Add />, onClick: () => setDialog({ open: true }) }]} />
 
       <Card>

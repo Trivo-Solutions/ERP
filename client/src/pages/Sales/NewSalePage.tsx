@@ -470,7 +470,7 @@ export function NewSalePage() {
 
   return (
     <Box>
-      <PageHeader title="New Sale" subtitle="Retail or wholesale direct invoice — client, items, charges and payment"
+      <PageHeader title="New Sale"
         breadcrumbs={[{ label: 'Sales', path: '/sales/invoices' }, { label: 'Invoices', path: '/sales/invoices' }, { label: 'New Sale' }]}
         actions={[{ label: 'Back to Invoices', icon: <ArrowBack />, onClick: () => navigate('/sales/invoices'), variant: 'outlined' as const }]} />
 

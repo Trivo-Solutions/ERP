@@ -40,8 +40,7 @@ export function MetalRates() {
 
   return (
     <Box>
-      <PageHeader title="Daily Metal Rates" subtitle="Update morning gold rates used for cost estimation"
-        breadcrumbs={[{ label: 'Product Design', path: '/designs' }, { label: 'Metal Rates' }]} />
+      <PageHeader title="Daily Metal Rates" />
 
       <Grid container spacing={2}>
         {/* Current Rates */}

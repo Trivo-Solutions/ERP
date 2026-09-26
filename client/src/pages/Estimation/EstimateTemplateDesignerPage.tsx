@@ -513,8 +513,6 @@ export function EstimateTemplateDesignerPage() {
         {COMMON_FONT_SIZES_PT.map((pt) => <option key={pt} value={pt} />)}
       </datalist>
       <PageHeader title="Estimate Template Designer"
-        subtitle="Design the printed layout used for every customer estimate"
-        breadcrumbs={[{ label: 'Estimation', path: '/estimation' }, { label: 'Estimate Templates' }]}
         actions={[{ label: 'Back to Estimation', icon: <ArrowBack />, onClick: () => navigate('/estimation'), variant: 'outlined' as const }]} />
 
       <Grid container spacing={2} alignItems="flex-start">

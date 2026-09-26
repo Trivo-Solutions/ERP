@@ -3,7 +3,7 @@ import { Box, Card, Table, TableHead, TableBody, TableRow, TableCell, Typography
 import { Download } from '@mui/icons-material';
 import { useQuery } from '@tanstack/react-query';
 import { apiGet } from '../../api/client';
-import { PageHeader } from '../../components/common/PageHeader';
+import { PageHeader, PageActions } from '../../components/common/PageHeader';
 import { exportToCsv } from '../../utils/exportToCsv';
 
 function money(n: number) {
@@ -33,9 +33,26 @@ export function PurchaseGstSummary() {
 
   return (
     <Box>
-      <PageHeader title="Purchase GST (Input Tax Credit)" subtitle="GST paid to suppliers on stock received — the credit you can set off against GST collected"
-        breadcrumbs={[{ label: 'Reports', path: '/reports/purchase-gst-summary' }, { label: 'Purchase GST' }]}
-        actions={rows.length > 0 ? [{
+      <PageHeader title="Purchase GST (Input Tax Credit)" />
+
+      <Alert severity="info" sx={{ mb: 2 }}>
+        Prep aid, not a return. GST is booked when a received piece is tagged into stock, using the rate on the
+        purchase order line; purchase returns reduce it. Match the bill-wise view against your GSTR-2B and
+        verify with the supplier bills before claiming credit.
+      </Alert>
+
+      <Card sx={{ p: 2, mb: 2 }}>
+        <Grid container spacing={2}>
+          <Grid item xs={6} sm={3}>
+            <TextField fullWidth size="small" label="From" type="date" value={from}
+              onChange={(e) => setFrom(e.target.value)} InputLabelProps={{ shrink: true }} />
+          </Grid>
+          <Grid item xs={6} sm={3}>
+            <TextField fullWidth size="small" label="To" type="date" value={to}
+              onChange={(e) => setTo(e.target.value)} InputLabelProps={{ shrink: true }} />
+          </Grid>
+          <Grid item sx={{ ml: 'auto', alignSelf: 'center' }}>
+            <PageActions actions={rows.length > 0 ? [{
           label: 'Export CSV', icon: <Download />,
           onClick: () => tab === 0
             ? exportToCsv('purchase-gst-hsn', [
@@ -59,22 +76,6 @@ export function PurchaseGstSummary() {
                 { header: 'IGST', value: (b: any) => b.igst },
               ], bills),
         }] : []} />
-
-      <Alert severity="info" sx={{ mb: 2 }}>
-        Prep aid, not a return. GST is booked when a received piece is tagged into stock, using the rate on the
-        purchase order line; purchase returns reduce it. Match the bill-wise view against your GSTR-2B and
-        verify with the supplier bills before claiming credit.
-      </Alert>
-
-      <Card sx={{ p: 2, mb: 2 }}>
-        <Grid container spacing={2}>
-          <Grid item xs={6} sm={3}>
-            <TextField fullWidth size="small" label="From" type="date" value={from}
-              onChange={(e) => setFrom(e.target.value)} InputLabelProps={{ shrink: true }} />
-          </Grid>
-          <Grid item xs={6} sm={3}>
-            <TextField fullWidth size="small" label="To" type="date" value={to}
-              onChange={(e) => setTo(e.target.value)} InputLabelProps={{ shrink: true }} />
           </Grid>
         </Grid>
       </Card>

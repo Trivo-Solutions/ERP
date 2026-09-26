@@ -46,8 +46,7 @@ export function HallmarkingPage() {
 
   return (
     <Box>
-      <PageHeader title="Hallmarking & BIS Compliance" subtitle="Track batches sent for hallmarking — record HUID upon return"
-        breadcrumbs={[{ label: 'Quality', path: '/quality/hallmarking' }, { label: 'Hallmarking' }]}
+      <PageHeader title="Hallmarking & BIS Compliance"
         actions={[{ label: 'New Batch', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
 
       <Card>

@@ -35,8 +35,7 @@ export function KarigarTransactions() {
 
   return (
     <Box>
-      <PageHeader title="Issue / Return Metal" subtitle="Record metal issues to artisans and return with loss calculation"
-        breadcrumbs={[{ label: 'Outsourcing', path: '/outsourcing/ledger' }, { label: 'Transactions' }]} />
+      <PageHeader title="Issue / Return Metal" />
 
       {scaleWeight !== null && <Alert severity="info" sx={{ mb: 2 }}>Live Scale: <strong>{scaleWeight.toFixed(4)} g</strong></Alert>}
 

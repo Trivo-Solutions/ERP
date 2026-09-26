@@ -59,8 +59,7 @@ export function PurchaseReturns() {
 
   return (
     <Box>
-      <PageHeader title="Purchase Returns" subtitle="Send received finished-goods pieces back to a supplier"
-        breadcrumbs={[{ label: 'Procurement', path: '/procurement/orders' }, { label: 'Purchase Returns' }]} />
+      <PageHeader title="Purchase Returns" />
 
       <Card sx={{ mb: 2 }}>
         <CardContent>

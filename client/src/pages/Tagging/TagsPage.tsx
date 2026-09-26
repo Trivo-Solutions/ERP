@@ -184,15 +184,7 @@ export function TagsPage() {
 
   return (
     <Box>
-      <PageHeader
-        title="Tags & Inventory"
-        subtitle="Track every finished jewelry piece by its unique tag"
-        breadcrumbs={[{ label: 'Jewelry Tagging', path: '/tagging/tags' }, { label: 'Tags' }]}
-        actions={[{
-          label: 'New Tag', icon: <Add />,
-          onClick: () => navigate('/tagging/tags/new'),
-        }]}
-      />
+      <PageHeader title="Tags & Inventory" />
 
       {/* Filters */}
       <Card sx={{ mb: 2, p: 1.5 }}>
@@ -231,6 +223,9 @@ export function TagsPage() {
               <Button size="small" variant="text" onClick={clearFilters}>Clear</Button>
             </Grid>
           )}
+          <Grid item sx={{ ml: 'auto', alignSelf: 'center' }}>
+            <Button variant="contained" size="small" startIcon={<Add />} onClick={() => navigate('/tagging/tags/new')}>New Tag</Button>
+          </Grid>
         </Grid>
       </Card>
 

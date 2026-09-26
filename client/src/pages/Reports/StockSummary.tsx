@@ -16,8 +16,7 @@ export function StockSummary() {
 
   return (
     <Box>
-      <PageHeader title="Stock Summary Report" subtitle="Real-time precious metal vault and stone inventory overview"
-        breadcrumbs={[{ label: 'Reports', path: '/reports/wip' }, { label: 'Stock' }]} />
+      <PageHeader title="Stock Summary Report" />
 
       {(stock.lowConsumables ?? []).length > 0 && (
         <Alert severity="warning" sx={{ mb: 2 }}>

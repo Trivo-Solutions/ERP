@@ -38,8 +38,7 @@ export function JournalEntries() {
 
   return (
     <Box>
-      <PageHeader title="Journal Entries" subtitle="Double-entry accounting — core financial ledger"
-        breadcrumbs={[{ label: 'Finance', path: '/finance/journals' }, { label: 'Journals' }]}
+      <PageHeader title="Journal Entries"
         actions={[{ label: 'New Journal', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
 
       <Card>

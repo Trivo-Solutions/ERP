@@ -42,8 +42,6 @@ export function CostCenters() {
     <Box>
       <PageHeader
         title="Cost Centers"
-        subtitle="Departmental profitability — evaluate ROI per factory unit"
-        breadcrumbs={[{ label: 'Finance', path: '/finance/journals' }, { label: 'Cost Centers' }]}
       />
 
       {/* Totals */}

@@ -7,7 +7,7 @@ import {
 import { Print } from '@mui/icons-material';
 import { useQuery } from '@tanstack/react-query';
 import { apiGet } from '../../api/client';
-import { PageHeader } from '../../components/common/PageHeader';
+import { PageHeader, PageActions } from '../../components/common/PageHeader';
 
 function money(n: number) {
   return '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 });
@@ -40,13 +40,11 @@ export function ClientLedger() {
 
   return (
     <Box>
-      <PageHeader title="Client Ledger" subtitle="Full account statement — invoices, payments, returns & exchanges"
-        breadcrumbs={[{ label: 'Finance', path: '/finance/journals' }, { label: 'Client Ledger' }]}
-        actions={data ? [{ label: 'Print', icon: <Print />, onClick: () => window.print() }] : []} />
+      <PageHeader title="Client Ledger" />
 
       <Card sx={{ p: 2, mb: 2 }}>
         <Grid container spacing={2} alignItems="center">
-          <Grid item xs={12} sm={5}>
+          <Grid item xs={12} sm={4}>
             <Autocomplete
               options={clients ?? []}
               getOptionLabel={(c: any) => `${c.clientCode} — ${c.name}`}
@@ -64,8 +62,11 @@ export function ClientLedger() {
             <TextField fullWidth size="small" label="To" type="date" value={to}
               onChange={(e) => setTo(e.target.value)} InputLabelProps={{ shrink: true }} />
           </Grid>
-          <Grid item xs={12} sm={1}>
+          <Grid item xs={12} sm="auto">
             <Button fullWidth onClick={() => { setFrom(''); setTo(''); }}>Clear</Button>
+          </Grid>
+          <Grid item sx={{ ml: 'auto', alignSelf: 'center' }}>
+            <PageActions actions={data ? [{ label: 'Print', icon: <Print />, onClick: () => window.print() }] : []} />
           </Grid>
         </Grid>
       </Card>

@@ -117,11 +117,6 @@ export function QcCheckpoints() {
     <Box>
       <PageHeader
         title="QC Checkpoints"
-        subtitle="Digital sign-off gate — a piece cannot proceed to final polish until QC is cleared"
-        breadcrumbs={[
-          { label: 'Manufacturing', path: '/manufacturing' },
-          { label: 'QC Checkpoints' },
-        ]}
       />
 
       {/* KPIs */}

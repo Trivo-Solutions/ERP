@@ -27,8 +27,7 @@ export function KarigarLedger() {
 
   return (
     <Box>
-      <PageHeader title="Karigar Metal Balance Ledger" subtitle="Double-entry weight ledger for artisans — issued vs returned + scrap"
-        breadcrumbs={[{ label: 'Outsourcing', path: '/outsourcing/ledger' }, { label: 'Karigar Ledger' }]}
+      <PageHeader title="Karigar Metal Balance Ledger"
         actions={[{ label: 'Register Artisan', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
 
       <Grid container spacing={2}>

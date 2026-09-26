@@ -7,8 +7,7 @@ export function Consumables() {
   const { data, isLoading } = useQuery({ queryKey: ['consumables'], queryFn: () => apiGet<any[]>('/inventory/consumables') });
   return (
     <Box>
-      <PageHeader title="Consumables & Tool Auditing" subtitle="Factory inputs: casting powder, rhodium, rubber molds, fluxes, burs"
-        breadcrumbs={[{ label: 'Inventory', path: '/inventory/metals' }, { label: 'Consumables' }]} />
+      <PageHeader title="Consumables & Tool Auditing" />
       <Card>
         <Box sx={{ overflowX: 'auto' }}>
         <Table size="small">

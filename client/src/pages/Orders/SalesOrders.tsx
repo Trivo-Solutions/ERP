@@ -5,7 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm, Controller, useFieldArray } from 'react-hook-form';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost, apiPatch } from '../../api/client';
-import { PageHeader } from '../../components/common/PageHeader';
+import { PageHeader, PageActions } from '../../components/common/PageHeader';
 import { StatusChip } from '../../components/common/StatusChip';
 
 const ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'IN_PRODUCTION', 'QC_CHECK', 'READY', 'DELIVERED', 'CANCELLED'];
@@ -43,14 +43,15 @@ export function SalesOrders() {
 
   return (
     <Box>
-      <PageHeader title="Sales Orders" subtitle="Made-to-order bookings with advance payment & auto material reservation"
-        breadcrumbs={[{ label: 'Orders', path: '/orders' }, { label: 'Sales Orders' }]}
-        actions={[{ label: 'New Order', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
+      <PageHeader title="Sales Orders" />
 
       <Card sx={{ mb: 2, p: 1.5 }}>
         <Grid container spacing={2} alignItems="center">
           <Grid item xs={4}><TextField select fullWidth size="small" label="Status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}><MenuItem value="">All</MenuItem>{ORDER_STATUSES.map((s) => <MenuItem key={s} value={s}>{s}</MenuItem>)}</TextField></Grid>
           <Grid item><Typography variant="caption" color="text.secondary">{(data as any)?.total ?? 0} orders</Typography></Grid>
+          <Grid item sx={{ ml: 'auto', alignSelf: 'center' }}>
+            <PageActions actions={[{ label: 'New Order', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
+          </Grid>
         </Grid>
       </Card>
 

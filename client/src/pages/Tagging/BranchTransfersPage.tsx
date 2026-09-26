@@ -10,7 +10,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm, Controller } from 'react-hook-form';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost } from '../../api/client';
-import { PageHeader } from '../../components/common/PageHeader';
+import { PageHeader, PageActions } from '../../components/common/PageHeader';
 import { StatusChip } from '../../components/common/StatusChip';
 import { useAuthStore } from '../../store/auth.store';
 
@@ -321,9 +321,7 @@ export function BranchTransfersPage() {
 
   return (
     <Box>
-      <PageHeader title="Branch Transfers" subtitle="Move tagged inventory between branches with approval"
-        breadcrumbs={[{ label: 'Jewelry Tagging', path: '/tagging/tags' }, { label: 'Transfers' }]}
-        actions={[{ label: 'New Transfer', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
+      <PageHeader title="Branch Transfers" />
 
       <Card sx={{ mb: 2, p: 1.5 }}>
         <Grid container spacing={2} alignItems="center">
@@ -336,6 +334,9 @@ export function BranchTransfersPage() {
           </Grid>
           <Grid item>
             <Typography variant="caption" color="text.secondary">{(data as any)?.total ?? 0} transfers</Typography>
+          </Grid>
+          <Grid item sx={{ ml: 'auto', alignSelf: 'center' }}>
+            <PageActions actions={[{ label: 'New Transfer', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
           </Grid>
         </Grid>
       </Card>

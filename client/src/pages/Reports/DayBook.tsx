@@ -24,8 +24,7 @@ export function DayBook() {
 
   return (
     <Box>
-      <PageHeader title="Day Book" subtitle="One day's sales, payments, returns, and exchanges"
-        breadcrumbs={[{ label: 'Reports', path: '/reports/day-book' }, { label: 'Day Book' }]} />
+      <PageHeader title="Day Book" />
 
       <Card sx={{ p: 2, mb: 2 }}>
         <Grid container spacing={2}>

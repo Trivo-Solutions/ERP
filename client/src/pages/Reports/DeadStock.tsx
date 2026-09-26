@@ -2,7 +2,7 @@ import { Box, Card, Table, TableHead, TableBody, TableRow, TableCell, Typography
 import { Download } from '@mui/icons-material';
 import { useQuery } from '@tanstack/react-query';
 import { apiGet } from '../../api/client';
-import { PageHeader } from '../../components/common/PageHeader';
+import { PageHeader, PageActions } from '../../components/common/PageHeader';
 import { exportToCsv } from '../../utils/exportToCsv';
 
 function money(n: number) {
@@ -25,9 +25,14 @@ export function DeadStock() {
 
   return (
     <Box>
-      <PageHeader title="Dead Stock / Ageing" subtitle="How long IN_STOCK pieces have sat unsold"
-        breadcrumbs={[{ label: 'Reports', path: '/reports/dead-stock' }, { label: 'Dead Stock' }]}
-        actions={rows.length > 0 ? [{
+      <PageHeader title="Dead Stock / Ageing" />
+
+      <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap' }}>
+        {['0-90', '91-180', '181-365', '365+'].map((b) => (
+          <Chip key={b} label={`${b} days: ${money(bucketTotals[b] ?? 0)}`} color={BUCKET_COLOR[b]} variant="outlined" />
+        ))}
+        <Box sx={{ ml: 'auto' }}>
+          <PageActions actions={rows.length > 0 ? [{
           label: 'Export CSV', icon: <Download />,
           onClick: () => exportToCsv('dead-stock', [
             { header: 'Tag #', value: (r: any) => r.tagNumber },
@@ -40,11 +45,7 @@ export function DeadStock() {
             { header: 'Selling Value', value: (r: any) => r.sellingValue },
           ], rows),
         }] : []} />
-
-      <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap' }}>
-        {['0-90', '91-180', '181-365', '365+'].map((b) => (
-          <Chip key={b} label={`${b} days: ${money(bucketTotals[b] ?? 0)}`} color={BUCKET_COLOR[b]} variant="outlined" />
-        ))}
+        </Box>
       </Box>
 
       <Card>

@@ -41,8 +41,6 @@ export function Reservations() {
     <Box>
       <PageHeader
         title="Material Reservations"
-        subtitle="Hard-allocated stock locked against confirmed orders — prevents double-use"
-        breadcrumbs={[{ label: 'Orders', path: '/orders' }, { label: 'Reservations' }]}
       />
 
       {/* Summary chips */}

@@ -43,8 +43,7 @@ export function Clients() {
 
   return (
     <Box>
-      <PageHeader title="Client Master" subtitle="B2B clients, wholesale buyers & export customers"
-        breadcrumbs={[{ label: 'Orders', path: '/orders' }, { label: 'Clients' }]}
+      <PageHeader title="Client Master"
         actions={[{ label: 'Add Client', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
       <DataTable
         tableId="orders-clients"

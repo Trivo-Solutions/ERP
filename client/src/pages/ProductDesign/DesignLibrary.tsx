@@ -11,7 +11,7 @@ import { useForm, Controller } from 'react-hook-form';
 import { useNavigate } from 'react-router-dom';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost } from '../../api/client';
-import { PageHeader } from '../../components/common/PageHeader';
+import { PageHeader, PageActions } from '../../components/common/PageHeader';
 import { StatusChip } from '../../components/common/StatusChip';
 
 const KARATS = ['24K', '22K', '18K', '14K', 'SILVER', 'PT'];
@@ -54,11 +54,7 @@ export function DesignLibrary() {
   return (
     <Box>
       <PageHeader
-        title="Design Library"
-        subtitle="CAD/BOM Vault — Manage all jewelry designs and their specifications"
-        breadcrumbs={[{ label: 'Product Design', path: '/designs' }, { label: 'Library' }]}
-        actions={[{ label: 'New Design', icon: <Add />, onClick: () => setCreateOpen(true) }]}
-      />
+        title="Design Library" />
 
       {/* Filters */}
       <Card sx={{ mb: 2 }}>
@@ -83,6 +79,9 @@ export function DesignLibrary() {
               <Typography variant="caption" color="text.secondary">
                 {(data as any)?.total ?? 0} designs found
               </Typography>
+            </Grid>
+            <Grid item sx={{ ml: 'auto', alignSelf: 'center' }}>
+              <PageActions actions={[{ label: 'New Design', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
             </Grid>
           </Grid>
         </CardContent>

@@ -19,8 +19,7 @@ export function WipSummary() {
 
   return (
     <Box>
-      <PageHeader title="WIP Summary Report" subtitle="Live factory floor work-in-progress by process and priority"
-        breadcrumbs={[{ label: 'Reports', path: '/reports/wip' }, { label: 'WIP Summary' }]} />
+      <PageHeader title="WIP Summary Report" />
 
       <Grid container spacing={2}>
         <Grid item xs={12} md={8}>

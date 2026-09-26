@@ -2,33 +2,33 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
 interface UiState {
-  sidebarOpen: boolean;
-  sidebarWidth: number;
+  /** true: the sidebar always sits beside the page. false: it hides, and slides over the page on demand. */
+  sidebarPinned: boolean;
   darkMode: boolean;
   scaleDevice: string;
   pageTitle: string;
-  toggleSidebar: () => void;
-  setSidebarOpen: (open: boolean) => void;
+  /** The location (pathname + search) `pageTitle` was set for — a title only applies to the page that set it. */
+  pageTitleKey: string;
+  toggleSidebarPinned: () => void;
   toggleDarkMode: () => void;
   setScaleDevice: (deviceId: string) => void;
-  setPageTitle: (title: string) => void;
+  setPageTitle: (title: string, key: string) => void;
 }
 
 export const useUiStore = create<UiState>()(
   persist(
     (set) => ({
-      sidebarOpen: true,
-      sidebarWidth: 260,
+      sidebarPinned: false,
       darkMode: false,
       scaleDevice: 'default-scale',
       pageTitle: '',
+      pageTitleKey: '',
 
-      toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
-      setSidebarOpen: (open) => set({ sidebarOpen: open }),
+      toggleSidebarPinned: () => set((s) => ({ sidebarPinned: !s.sidebarPinned })),
       toggleDarkMode: () => set((s) => ({ darkMode: !s.darkMode })),
       setScaleDevice: (deviceId) => set({ scaleDevice: deviceId }),
-      setPageTitle: (title) => set({ pageTitle: title }),
+      setPageTitle: (title, key) => set({ pageTitle: title, pageTitleKey: key }),
     }),
-    { name: 'sea-erp-ui', partialize: (s) => ({ sidebarOpen: s.sidebarOpen, darkMode: s.darkMode, scaleDevice: s.scaleDevice }) }
+    { name: 'sea-erp-ui', partialize: (s) => ({ sidebarPinned: s.sidebarPinned, darkMode: s.darkMode, scaleDevice: s.scaleDevice }) }
   )
 );

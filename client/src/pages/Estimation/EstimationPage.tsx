@@ -204,8 +204,7 @@ export function EstimationPage() {
 
   return (
     <Box>
-      <PageHeader title="Estimation" subtitle="Scan or search a piece to work up a customer price estimate"
-        breadcrumbs={[{ label: 'Estimation' }]} />
+      <PageHeader title="Estimation" />
 
       <Card sx={{ mb: 2 }}>
         <CardContent>

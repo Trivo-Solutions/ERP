@@ -47,8 +47,6 @@ export function AgingReceivables() {
     <Box>
       <PageHeader
         title="Aging Receivables"
-        subtitle="Outstanding invoice balances grouped by days overdue"
-        breadcrumbs={[{ label: 'Reports', path: '/reports/wip' }, { label: 'Aging Receivables' }]}
       />
 
       {overdue90 > 0 && (

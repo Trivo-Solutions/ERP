@@ -6,7 +6,7 @@ import { useForm, Controller } from 'react-hook-form';
 import { useNavigate } from 'react-router-dom';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost } from '../../api/client';
-import { PageHeader } from '../../components/common/PageHeader';
+import { PageHeader, PageActions } from '../../components/common/PageHeader';
 import { StatusChip } from '../../components/common/StatusChip';
 import { WeightDisplay } from '../../components/common/WeightDisplay';
 
@@ -49,11 +49,7 @@ export function JobCards() {
   return (
     <Box>
       <PageHeader
-        title="Job Cards"
-        subtitle="Serialized digital job cards for every production unit"
-        breadcrumbs={[{ label: 'Manufacturing', path: '/manufacturing' }, { label: 'Job Cards' }]}
-        actions={[{ label: 'Create Job Card', icon: <Add />, onClick: () => setCreateOpen(true) }]}
-      />
+        title="Job Cards" />
 
       <Card sx={{ mb: 2, p: 1.5 }}>
         <Grid container spacing={2} alignItems="center">
@@ -67,6 +63,9 @@ export function JobCards() {
           </Grid>
           <Grid item>
             <Typography variant="caption" color="text.secondary">{(data as any)?.total ?? 0} job cards</Typography>
+          </Grid>
+          <Grid item sx={{ ml: 'auto', alignSelf: 'center' }}>
+            <PageActions actions={[{ label: 'Create Job Card', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
           </Grid>
         </Grid>
       </Card>

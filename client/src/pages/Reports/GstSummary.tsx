@@ -3,7 +3,7 @@ import { Box, Card, Table, TableHead, TableBody, TableRow, TableCell, Typography
 import { Download } from '@mui/icons-material';
 import { useQuery } from '@tanstack/react-query';
 import { apiGet } from '../../api/client';
-import { PageHeader } from '../../components/common/PageHeader';
+import { PageHeader, PageActions } from '../../components/common/PageHeader';
 import { exportToCsv } from '../../utils/exportToCsv';
 
 function money(n: number) {
@@ -29,20 +29,7 @@ export function GstSummary() {
 
   return (
     <Box>
-      <PageHeader title="GST Summary" subtitle="HSN-wise taxable value and tax split, for return-filing prep"
-        breadcrumbs={[{ label: 'Reports', path: '/reports/gst-summary' }, { label: 'GST Summary' }]}
-        actions={rows.length > 0 ? [{
-          label: 'Export CSV', icon: <Download />,
-          onClick: () => exportToCsv('gst-summary', [
-            { header: 'HSN Code', value: (r: any) => r.hsnCode },
-            { header: 'Description', value: (r: any) => r.description ?? '' },
-            { header: 'Rate', value: (r: any) => `${(r.taxRate * 100).toFixed(0)}%` },
-            { header: 'Taxable Value', value: (r: any) => r.taxableValue },
-            { header: 'CGST', value: (r: any) => r.cgst },
-            { header: 'SGST', value: (r: any) => r.sgst },
-            { header: 'IGST', value: (r: any) => r.igst },
-          ], rows),
-        }] : []} />
+      <PageHeader title="GST Summary" />
 
       <Alert severity="info" sx={{ mb: 2 }}>
         Prep aid for return filing, not a submission-ready export — per-line tax is approximated
@@ -59,6 +46,20 @@ export function GstSummary() {
           <Grid item xs={6} sm={3}>
             <TextField fullWidth size="small" label="To" type="date" value={to}
               onChange={(e) => setTo(e.target.value)} InputLabelProps={{ shrink: true }} />
+          </Grid>
+          <Grid item sx={{ ml: 'auto', alignSelf: 'center' }}>
+            <PageActions actions={rows.length > 0 ? [{
+          label: 'Export CSV', icon: <Download />,
+          onClick: () => exportToCsv('gst-summary', [
+            { header: 'HSN Code', value: (r: any) => r.hsnCode },
+            { header: 'Description', value: (r: any) => r.description ?? '' },
+            { header: 'Rate', value: (r: any) => `${(r.taxRate * 100).toFixed(0)}%` },
+            { header: 'Taxable Value', value: (r: any) => r.taxableValue },
+            { header: 'CGST', value: (r: any) => r.cgst },
+            { header: 'SGST', value: (r: any) => r.sgst },
+            { header: 'IGST', value: (r: any) => r.igst },
+          ], rows),
+        }] : []} />
           </Grid>
         </Grid>
       </Card>

@@ -56,8 +56,6 @@ export function HardwarePage() {
     <Box>
       <PageHeader
         title="Hardware Integration"
-        subtitle="Web Serial (local) + RS232/USB backend scales, RFID, barcode scanners"
-        breadcrumbs={[{ label: 'Hardware', path: '/hardware' }]}
       />
 
       <Grid container spacing={2}>

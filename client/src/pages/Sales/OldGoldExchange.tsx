@@ -73,8 +73,7 @@ export function OldGoldExchange() {
 
   return (
     <Box>
-      <PageHeader title="Old Gold Exchange" subtitle="Take a customer's old gold piece in and credit their account"
-        breadcrumbs={[{ label: 'Sales', path: '/sales/invoices' }, { label: 'Old Gold Exchange' }]} />
+      <PageHeader title="Old Gold Exchange" />
 
       <Card sx={{ mb: 2 }}>
         <CardContent>

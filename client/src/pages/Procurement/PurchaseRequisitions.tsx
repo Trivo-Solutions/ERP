@@ -9,7 +9,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm, Controller, useFieldArray, useWatch } from 'react-hook-form';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost } from '../../api/client';
-import { PageHeader } from '../../components/common/PageHeader';
+import { PageHeader, PageActions } from '../../components/common/PageHeader';
 import { StatusChip } from '../../components/common/StatusChip';
 import { useAuthStore } from '../../store/auth.store';
 
@@ -336,11 +336,7 @@ export function PurchaseRequisitions() {
   return (
     <Box>
       <PageHeader
-        title="Purchase Requisitions"
-        subtitle="Raise and track department purchase requests"
-        breadcrumbs={[{ label: 'Procurement', path: '/procurement/orders' }, { label: 'Requisitions' }]}
-        actions={[{ label: 'New Requisition', icon: <Add />, onClick: () => setCreateOpen(true) }]}
-      />
+        title="Purchase Requisitions" />
 
       <Card sx={{ mb: 2, p: 1.5 }}>
         <Grid container spacing={2} alignItems="center">
@@ -353,6 +349,9 @@ export function PurchaseRequisitions() {
           </Grid>
           <Grid item>
             <Typography variant="caption" color="text.secondary">{(data as any)?.total ?? 0} requisitions</Typography>
+          </Grid>
+          <Grid item sx={{ ml: 'auto', alignSelf: 'center' }}>
+            <PageActions actions={[{ label: 'New Requisition', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
           </Grid>
         </Grid>
       </Card>

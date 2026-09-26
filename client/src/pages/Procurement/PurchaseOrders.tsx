@@ -580,9 +580,7 @@ export function PurchaseOrders() {
 
   return (
     <Box>
-      <PageHeader title="Purchase Orders" subtitle="Manage outright purchases, consignments & customer metal"
-        breadcrumbs={[{ label: 'Procurement', path: '/procurement/orders' }, { label: 'Orders' }]}
-        actions={[{ label: 'New PO', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
+      <PageHeader title="Purchase Orders" />
 
       <Card sx={{ mb: 2, p: 1.5 }}>
         <Grid container spacing={2} alignItems="center">
@@ -593,6 +591,9 @@ export function PurchaseOrders() {
             </TextField>
           </Grid>
           <Grid item><Typography variant="caption" color="text.secondary">{(data as any)?.total ?? 0} orders</Typography></Grid>
+          <Grid item sx={{ ml: 'auto', alignSelf: 'center' }}>
+            <Button variant="contained" size="small" startIcon={<Add />} onClick={() => setCreateOpen(true)}>New PO</Button>
+          </Grid>
         </Grid>
       </Card>
 

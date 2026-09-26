@@ -9,8 +9,7 @@ export function ChartOfAccounts() {
   const { data, isLoading } = useQuery({ queryKey: ['accounts'], queryFn: () => apiGet<any[]>('/finance/accounts') });
   return (
     <Box>
-      <PageHeader title="Chart of Accounts" subtitle="Complete account hierarchy for jewelry manufacturing"
-        breadcrumbs={[{ label: 'Finance', path: '/finance/journals' }, { label: 'Accounts' }]} />
+      <PageHeader title="Chart of Accounts" />
       <Card>
         <Box sx={{ overflowX: 'auto' }}>
         <Table size="small">

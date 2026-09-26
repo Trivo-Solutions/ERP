@@ -863,7 +863,7 @@ export function NewTagPage() {
       )}
 
       <Box sx={{ '@media print': { display: 'none' } }}>
-        <PageHeader title={isEditMode ? `Edit Tag${editTag?.tagNumber ? ` ${editTag.tagNumber}` : ''}` : 'New Tag'} hideTitle
+        <PageHeader title={isEditMode ? `Edit Tag${editTag?.tagNumber ? ` ${editTag.tagNumber}` : ''}` : 'New Tag'}
           actions={[{ label: 'Back to Tags', icon: <ArrowBack />, onClick: () => navigate('/tagging/tags'), variant: 'outlined' as const }]} />
 
         <Grid container spacing={3} alignItems="flex-start">

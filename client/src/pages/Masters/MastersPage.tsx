@@ -14,6 +14,7 @@ import { useForm, Controller } from 'react-hook-form';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost, apiPatch, apiDelete } from '../../api/client';
 import { PageHeader } from '../../components/common/PageHeader';
+import { useTabActive } from '../../components/Layout/TabActiveContext';
 import { stoneGradeCode, stoneGradeLabel } from '../../utils/stoneGrade';
 import { DataTable } from '../../components/common/DataTable';
 
@@ -652,11 +653,13 @@ function PriceMasterTab() {
     onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Update failed', { variant: 'error' }),
   });
 
+  // A window-level handler: a Masters tab kept open in the background must not act on Ctrl+Delete typed elsewhere.
+  const tabActive = useTabActive();
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       const isEditingField = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
-      if (!(e.ctrlKey || e.metaKey) || e.key !== 'Delete' || selectedIds.size === 0 || isEditingField) return;
+      if (!tabActive || !(e.ctrlKey || e.metaKey) || e.key !== 'Delete' || selectedIds.size === 0 || isEditingField) return;
       e.preventDefault();
       const ids = Array.from(selectedIds);
       Promise.all(ids.map((id) => apiDelete(`/masters/price-master/${id}`)))
@@ -669,7 +672,7 @@ function PriceMasterTab() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [selectedIds, qc, enqueueSnackbar]);
+  }, [tabActive, selectedIds, qc, enqueueSnackbar]);
 
   return (
     <Box>
@@ -1295,7 +1298,7 @@ export function MastersPage() {
 
   return (
     <Box>
-      <PageHeader title="Masters" hideTitle />
+      <PageHeader title="Masters" />
 
       <Stack direction="row" spacing={2} alignItems="flex-start">
         <Card variant="outlined" sx={{ width: collapsed ? 52 : 200, flexShrink: 0, transition: 'width 0.15s' }}>

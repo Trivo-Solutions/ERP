@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { queryClient } from '../api/queryClient';
 import { closeSocket } from '../api/socketRegistry';
+import { useTabsStore } from './tabs.store';
 
 interface User {
   id: string;
@@ -51,6 +52,7 @@ export const useAuthStore = create<AuthState>()(
         // even for the instant before its own fetch resolves. See api/queryClient.ts.
         queryClient.clear();
         closeSocket(); // the previous session's realtime connection must not survive into this one
+        useTabsStore.getState().reset(); // …nor its open-page tabs
         set({ user, company, accessToken, refreshToken, isAuthenticated: true });
       },
 
@@ -62,6 +64,7 @@ export const useAuthStore = create<AuthState>()(
         // re-login of the same user) to accidentally render before their own fetches land.
         queryClient.clear();
         closeSocket();
+        useTabsStore.getState().reset();
         set({ user: null, company: null, accessToken: null, refreshToken: null, isAuthenticated: false });
       },
 
