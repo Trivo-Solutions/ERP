@@ -139,6 +139,12 @@ describe('HTTP: the store-operations loop (Phase I)', () => {
   describe('estimate -> send to billing -> find by name -> bill', () => {
     it('is not offered until sent, then found by customer name, and billing it marks it INVOICED', async () => {
       A.client = (await a.post('/orders/clients', { name: 'Walk-in Ramesh', type: 'RETAIL', panNumber: 'abcde1234f' })).body.data.id;
+      // a client can carry a date of birth (date only); a future one is refused
+      const dobClient = await a.post('/orders/clients', { name: 'DOB Client', type: 'RETAIL', dateOfBirth: '1988-07-09' });
+      expect(dobClient.status).toBe(201);
+      expect(String(dobClient.body.data.dateOfBirth).slice(0, 10)).toBe('1988-07-09');
+      expect((await a.post('/orders/clients', { name: 'Future DOB', type: 'RETAIL', dateOfBirth: '2999-01-01' })).status).toBe(400);
+
       const estBody = { items: [{ code: 'GOLD-22K', materialType: 'METAL', name: 'Gold 22K', weight: 8, saleRate: 6000 }], saleMcRate: 400, saleVaPercent: 8 };
 
       const plain = await a.post(`/estimation/tags/${A.tagId}/estimates`, estBody);
@@ -146,8 +152,21 @@ describe('HTTP: the store-operations loop (Phase I)', () => {
       expect(plain.body.data.status).toBe('OPEN');
       expect((await a.get('/sales/estimates?q=Ramesh')).body.data).toHaveLength(0);
 
-      const sent = await a.post(`/estimation/estimates/${plain.body.data.id}/send-to-billing`, { customerName: 'Ramesh Kumar', customerPhone: '9000000001' });
+      // the sales-employee picker is reachable with estimation:view alone, and lists this company's staff
+      const staff = await a.get('/estimation/staff');
+      expect(staff.status).toBe(200);
+      expect(staff.body.data.map((s: any) => s.id)).toContain(A.userId);
+
+      // name, mobile and the sales employee are required to send
+      const bare = await a.post(`/estimation/estimates/${plain.body.data.id}/send-to-billing`, { customerName: 'Ramesh Kumar' });
+      expect(bare.status).toBe(400);
+
+      const sent = await a.post(`/estimation/estimates/${plain.body.data.id}/send-to-billing`, {
+        customerName: 'Ramesh Kumar', customerPhone: '9000000001', customerDob: '1985-02-20',
+        customerAddress: 'Door 4, Main Road', customerPan: 'abcde1234f', salesPersonId: A.userId,
+      });
       expect(sent.status).toBe(200);
+      expect(sent.body.data).toMatchObject({ customerPan: 'ABCDE1234F', salesPersonId: A.userId });
       expect(sent.body.data.status).toBe('SENT');
 
       for (const q of ['ramesh', plain.body.data.estimateNumber, 'temple', '9000000001']) {

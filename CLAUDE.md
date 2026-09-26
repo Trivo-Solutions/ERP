@@ -343,6 +343,25 @@ screens pre-select the PO's supplier as Manufacturer (`manufacturerForSupplier`:
 over its tags, never counters; closing a lot is report-only. Migrations `20260925130000_purchase_lots`, `20260925140000_lot_categories`,
 `20260925150000_lot_category_cost_rates`; tests `purchaseLot.test.ts`. See ROADMAP.md's I6 entry.
 
+**Bill summary + round-off (2026-09-27).** New Sale's Charges & Payment tab now shows a jeweller-style **Summary** (Material &
+Labour → Gross → Add & Less → Net Amount, `pages/Sales/SaleSummary.tsx`) and an editable adjustments table: discount as ₹ or % of the
+gross, shipping/other, GST per line **by HSN picked from the master** (rates are never typed — the 4.3 rule stands), and **round-off**,
+automatic to the nearest ₹1 on an INR bill or keyed by hand within ±₹10 (`MAX_ROUND_OFF`; a bigger movement must be a Discount).
+`SalesInvoice.roundOff` (migration `20260927120000_invoice_round_off`) is included in `totalAmount`, and `createInvoice` posts it to new
+account **6600 Round Off** (`LEDGER_ACCOUNT.ROUND_OFF`; credit when billed up, debit when down) so the journal still balances — that
+migration also seeds 6600 into every existing company (FORCE RLS lifted around the insert), the Starter Package chart carries it for
+new ones. `GET /sales/tax-context` feeds the screen's preview (HSN rates + CGST/SGST vs IGST). Tests: `sales.service.test.ts`
+("round-off", "getTaxContext"). **Not done:** `convertMemoToInvoice()` (memo/wholesale path) does not round off yet — its totals are
+unrounded as before; GST *credit note* on a sales return is still I3 (not started).
+
+**Old gold & store credit as payment modes (2026-09-27, ROADMAP I7).** New Sale's payment splits now also take `OLD_GOLD` (customer's
+old metal, valued at the day's rate and booked as an `OldGoldExchange` + Metal Vault entry inside the same invoice transaction) and
+`STORE_CREDIT` (credit already on the account from a return/earlier exchange — `GET /sales/clients/:id/credit`). Both settle the bill from
+*credit*, not cash: the `InvoicePayment` row marks the invoice paid but posts no journal and leaves `currentBalance` alone (the credit
+was booked when it arose). **Anything that sums `InvoicePayment` as receipts must skip `CREDIT_SETTLEMENT_MODES`** (shared/constants.ts)
+— the client ledger and day book already do. No migration. Tests: `sales.service.test.ts` ("old gold & store credit as payment modes").
+Not done: memo/wholesale path, applying credit to an older unpaid invoice.
+
 **Next:** nothing left on the roadmap's A–H phase list — CLAUDE.md §4.2 (hallmarking optional FK)
 was resolved by G2. Remaining open items are the two documented control gaps in §8
 (`createInvoice()`'s optional `tagId` still allows an off-book untagged line; `convertMemoToInvoice()`'s

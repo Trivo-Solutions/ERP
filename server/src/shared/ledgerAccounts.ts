@@ -18,6 +18,8 @@ export const LEDGER_ACCOUNT = {
   IGST_PAYABLE: '2203',
   SALES_REVENUE: '4000',
   COST_OF_GOODS: '5000',
+  // Sales round-off: credit when the customer is billed up to the rupee, debit when down.
+  ROUND_OFF: '6600',
 } as const;
 
 // InvoicePayment.mode is free text (NewSalePage.tsx offers CASH/CARD/UPI/CHEQUE); only CASH hits

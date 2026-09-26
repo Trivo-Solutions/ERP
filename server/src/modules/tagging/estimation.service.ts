@@ -3,6 +3,7 @@ import { AppError } from '../../middleware/error';
 import { nextDocumentNumber } from '../../shared/numberSequence';
 import {TenantContext, tenantTransaction, tenantQuery } from '../../shared/tenantContext';
 import { Prisma } from '@prisma/client';
+import { normalizePan } from '../../shared/compliance';
 
 // Estimation is a sales/counter-staff feature — every read path below deliberately selects only
 // the sale-side columns, never costRate/costAmount/costMcRate/costVaPercent/totalCostAmount, so
@@ -18,7 +19,9 @@ const ESTIMATE_SALE_SELECT = {
   saleMcRate: true, saleVaPercent: true, totalSaleAmount: true,
   taxRate: true, gstAmount: true, netPayableAmount: true,
   currency: true, validUntil: true, notes: true, createdAt: true,
-  status: true, customerName: true, customerPhone: true, sentToBillingAt: true, invoiceId: true,
+  status: true, sentToBillingAt: true, invoiceId: true,
+  customerName: true, customerPhone: true, customerDob: true, customerAddress: true, customerPan: true,
+  salesPersonId: true, salesPerson: { select: { id: true, name: true } },
   items: { select: ESTIMATE_ITEM_SALE_SELECT },
 } as const;
 
@@ -82,6 +85,11 @@ interface CreateTagEstimateInput {
   sendToBilling?: boolean;
   customerName?: string;
   customerPhone?: string;
+  customerDob?: string | Date | null;
+  customerAddress?: string;
+  customerPan?: string;
+  /** The staff member (User id) showing / attending this customer. */
+  salesPersonId?: string;
   items: EstimateItemInput[];
   costMcRate?: number;
   costVaPercent?: number;
@@ -118,10 +126,96 @@ function computeTotals(items: Array<EstimateItemInput & { costAmount: number; sa
   };
 }
 
+// ─── Customer details taken at the billing hand-off ───────────────────────────
+//
+// "Send to billing" asks for the whole customer, so the biller does not ask again: name, mobile, date of birth,
+// address, PAN and the sales employee. Name, mobile and the sales employee are REQUIRED to send; DOB, address
+// and PAN are optional (a walk-in may not give a PAN — Rule 114B only bites above ₹2,00,000, and billing
+// enforces that). Whatever is given is validated either way.
+
+interface CustomerDetailsInput {
+  customerName?: string;
+  customerPhone?: string;
+  customerDob?: string | Date | null;
+  customerAddress?: string;
+  customerPan?: string;
+  salesPersonId?: string;
+}
+
+const blank = (v: unknown) => v === undefined || v === null || String(v).trim() === '';
+
+/** 10-digit Indian mobile: spaces/dashes and a leading +91 / 91 / 0 are dropped. */
+export function normalizeMobile(raw: string): string {
+  let d = String(raw).replace(/[\s\-().]/g, '');
+  if (d.startsWith('+91')) d = d.slice(3);
+  else if (/^91\d{10}$/.test(d)) d = d.slice(2);
+  else if (/^0\d{10}$/.test(d)) d = d.slice(1);
+  if (!/^[6-9]\d{9}$/.test(d)) throw new AppError('Mobile number must be a 10-digit Indian mobile number', 400);
+  return d;
+}
+
+function parseDob(raw: string | Date): Date {
+  const d = raw instanceof Date ? raw : new Date(/^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T00:00:00.000Z` : raw);
+  if (Number.isNaN(d.getTime())) throw new AppError('Date of birth is not a valid date', 400);
+  const now = Date.now();
+  if (d.getTime() > now) throw new AppError('Date of birth cannot be in the future', 400);
+  if (now - d.getTime() > 120 * 365.25 * 24 * 3600 * 1000) throw new AppError('Date of birth is not plausible', 400);
+  return d;
+}
+
+/** Validates + normalises whichever customer fields were supplied (undefined = not supplied = leave as is). */
+function cleanCustomerFields(input: CustomerDetailsInput) {
+  const str = (v: unknown, what: string) => {
+    if (typeof v !== 'string') throw new AppError(`${what} must be text`, 400);
+    return v.trim() || null;
+  };
+  const out: {
+    customerName?: string | null; customerPhone?: string | null; customerDob?: Date | null;
+    customerAddress?: string | null; customerPan?: string | null; salesPersonId?: string | null;
+  } = {};
+  if (input.customerName !== undefined) out.customerName = str(input.customerName, 'Customer name');
+  if (input.customerPhone !== undefined) out.customerPhone = blank(input.customerPhone) ? null : normalizeMobile(String(input.customerPhone));
+  if (input.customerDob !== undefined) out.customerDob = blank(input.customerDob) ? null : parseDob(input.customerDob as string | Date);
+  if (input.customerAddress !== undefined) out.customerAddress = str(input.customerAddress, 'Address');
+  if (input.customerPan !== undefined) out.customerPan = normalizePan(input.customerPan);
+  if (input.salesPersonId !== undefined) out.salesPersonId = str(input.salesPersonId, 'Sales employee');
+  return out;
+}
+
+/** Active members of this company, for the sales-employee picker (scoped via CompanyUser — User has no companyId). */
+export async function listSalesStaff(ctx: TenantContext) {
+  const staff = await tenantQuery(ctx.companyId, (_tx) => _tx.companyUser.findMany({
+    where: { companyId: ctx.companyId, isActive: true, user: { isActive: true } },
+    select: { userId: true, employeeId: true, user: { select: { name: true } } },
+    orderBy: { user: { name: 'asc' } },
+  }));
+  return staff.map((s) => ({ id: s.userId, name: s.user.name, employeeId: s.employeeId }));
+}
+
+/** The hand-off's required fields, checked against what the estimate will hold AFTER this send. */
+async function assertReadyForBilling(
+  ctx: TenantContext,
+  final: { customerName?: string | null; customerPhone?: string | null; salesPersonId?: string | null },
+) {
+  if (!final.customerName) throw new AppError('Customer name is required to send to billing', 400);
+  if (!final.customerPhone) throw new AppError('Customer mobile number is required to send to billing', 400);
+  if (!final.salesPersonId) throw new AppError('Sales employee (who is attending this customer) is required to send to billing', 400);
+  // A User is a global identity — it must be an active member of THIS company, or a forged id could name anyone.
+  const member = await tenantQuery(ctx.companyId, (_tx) => _tx.companyUser.findFirst({
+    where: { companyId: ctx.companyId, userId: final.salesPersonId!, isActive: true, user: { isActive: true } },
+    select: { userId: true },
+  }));
+  if (!member) throw new AppError('Sales employee not found', 404);
+}
+
 export async function createTagEstimate(tagId: string, input: CreateTagEstimateInput, ctx: TenantContext, userId: string) {
   const tag = await tenantQuery(ctx.companyId, (_tx) => _tx.jewelryTag.findUnique({ where: { id: tagId }, select: { id: true, companyId: true, status: true, tagNumber: true } }));
   if (!tag || tag.companyId !== ctx.companyId) throw new AppError('Tag not found', 404);
-  if (input.sendToBilling) assertBillable(tag);
+  const customer = cleanCustomerFields(input);
+  if (input.sendToBilling) {
+    assertBillable(tag);
+    await assertReadyForBilling(ctx, customer);
+  }
   if (!input.items || input.items.length === 0) throw new AppError('At least one material item is required', 400);
 
   const items = input.items.map((i) => ({
@@ -158,8 +252,7 @@ export async function createTagEstimate(tagId: string, input: CreateTagEstimateI
         validUntil: input.validUntil ? new Date(input.validUntil) : undefined,
         notes: input.notes,
         createdById: userId,
-        customerName: input.customerName?.trim() || undefined,
-        customerPhone: input.customerPhone?.trim() || undefined,
+        ...customer,
         ...(input.sendToBilling && { status: 'SENT', sentToBillingAt: new Date(), sentById: userId }),
       },
     });
@@ -197,24 +290,32 @@ function assertBillable(tag: { status: string; tagNumber: string }) {
 }
 
 export async function sendEstimateToBilling(
-  ctx: TenantContext, estimateId: string, input: { customerName?: string; customerPhone?: string }, userId: string,
+  ctx: TenantContext, estimateId: string, input: CustomerDetailsInput, userId: string,
 ) {
   const estimate = await tenantQuery(ctx.companyId, (_tx) => _tx.tagEstimate.findUnique({
     where: { id: estimateId },
-    select: { id: true, companyId: true, status: true, estimateNumber: true, tag: { select: { status: true, tagNumber: true } } },
+    select: {
+      id: true, companyId: true, status: true, estimateNumber: true, tag: { select: { status: true, tagNumber: true } },
+      customerName: true, customerPhone: true, salesPersonId: true,
+    },
   }));
   if (!estimate || estimate.companyId !== ctx.companyId) throw new AppError('Estimate not found', 404);
   if (estimate.status === 'INVOICED') throw new AppError(`Estimate ${estimate.estimateNumber} has already been billed`, 409);
   assertBillable(estimate.tag);
 
+  // Re-sending may correct the customer's details; a field left out keeps what the estimate already holds,
+  // and the required ones must be present in the merge.
+  const customer = cleanCustomerFields(input);
+  const merged = {
+    customerName: customer.customerName ?? estimate.customerName,
+    customerPhone: customer.customerPhone ?? estimate.customerPhone,
+    salesPersonId: customer.salesPersonId ?? estimate.salesPersonId,
+  };
+  await assertReadyForBilling(ctx, merged);
+
   return tenantQuery(ctx.companyId, (_tx) => _tx.tagEstimate.update({
     where: { id: estimateId },
-    data: {
-      status: 'SENT', sentToBillingAt: new Date(), sentById: userId,
-      // Re-sending may correct the customer's name; a blank leaves what was there.
-      ...(input.customerName?.trim() && { customerName: input.customerName.trim() }),
-      ...(input.customerPhone?.trim() && { customerPhone: input.customerPhone.trim() }),
-    },
+    data: { ...customer, ...merged, status: 'SENT', sentToBillingAt: new Date(), sentById: userId },
     select: ESTIMATE_SALE_SELECT,
   }));
 }
@@ -223,6 +324,8 @@ export async function sendEstimateToBilling(
 // rest of this module (no cost columns), so it is safe to hand to a role that only has invoice:create.
 const BILLABLE_ESTIMATE_SELECT = {
   id: true, estimateNumber: true, status: true, customerName: true, customerPhone: true,
+  customerDob: true, customerAddress: true, customerPan: true, salesPersonId: true,
+  salesPerson: { select: { id: true, name: true } },
   saleMcRate: true, saleVaPercent: true, totalSaleAmount: true,
   taxRate: true, gstAmount: true, netPayableAmount: true,
   currency: true, validUntil: true, notes: true, createdAt: true, sentToBillingAt: true,

@@ -511,6 +511,7 @@ the *code* rather than the docs. Each item has its own migration where the schem
   since the multi-tenant work — it now has a Branch field (auto-filled when there is one branch; `GET /sales/branches`).
   Tests: `sales.estimateBilling.test.ts` (13).
 
+- **I5b — Full customer details at "Send to billing". DONE (2026-09-27).** Migration `20260927100000_estimate_customer_details` (`clients.dateOfBirth`; `tag_estimates.customerDob/customerAddress/customerPan/salesPersonId`). The Send-to-billing dialog now asks for **name, mobile, date of birth, address, PAN and the sales employee** — name, mobile and sales employee are required, DOB/address/PAN optional (validated when given: 10-digit mobile, PAN shape, DOB not in the future; the sales employee must be an active member of the company). `GET /estimation/staff` feeds the picker under `estimation:view` (an estimator need not hold `invoice:create`). On the billing screen, loading the estimate pre-selects the recorded sales employee and adopts the customer as the bill's customer: matched to an existing client by mobile number (only blank PAN/address/DOB are filled — never overwritten), otherwise a RETAIL client is created; a customer already chosen on the bill is kept. Clients get a Date of Birth field, and the printed tax invoice's Bill To now shows mobile, DOB and PAN (Sales Executive was already there). Tests: `sales.estimateBilling.test.ts` (customer-details block), `http.storeOps.test.ts`.
 - **I6 — Purchase lots (bags). DONE.** Migrations `20260925130000_purchase_lots` + `20260925140000_lot_categories`. Suppliers bill finished
   jewellery *as a bag*: one invoice line, one amount, and — category by category — what is inside (rings, necklaces, ...), not piece by
   piece. **PO:** line Type *FINISHED LOT (bag of pieces)* takes the bag's gross weight, its ONE amount before GST, and a grid of
@@ -541,6 +542,25 @@ the *code* rather than the docs. Each item has its own migration where the schem
   `http.purchaseLots.test.ts` (5, over real HTTP), `manufacturerForSupplier.test.ts` (4). *Not built:* a lot list/management page (the API
   `GET /tagging/lots[/:id]` exists; the picker on New Tag and the GRN page cover the flow), and editing a piece's weights after tagging
   does not re-split the lot (its cost stays as allocated).
+
+- **I7 — old gold & store credit as payment modes on the bill (2026-09-27). DONE.** No migration. New Sale's payment splits gain
+  two modes beside Cash/Card/UPI/Bank/Cheque. **`OLD_GOLD`**: the counter enters the customer's old piece (description, karat, gross/
+  stone weight, deduction %); `createInvoice` values it exactly like a standalone exchange (net × the day's MetalRate × (1 − deduction),
+  now shared as `valueOldGold`/`bookOldGoldExchange`, so the two paths cannot drift) — books an `OldGoldExchange`, adds the melted
+  weight to the Metal Vault, posts Dr Inventory / Cr AR, credits `Client.currentBalance` — then settles the bill with that credit. Metal
+  worth more than what is still due pays the bill off and the surplus stays as credit on the account. **`STORE_CREDIT`**: spends credit
+  already on the account (a negative `currentBalance`, left by a sales return or an earlier exchange), capped by
+  `GET /sales/clients/:id/credit`; refused above what is available or above what is still due. Both write an `InvoicePayment`
+  (`mode` `OLD_GOLD`/`STORE_CREDIT`) that moves the invoice's paid/due/status but posts **no journal and leaves the client balance
+  alone** — the credit was booked when it arose and the sale's debit already nets it (`applyPayment(..., {fromCredit:true})`). So these
+  rows are not receipts: the client ledger (F4) and the day book skip them (`CREDIT_SETTLEMENT_MODES`), or the credit would count
+  twice. Everything is in the invoice's one transaction — a failing later split rolls back the exchange and vault entry too.
+  `recordPayment`/`recordClientPayment` refuse these modes (nothing to draw on outside a bill); credit modes are rupee invoices only.
+  The New Sale payment-mode picker became a native select (CLAUDE.md §10). Concurrency: the INV number taken at the top of
+  `createInvoice` locks the company's invoice-number row, so two bills cannot read the same credit; nothing else spends credit.
+  Tests: `sales.service.test.ts` "old gold & store credit as payment modes" (14). *Not done:* the memo/wholesale path
+  (`convertMemoToInvoice`) takes no payments and so no credit modes; credit cannot yet be applied to an *older* unpaid invoice;
+  old-gold GST treatment (purchase from an unregistered person) is not modelled — confirm with a CA.
 
 > The old "GRN → tag is a manual, unflagged step" workflow gap is closed by I1: it stays a deliberate manual step, but the GRN page now
 > shows each untagged finished piece with a Tag button.

@@ -15,6 +15,34 @@ import { SelectField } from '../../components/fields/SelectField';
 import { findMakingCharge, computeLineAmount, computeMakingAmount } from '../../utils/estimateCalc';
 import { printTagEstimate } from '../../utils/printTagEstimate';
 
+// What "Send to billing" asks for, so the biller does not ask again. Name, mobile and the sales employee are
+// required; DOB, address and PAN are optional (the server validates them all again).
+interface CustomerForm {
+  name: string; phone: string; dob: string; address: string; pan: string; salesPersonId: string;
+}
+const EMPTY_CUSTOMER: CustomerForm = { name: '', phone: '', dob: '', address: '', pan: '', salesPersonId: '' };
+
+const digitsOnly = (v: string) => v.replace(/\D/g, '').replace(/^(91|0)(?=\d{10}$)/, '');
+
+function validateCustomer(c: CustomerForm): Partial<Record<keyof CustomerForm, string>> {
+  const e: Partial<Record<keyof CustomerForm, string>> = {};
+  if (!c.name.trim()) e.name = 'Required';
+  if (!c.phone.trim()) e.phone = 'Required';
+  else if (!/^[6-9]\d{9}$/.test(digitsOnly(c.phone))) e.phone = 'Enter a 10-digit mobile number';
+  if (c.dob && (c.dob > new Date().toISOString().slice(0, 10))) e.dob = 'Cannot be in the future';
+  if (c.pan.trim() && !/^[A-Za-z]{5}[0-9]{4}[A-Za-z]$/.test(c.pan.trim())) e.pan = 'PAN looks like ABCDE1234F';
+  if (!c.salesPersonId) e.salesPersonId = 'Required';
+  return e;
+}
+
+// A saved estimate's stored customer, back into the form (so re-sending an estimate shows what was taken).
+function customerFromEstimate(e: any): CustomerForm {
+  return {
+    name: e?.customerName ?? '', phone: e?.customerPhone ?? '', dob: e?.customerDob ? String(e.customerDob).slice(0, 10) : '',
+    address: e?.customerAddress ?? '', pan: e?.customerPan ?? '', salesPersonId: e?.salesPersonId ?? '',
+  };
+}
+
 function fmt(n: number) {
   return '₹' + n.toLocaleString('en-IN', { maximumFractionDigits: 2 });
 }
@@ -56,8 +84,13 @@ export function EstimationPage() {
   // Hand-off to the billing counter. `sendTarget`: an already-saved estimate to send, or 'new' to save the
   // current work-up and send that in one go.
   const [sendTarget, setSendTarget] = useState<{ id: string; number: string } | 'new' | null>(null);
-  const [customerName, setCustomerName] = useState('');
-  const [customerPhone, setCustomerPhone] = useState('');
+  const [customer, setCustomer] = useState<CustomerForm>(EMPTY_CUSTOMER);
+  const setCust = (patch: Partial<CustomerForm>) => setCustomer((c) => ({ ...c, ...patch }));
+  const custErrors = validateCustomer(customer);
+  const [showCustErrors, setShowCustErrors] = useState(false);
+
+  const staffQuery = useQuery({ queryKey: ['estimation-staff'], queryFn: () => apiGet<any[]>('/estimation/staff') });
+  const staffList: any[] = staffQuery.data ?? [];
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
@@ -181,17 +214,20 @@ export function EstimationPage() {
   });
 
   const sendMutation = useMutation({
-    mutationFn: () => sendTarget === 'new'
-      ? apiPost<any>(`/estimation/tags/${selectedTagId}/estimates`, {
-          ...buildEstimatePayload(), sendToBilling: true, customerName: customerName.trim() || undefined, customerPhone: customerPhone.trim() || undefined,
-        })
-      : apiPost<any>(`/estimation/estimates/${(sendTarget as { id: string }).id}/send-to-billing`, {
-          customerName: customerName.trim() || undefined, customerPhone: customerPhone.trim() || undefined,
-        }),
+    mutationFn: () => {
+      const details = {
+        customerName: customer.name.trim(), customerPhone: customer.phone.trim(), customerDob: customer.dob || undefined,
+        customerAddress: customer.address.trim() || undefined, customerPan: customer.pan.trim().toUpperCase() || undefined,
+        salesPersonId: customer.salesPersonId,
+      };
+      return sendTarget === 'new'
+        ? apiPost<any>(`/estimation/tags/${selectedTagId}/estimates`, { ...buildEstimatePayload(), sendToBilling: true, ...details })
+        : apiPost<any>(`/estimation/estimates/${(sendTarget as { id: string }).id}/send-to-billing`, details);
+    },
     onSuccess: (saved) => {
       enqueueSnackbar(`Estimate ${saved.estimateNumber} sent to billing`, { variant: 'success' });
       qc.invalidateQueries({ queryKey: ['estimation-past', selectedTagId] });
-      setSendTarget(null); setCustomerName(''); setCustomerPhone(''); setEditing(false);
+      setSendTarget(null); setCustomer(EMPTY_CUSTOMER); setShowCustErrors(false); setEditing(false);
     },
     onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed to send to billing', { variant: 'error' }),
   });
@@ -380,7 +416,7 @@ export function EstimationPage() {
               <Button fullWidth variant="contained" color="secondary" startIcon={<Send />} sx={{ mt: 2 }}
                 disabled={items.length === 0 || tag.status !== 'IN_STOCK'}
                 title={tag.status !== 'IN_STOCK' ? 'Only a piece that is in stock can be sent to billing' : 'Save this estimate and send it to the billing counter'}
-                onClick={() => setSendTarget('new')}>
+                onClick={() => { setCustomer(EMPTY_CUSTOMER); setShowCustErrors(false); setSendTarget('new'); }}>
                 Send to Billing
               </Button>
               <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
@@ -417,7 +453,7 @@ export function EstimationPage() {
                         <Typography variant="body2" fontWeight={700}>{fmt(Number(e.netPayableAmount))}</Typography>
                         {e.status === 'OPEN' && (
                           <IconButton size="small" title="Send to billing" disabled={tag.status !== 'IN_STOCK'}
-                            onClick={() => { setCustomerName(e.customerName ?? ''); setCustomerPhone(e.customerPhone ?? ''); setSendTarget({ id: e.id, number: e.estimateNumber }); }}>
+                            onClick={() => { setCustomer(customerFromEstimate(e)); setShowCustErrors(false); setSendTarget({ id: e.id, number: e.estimateNumber }); }}>
                             <Send fontSize="small" />
                           </IconButton>
                         )}
@@ -437,28 +473,65 @@ export function EstimationPage() {
         </Grid>
       )}
 
-      <Dialog open={!!sendTarget} onClose={() => setSendTarget(null)} maxWidth="xs" fullWidth>
-        <DialogTitle fontWeight={700}>
-          Send to billing
-          <Typography variant="caption" display="block" color="text.secondary">
-            {sendTarget === 'new' ? 'Saves this estimate and hands it to the billing counter.' : `Hands ${(sendTarget as any)?.number ?? 'this estimate'} to the billing counter.`}
-          </Typography>
-        </DialogTitle>
-        <DialogContent sx={{ pt: 2 }}>
-          <Stack spacing={2} sx={{ mt: 0.5 }}>
-            <TextField fullWidth size="small" autoFocus label="Customer name (optional)" value={customerName}
-              helperText="So billing can find it by name"
-              onChange={(e) => setCustomerName(e.target.value)} />
-            <TextField fullWidth size="small" label="Customer phone (optional)" value={customerPhone}
-              onChange={(e) => setCustomerPhone(e.target.value)} />
-          </Stack>
-        </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
-          <Button onClick={() => setSendTarget(null)}>Cancel</Button>
-          <Button variant="contained" startIcon={<Send />} disabled={sendMutation.isPending} onClick={() => sendMutation.mutate()}>
-            {sendMutation.isPending ? 'Sending…' : 'Send'}
-          </Button>
-        </DialogActions>
+      <Dialog open={!!sendTarget} onClose={() => setSendTarget(null)} maxWidth="sm" fullWidth>
+        <form onSubmit={(ev) => {
+          ev.preventDefault();
+          if (Object.keys(custErrors).length > 0) { setShowCustErrors(true); return; }
+          sendMutation.mutate();
+        }}>
+          <DialogTitle fontWeight={700}>
+            Send to billing
+            <Typography variant="caption" display="block" color="text.secondary">
+              {sendTarget === 'new' ? 'Saves this estimate and hands it to the billing counter' : `Hands ${(sendTarget as any)?.number ?? 'this estimate'} to the billing counter`}
+              {' '}with the customer's details, so billing does not ask again.
+            </Typography>
+          </DialogTitle>
+          <DialogContent sx={{ pt: 2 }}>
+            <Grid container spacing={2} sx={{ mt: 0 }}>
+              <Grid item xs={12} sm={7}>
+                <TextField fullWidth size="small" autoFocus required label="Customer name" value={customer.name}
+                  error={showCustErrors && !!custErrors.name} helperText={showCustErrors ? custErrors.name : undefined}
+                  onChange={(e) => setCust({ name: e.target.value })} />
+              </Grid>
+              <Grid item xs={12} sm={5}>
+                <TextField fullWidth size="small" required label="Mobile number" value={customer.phone}
+                  inputProps={{ inputMode: 'tel', maxLength: 16 }}
+                  error={showCustErrors && !!custErrors.phone} helperText={showCustErrors ? custErrors.phone : undefined}
+                  onChange={(e) => setCust({ phone: e.target.value })} />
+              </Grid>
+              <Grid item xs={12} sm={5}>
+                <TextField fullWidth size="small" type="date" label="Date of birth" value={customer.dob}
+                  InputLabelProps={{ shrink: true }} inputProps={{ max: new Date().toISOString().slice(0, 10) }}
+                  error={showCustErrors && !!custErrors.dob} helperText={showCustErrors ? custErrors.dob : undefined}
+                  onChange={(e) => setCust({ dob: e.target.value })} />
+              </Grid>
+              <Grid item xs={12} sm={7}>
+                <TextField fullWidth size="small" label="PAN card number" value={customer.pan}
+                  inputProps={{ maxLength: 10, style: { textTransform: 'uppercase' } }}
+                  error={showCustErrors && !!custErrors.pan}
+                  helperText={showCustErrors && custErrors.pan ? custErrors.pan : 'Needed if the bill goes above ₹2,00,000'}
+                  onChange={(e) => setCust({ pan: e.target.value })} />
+              </Grid>
+              <Grid item xs={12}>
+                <TextField fullWidth size="small" multiline minRows={2} label="Address" value={customer.address}
+                  onChange={(e) => setCust({ address: e.target.value })} />
+              </Grid>
+              <Grid item xs={12}>
+                <SelectField size="small" required label="Sales employee (attending this customer)" value={customer.salesPersonId}
+                  emptyLabel="Select…"
+                  error={showCustErrors && !!custErrors.salesPersonId} helperText={showCustErrors ? custErrors.salesPersonId : undefined}
+                  onChange={(e) => setCust({ salesPersonId: e.target.value })}
+                  options={staffList.map((s) => ({ value: s.id, label: `${s.name}${s.employeeId ? ` (${s.employeeId})` : ''}` }))} />
+              </Grid>
+            </Grid>
+          </DialogContent>
+          <DialogActions sx={{ p: 2 }}>
+            <Button onClick={() => setSendTarget(null)}>Cancel</Button>
+            <Button type="submit" variant="contained" startIcon={<Send />} disabled={sendMutation.isPending}>
+              {sendMutation.isPending ? 'Sending…' : 'Send'}
+            </Button>
+          </DialogActions>
+        </form>
       </Dialog>
 
       {query.trim().length === 0 && (

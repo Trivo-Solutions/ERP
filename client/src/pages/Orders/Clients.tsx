@@ -21,7 +21,7 @@ export function Clients() {
   const [paymentClient, setPaymentClient] = useState<{ id: string; name: string } | null>(null);
   const [kycClient, setKycClient] = useState<any>(null);
   const { data, isLoading } = useQuery({ queryKey: ['clients'], queryFn: () => apiGet<any[]>('/orders/clients') });
-  const { control, handleSubmit, reset } = useForm({ defaultValues: { name: '', type: 'WHOLESALE', gstNumber: '', panNumber: '', form60Received: false, phone: '', email: '', address: '', city: '', district: '', state: '', pincode: '', creditLimit: 0, pricingTier: 'STANDARD' } });
+  const { control, handleSubmit, reset } = useForm({ defaultValues: { name: '', type: 'WHOLESALE', gstNumber: '', panNumber: '', form60Received: false, phone: '', email: '', dateOfBirth: '', address: '', city: '', district: '', state: '', pincode: '', creditLimit: 0, pricingTier: 'STANDARD' } });
   const paymentForm = useForm({ defaultValues: { amount: 0, mode: 'CASH', paymentDate: new Date().toISOString().slice(0, 10), referenceNo: '', notes: '' } });
 
   const mutation = useMutation({
@@ -121,6 +121,7 @@ export function Clients() {
                 render={({ field }) => <FormControlLabel sx={{ mt: 1 }} control={<Checkbox checked={field.value} onChange={(e) => field.onChange(e.target.checked)} />} label="Form 60 received (no PAN)" />} /></Grid>
               <Grid item xs={6}><Controller name="phone" control={control} render={({ field }) => <TextField {...field} fullWidth label="Phone" />} /></Grid>
               <Grid item xs={6}><Controller name="email" control={control} render={({ field }) => <TextField {...field} fullWidth label="Email" type="email" />} /></Grid>
+              <Grid item xs={6}><Controller name="dateOfBirth" control={control} render={({ field }) => <TextField {...field} fullWidth type="date" label="Date of Birth" InputLabelProps={{ shrink: true }} inputProps={{ max: new Date().toISOString().slice(0, 10) }} />} /></Grid>
               <Grid item xs={6}><Controller name="address" control={control} render={({ field }) => <TextField {...field} fullWidth label="Door No / Address" />} /></Grid>
               <Grid item xs={3}><Controller name="city" control={control} render={({ field }) => <TextField {...field} fullWidth label="City" />} /></Grid>
               <Grid item xs={3}><Controller name="district" control={control} render={({ field }) => <TextField {...field} fullWidth label="District" />} /></Grid>

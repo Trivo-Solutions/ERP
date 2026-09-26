@@ -863,8 +863,7 @@ export function NewTagPage() {
       )}
 
       <Box sx={{ '@media print': { display: 'none' } }}>
-        <PageHeader title={isEditMode ? `Edit Tag${editTag?.tagNumber ? ` ${editTag.tagNumber}` : ''}` : 'New Tag'}
-          actions={[{ label: 'Back to Tags', icon: <ArrowBack />, onClick: () => navigate('/tagging/tags'), variant: 'outlined' as const }]} />
+        <PageHeader title={isEditMode ? `Edit Tag${editTag?.tagNumber ? ` ${editTag.tagNumber}` : ''}` : 'New Tag'} />
 
         <Grid container spacing={3} alignItems="flex-start">
 
@@ -958,8 +957,6 @@ export function NewTagPage() {
                                     {c.remainingPieces != null ? ` · ${c.remainingPieces} of ${c.pieces} pcs left` : ''}
                                   </Box>
                                 ))}
-                                Pick the piece's category and enter its metal weight (and stones) on the Materials tab. Cost rates and MC / VA are pre-filled
-                                from the PO — change them if this piece differs.
                               </Alert>
                             )}
                           </Grid>
@@ -1407,9 +1404,16 @@ export function NewTagPage() {
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1, ml: 0.5 }}>
                 Stored locally for now — server upload wiring comes later.
               </Typography>
+              <Button variant="outlined" size="small" startIcon={<ArrowBack />} sx={{ mt: 2 }}
+                onClick={() => navigate('/tagging/tags')}>Back to Tags</Button>
             </Grid>
           )}
         </Grid>
+        {/* The photo column is hidden on the wide Materials tab — keep the way back reachable there too. */}
+        {activeTab === 1 && !createdTag && (
+          <Button variant="outlined" size="small" startIcon={<ArrowBack />} sx={{ mt: 2 }}
+            onClick={() => navigate('/tagging/tags')}>Back to Tags</Button>
+        )}
       </Box>
 
       <Dialog open={manufacturerDialogOpen} onClose={() => setManufacturerDialogOpen(false)} maxWidth="sm" fullWidth>

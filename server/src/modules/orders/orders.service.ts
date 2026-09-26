@@ -178,10 +178,12 @@ type ClientWritable = {
   name: string; type: string; gstNumber: string; panNumber: string | null; form60Received: boolean;
   address: string; city: string; district: string; state: string; pincode: string; phone: string;
   email: string; contactPerson: string; creditLimit: number; pricingTier: string; isActive: boolean;
+  dateOfBirth: Date | null;
 };
 const CLIENT_WRITABLE_KEYS: Array<keyof ClientWritable> = [
   'name', 'type', 'gstNumber', 'panNumber', 'form60Received', 'address', 'city', 'district', 'state',
   'pincode', 'phone', 'email', 'contactPerson', 'creditLimit', 'pricingTier', 'isActive',
+  'dateOfBirth',
 ];
 
 // Only the fields a person may edit by hand. currentBalance is moved by invoices/payments alone, never typed in.
@@ -189,6 +191,12 @@ function pickClientFields(body: Record<string, unknown>): Partial<ClientWritable
   const out: Record<string, unknown> = {};
   for (const k of CLIENT_WRITABLE_KEYS) if (body[k] !== undefined) out[k] = body[k];
   if ('panNumber' in out) out.panNumber = normalizePan(out.panNumber); // upper-cased, shape-checked; '' clears it
+  if ('dateOfBirth' in out) { // 'YYYY-MM-DD'; '' / null clears it
+    const raw = out.dateOfBirth as string | null;
+    const d = raw ? new Date(`${String(raw).slice(0, 10)}T00:00:00.000Z`) : null;
+    if (d && (Number.isNaN(d.getTime()) || d.getTime() > Date.now())) throw new AppError('Date of birth is not valid', 400);
+    out.dateOfBirth = d;
+  }
   return out as Partial<ClientWritable>;
 }
 

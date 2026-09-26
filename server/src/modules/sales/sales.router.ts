@@ -132,6 +132,12 @@ salesRouter.get('/branches', requirePermission('invoice:create'), async (req: Re
   res.json({ success: true, data: branches.filter((b) => canAccessBranch(req.tenant!, b.id)) });
 });
 
+// HSN codes/rates + same-state vs inter-state for a customer — the New Sale screen's GST preview.
+salesRouter.get('/tax-context', requirePermission('invoice:create'), async (req: Request, res: Response) => {
+  const clientId = typeof req.query.clientId === 'string' ? req.query.clientId : undefined;
+  res.json({ success: true, data: await svc.getTaxContext(req.tenant!, clientId) });
+});
+
 salesRouter.post('/invoices', requirePermission('invoice:create'), async (req: Request, res: Response) => {
   // JSON has no Date type — invoiceDate/dueDate arrive as ISO strings and must be coerced before
   // reaching createInvoice(), which calls real Date methods on them (.getFullYear() for the new
@@ -167,6 +173,12 @@ salesRouter.get('/clients/:clientId/payments', requirePermission('sales:view'), 
 salesRouter.post('/clients/:clientId/payments', requirePermission('invoice:create'), async (req: Request, res: Response) => {
   const payment = await svc.recordClientPayment({ clientId: req.params.clientId, ...req.body, paymentDate: parseDate(req.body.paymentDate, 'Payment date', true) }, req.tenant!, req.user!.userId);
   res.status(201).json({ success: true, data: payment });
+});
+
+// Credit a customer holds (from sales returns / old-gold exchanges) that the New Sale screen can spend as the
+// "Store Credit" payment mode. Same gate as creating the invoice it is spent on.
+salesRouter.get('/clients/:clientId/credit', requirePermission('invoice:create'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await svc.getClientCredit(req.tenant!, req.params.clientId) });
 });
 
 // Sale Returns (D1)

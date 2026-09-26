@@ -43,6 +43,9 @@ describe('estimate -> invoice hand-off', () => {
     return e;
   }
 
+  // What "send to billing" now requires: the customer's name + mobile, and the sales employee attending them.
+  const cust = () => ({ customerName: 'Walk-in Customer', customerPhone: '9876500000', salesPersonId: userId });
+
   // The line the billing screen builds from an estimate: the piece itself, priced as a flat (FIXED) amount.
   const billLine = (tag: { id: string; tagNumber: string; name: string }, price: number) => ({
     productCode: tag.tagNumber, description: tag.name, quantity: 1, grossWeight: 10, netGoldWeight: 10,
@@ -85,7 +88,7 @@ describe('estimate -> invoice hand-off', () => {
     it('sending it makes it findable — by estimate number, item name, tag number, HUID, customer name and phone', async () => {
       const tag = await makeTag('Temple Haram');
       const e = await estimateFor(tag.id);
-      const sent = await sendEstimateToBilling(tenant.ctx, e.id, { customerName: 'Ramesh Kumar', customerPhone: '9876500011' }, userId);
+      const sent = await sendEstimateToBilling(tenant.ctx, e.id, { customerName: 'Ramesh Kumar', customerPhone: '9876500011', salesPersonId: userId }, userId);
       expect(sent.status).toBe('SENT');
 
       for (const q of [e.estimateNumber, e.estimateNumber.toLowerCase(), 'temple', tag.tagNumber, tag.huid!, 'ramesh', 'KUMAR', '98765']) {
@@ -97,7 +100,7 @@ describe('estimate -> invoice hand-off', () => {
 
     it('can be saved and sent in one step, and carries what the billing screen needs (sale-side only)', async () => {
       const tag = await makeTag('Diamond Ring');
-      const e = await estimateFor(tag.id, { sendToBilling: true, customerName: 'Priya' });
+      const e = await estimateFor(tag.id, { sendToBilling: true, ...cust(), customerName: 'Priya' });
       expect(e.status).toBe('SENT');
 
       const [found] = await searchBillableEstimates(tenant.ctx, 'Priya');
@@ -120,10 +123,85 @@ describe('estimate -> invoice hand-off', () => {
       await expect(sendEstimateToBilling(tenant.ctx, e1.id, {}, userId)).rejects.toThrow(/only a piece that is in stock/);
 
       const tag = await makeTag('Sold Later Chain');
-      const e2 = await estimateFor(tag.id, { sendToBilling: true });
+      const e2 = await estimateFor(tag.id, { sendToBilling: true, ...cust() });
       expect((await searchBillableEstimates(tenant.ctx, e2.estimateNumber)).map((f) => f.id)).toContain(e2.id);
       await prisma.jewelryTag.update({ where: { id: tag.id }, data: { status: 'SOLD' } });
       expect((await searchBillableEstimates(tenant.ctx, e2.estimateNumber))).toHaveLength(0);
+    });
+
+    describe('customer details taken at the hand-off', () => {
+      const full = () => ({
+        customerName: '  Sita Devi ', customerPhone: '+91 98765 00022', customerDob: '1990-04-15',
+        customerAddress: ' 12 MG Road, Guntur ', customerPan: 'abcde1234f', salesPersonId: userId,
+      });
+
+      it('stores name, mobile, DOB, address, PAN and the sales employee — normalised — and hands them to billing', async () => {
+        const tag = await makeTag('Details Chain');
+        const e = await estimateFor(tag.id);
+        const sent = await sendEstimateToBilling(tenant.ctx, e.id, full(), userId);
+        expect(sent).toMatchObject({
+          customerName: 'Sita Devi', customerPhone: '9876500022', customerAddress: '12 MG Road, Guntur',
+          customerPan: 'ABCDE1234F', salesPersonId: userId,
+        });
+        expect(sent.customerDob?.toISOString().slice(0, 10)).toBe('1990-04-15');
+
+        const [found] = await searchBillableEstimates(tenant.ctx, 'Sita');
+        expect(found).toMatchObject({ customerPhone: '9876500022', customerPan: 'ABCDE1234F', salesPerson: { id: userId } });
+        expect(found.customerDob?.toISOString().slice(0, 10)).toBe('1990-04-15');
+      });
+
+      it('save-and-send in one step takes the same details', async () => {
+        const tag = await makeTag('Details Ring');
+        const e = await estimateFor(tag.id, { sendToBilling: true, ...full() });
+        expect(e).toMatchObject({ status: 'SENT', customerPhone: '9876500022', salesPersonId: userId });
+      });
+
+      it('refuses to send without a name, a mobile number or a sales employee — and leaves the estimate OPEN', async () => {
+        const tag = await makeTag('Incomplete Bangle');
+        const e = await estimateFor(tag.id);
+        for (const [missing, re] of [
+          ['customerName', /name is required/i], ['customerPhone', /mobile number is required/i], ['salesPersonId', /sales employee/i],
+        ] as const) {
+          await expect(sendEstimateToBilling(tenant.ctx, e.id, { ...full(), [missing]: '' }, userId), missing).rejects.toThrow(re);
+        }
+        await expect(estimateFor(tag.id, { sendToBilling: true, ...full(), customerPhone: undefined })).rejects.toThrow(/mobile number is required/i);
+        expect((await prisma.tagEstimate.findUniqueOrThrow({ where: { id: e.id } })).status).toBe('OPEN');
+      });
+
+      it('DOB, address and PAN are optional', async () => {
+        const tag = await makeTag('Minimal Chain');
+        const e = await estimateFor(tag.id);
+        const sent = await sendEstimateToBilling(tenant.ctx, e.id, cust(), userId);
+        expect(sent).toMatchObject({ status: 'SENT', customerDob: null, customerAddress: null, customerPan: null });
+      });
+
+      it('rejects a bad mobile, PAN or date of birth', async () => {
+        const tag = await makeTag('Invalid Details Chain');
+        const e = await estimateFor(tag.id);
+        await expect(sendEstimateToBilling(tenant.ctx, e.id, { ...full(), customerPhone: '12345' }, userId)).rejects.toThrow(/10-digit/);
+        await expect(sendEstimateToBilling(tenant.ctx, e.id, { ...full(), customerPan: 'ABCDE12345' }, userId)).rejects.toThrow(/PAN must be/);
+        await expect(sendEstimateToBilling(tenant.ctx, e.id, { ...full(), customerDob: '2999-01-01' }, userId)).rejects.toThrow(/future/);
+        await expect(sendEstimateToBilling(tenant.ctx, e.id, { ...full(), customerDob: 'not-a-date' }, userId)).rejects.toThrow(/valid date/);
+      });
+
+      it("only accepts a sales employee who belongs to this company", async () => {
+        const other = await createTestTenant(`ESY${suffix}`, ['invoice:create']);
+        try {
+          const tag = await makeTag('Foreign Staff Chain');
+          const e = await estimateFor(tag.id);
+          await expect(sendEstimateToBilling(tenant.ctx, e.id, { ...full(), salesPersonId: other.user.id }, userId)).rejects.toThrow(/Sales employee not found/);
+        } finally {
+          await cleanupTestTenant(other);
+        }
+      });
+
+      it('re-sending keeps what is already on the estimate unless corrected', async () => {
+        const tag = await makeTag('Resend Chain');
+        const e = await estimateFor(tag.id);
+        await sendEstimateToBilling(tenant.ctx, e.id, full(), userId);
+        const again = await sendEstimateToBilling(tenant.ctx, e.id, { customerAddress: '7 New Street' }, userId);
+        expect(again).toMatchObject({ customerName: 'Sita Devi', customerPhone: '9876500022', customerAddress: '7 New Street', customerPan: 'ABCDE1234F' });
+      });
     });
 
     it("never shows another company's estimate", async () => {
@@ -140,7 +218,7 @@ describe('estimate -> invoice hand-off', () => {
   describe('billing an estimate', () => {
     it('bills it: the piece is sold, the estimate is INVOICED against the invoice, and it cannot be billed again', async () => {
       const tag = await makeTag('Billed Bangle');
-      const e = await estimateFor(tag.id, { sendToBilling: true });
+      const e = await estimateFor(tag.id, { sendToBilling: true, ...cust() });
 
       const inv = await createInvoice({
         clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', estimateIds: [e.id],
@@ -165,7 +243,7 @@ describe('estimate -> invoice hand-off', () => {
 
     it('lets the biller change the price on the way through — the invoice takes the new number, the quote is untouched', async () => {
       const tag = await makeTag('Negotiated Ring');
-      const e = await estimateFor(tag.id, { sendToBilling: true });
+      const e = await estimateFor(tag.id, { sendToBilling: true, ...cust() });
 
       const inv = await createInvoice({
         clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', estimateIds: [e.id],
@@ -181,7 +259,7 @@ describe('estimate -> invoice hand-off', () => {
     it('supports billing the estimate alongside other lines on the same invoice (add / delete items freely)', async () => {
       const tag = await makeTag('Estimate ring');
       const extra = await makeTag('Extra pendant');
-      const e = await estimateFor(tag.id, { sendToBilling: true });
+      const e = await estimateFor(tag.id, { sendToBilling: true, ...cust() });
 
       const inv = await createInvoice({
         clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', estimateIds: [e.id],
@@ -195,7 +273,7 @@ describe('estimate -> invoice hand-off', () => {
     it('refuses an estimate whose piece is not on the invoice — and books nothing', async () => {
       const quoted = await makeTag('Quoted piece');
       const other = await makeTag('Some other piece');
-      const e = await estimateFor(quoted.id, { sendToBilling: true });
+      const e = await estimateFor(quoted.id, { sendToBilling: true, ...cust() });
 
       await expect(
         createInvoice({ clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', estimateIds: [e.id], items: [billLine(other, 5000)] })
@@ -230,7 +308,7 @@ describe('estimate -> invoice hand-off', () => {
 
     it('is all-or-nothing: a sale that fails later leaves the estimate SENT and the piece IN_STOCK', async () => {
       const tag = await makeTag('Rolled back');
-      const e = await estimateFor(tag.id, { sendToBilling: true });
+      const e = await estimateFor(tag.id, { sendToBilling: true, ...cust() });
       // ₹2,00,000 in cash trips the Sec 269ST check inside the same transaction, after the estimate was flipped
       await expect(
         createInvoice({
@@ -246,7 +324,7 @@ describe('estimate -> invoice hand-off', () => {
 
     it('two counters billing the same estimate at once: exactly one wins', async () => {
       const tag = await makeTag('Contested piece');
-      const e = await estimateFor(tag.id, { sendToBilling: true });
+      const e = await estimateFor(tag.id, { sendToBilling: true, ...cust() });
 
       const attempt = () => createInvoice({
         clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', estimateIds: [e.id], items: [billLine(tag, 71000)],

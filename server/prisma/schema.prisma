@@ -270,7 +270,8 @@ model User {
   invoicesSold             SalesInvoice[]
   stockAuditsStarted       StockAudit[]
   tagTemplatesCreated      TagTemplate[]
-  tagEstimatesCreated      TagEstimate[]
+  tagEstimatesCreated      TagEstimate[]       @relation("EstimateCreatedBy")
+  tagEstimatesAttended     TagEstimate[]       @relation("EstimateSalesPerson")
   estimateTemplatesCreated EstimateTemplate[]
   invitationsSent          CompanyInvitation[]   @relation("InvitationInviter")
   platformAuditLogs        PlatformAuditLog[]
@@ -1104,6 +1105,8 @@ model Client {
   type           String
   gstNumber      String?
   panNumber      String?
+  // Date of birth (date only) — captured at the estimate's "send to billing" hand-off; optional everywhere.
+  dateOfBirth    DateTime? @db.Date
   // Form 60 (the declaration a customer with no PAN gives instead) is on file. With panNumber, this is
   // what lets a sale over ₹2,00,000 go through — see shared/compliance.ts assertPanIfRequired.
   form60Received Boolean  @default(false)
@@ -2027,7 +2030,7 @@ model TagEstimate {
   validUntil       DateTime?
   notes            String?
   createdById      String?
-  createdBy        User?             @relation(fields: [createdById], references: [id])
+  createdBy        User?             @relation("EstimateCreatedBy", fields: [createdById], references: [id])
   createdAt        DateTime          @default(now())
 
   // Hand-off to the billing counter. OPEN (just a quote) -> SENT (the estimator sent it to billing; it now
@@ -2039,6 +2042,15 @@ model TagEstimate {
   sentById         String?
   customerName     String?
   customerPhone    String?
+  // The rest of the customer's details, taken when the estimate is sent to billing so the biller does not
+  // have to ask again (billing finds-or-creates the Client from these). Name, phone and the sales employee are
+  // required at that hand-off; DOB / address / PAN are optional.
+  customerDob      DateTime?         @db.Date
+  customerAddress  String?
+  customerPan      String?
+  // The staff member showing / attending this customer (a User id, same as SalesInvoice.salesPersonId).
+  salesPersonId    String?
+  salesPerson      User?             @relation("EstimateSalesPerson", fields: [salesPersonId], references: [id])
   invoice          SalesInvoice?     @relation(fields: [invoiceId, companyId], references: [id, companyId], onDelete: Restrict)
   invoiceId        String?
 
@@ -2325,6 +2337,9 @@ model SalesInvoice {
   discountAmount Decimal   @default(0) @db.Decimal(12, 2)
   otherCharges   Decimal   @default(0) @db.Decimal(12, 2)
   taxAmount      Decimal   @default(0) @db.Decimal(12, 2)
+  // Adjustment to the nearest rupee (or whatever the biller keyed): totalAmount already includes it, so
+  // subtotal + otherCharges - discountAmount + taxAmount + roundOff = totalAmount. Positive = customer pays more.
+  roundOff       Decimal   @default(0) @db.Decimal(12, 2)
   totalAmount    Decimal   @db.Decimal(12, 2)
   paidAmount     Decimal   @default(0) @db.Decimal(12, 2)
   balanceDue     Decimal   @db.Decimal(12, 2)

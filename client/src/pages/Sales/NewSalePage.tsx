@@ -1,21 +1,23 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Box, Card, Table, TableHead, TableBody, TableRow, TableCell, Typography, Chip, Button,
   Grid, MenuItem, TextField, Stack, Divider, IconButton, Autocomplete, Tabs, Tab,
-  Checkbox, FormControlLabel, Dialog, DialogTitle, DialogContent, DialogActions, Alert,
+  Checkbox, FormControlLabel, Dialog, DialogTitle, DialogContent, DialogActions, Alert, Switch,
+  ToggleButton, ToggleButtonGroup, Tooltip, Badge,
 } from '@mui/material';
-import { Add, Delete, Print, AddCircleOutline, CheckCircle, ArrowBack, PersonAdd } from '@mui/icons-material';
+import { Add, Delete, Print, AddCircleOutline, CheckCircle, ArrowBack, PersonAdd, Tune } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm, Controller } from 'react-hook-form';
 import { useSnackbar } from 'notistack';
-import { apiGet, apiPost } from '../../api/client';
+import { apiGet, apiPost, apiPatch } from '../../api/client';
 import { PageHeader } from '../../components/common/PageHeader';
 import { ClientKycDialog } from '../../components/common/ClientKycDialog';
 import { SelectField } from '../../components/fields/SelectField';
 import { printInvoice } from '../../utils/printInvoice';
 import { findMakingCharge } from '../../utils/estimateCalc';
 import { EstimateBreakdown, EstimateBreakdownDialog, estimateTotals, newRowKey } from './EstimateBreakdown';
+import { SaleSummary, SaleFigures } from './SaleSummary';
 
 // Statutory limits the server enforces (shared/compliance.ts) — mirrored here only to warn before submitting.
 const PAN_REQUIRED_ABOVE = 200000;   // Rule 114B: PAN / Form 60 on a sale above this
@@ -44,6 +46,7 @@ interface LineItem {
   stoneValue: number;
   categoryId?: string;
   categoryName?: string;
+  hsnCode?: string;   // billed under this HSN (its GST rate comes from the HSN master); blank = the default
   // A line loaded from an estimate keeps its material rows + MC/VA so they can be edited; its price is derived
   // from them, and it goes to the server as a flat (FIXED) amount. `quotedTotal` is what the estimate said.
   estimateId?: string;
@@ -80,6 +83,7 @@ function estimateInvoiceLine(l: LineItem) {
     stoneValue: round2(t.otherMaterials),
     tagId: l.tagId,
     categoryId: l.categoryId || undefined,
+    hsnCode: l.hsnCode || undefined,
   };
 }
 
@@ -89,10 +93,20 @@ interface PaymentSplit {
   key: string;
   paymentDate: string;
   amount: number;
+  // CASH / CARD / UPI / BANK_TRANSFER / CHEQUE take money. OLD_GOLD (the customer's old metal, valued and melted in on
+  // this bill) and STORE_CREDIT (credit already on their account from a return or an earlier exchange) settle the bill
+  // from credit instead — see sales.service.ts createInvoice.
   mode: string;
   referenceNo: string;
   notes: string;
+  // OLD_GOLD only. The amount is not typed: the server values net weight x today's rate for the karat, less deduction %.
+  og: { description: string; karat: string; gross: string; stone: string; deduction: string };
 }
+
+const PAYMENT_MODES: Array<{ value: string; label: string }> = [
+  { value: 'CASH', label: 'Cash' }, { value: 'CARD', label: 'Card' }, { value: 'UPI', label: 'UPI' },
+  { value: 'BANK_TRANSFER', label: 'Bank Transfer' }, { value: 'CHEQUE', label: 'Cheque' },
+];
 
 // ─── Quick-add Client dialog ────────────────────────────────────────────────────
 
@@ -179,6 +193,14 @@ export function NewSalePage() {
   const [pendingStaffId, setPendingStaffId] = useState('');
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [kycOpen, setKycOpen] = useState(false);
+  // Bill adjustments the biller can edit: discount as a flat amount or a % of the gross, and the round-off — automatic
+  // to the nearest rupee, or keyed by hand.
+  const [discountMode, setDiscountMode] = useState<'AMOUNT' | 'PERCENT'>('AMOUNT');
+  const [discountPercent, setDiscountPercent] = useState<number | ''>('');
+  const [roundMode, setRoundMode] = useState<'AUTO' | 'MANUAL'>('AUTO');
+  const [roundManual, setRoundManual] = useState<number | ''>('');
+  const [gstOpen, setGstOpen] = useState(false);
+  const [adjustOpen, setAdjustOpen] = useState(false);
 
   const { data: clients } = useQuery({ queryKey: ['clients-list'], queryFn: () => apiGet<any>('/orders/clients') });
   const clientList: any[] = (clients as any)?.clients ?? (clients as any)?.data ?? clients ?? [];
@@ -192,7 +214,7 @@ export function NewSalePage() {
   const { data: estimateResults } = useQuery({
     queryKey: ['billable-estimates', estimateSearch],
     queryFn: () => apiGet<any[]>('/sales/estimates', { q: estimateSearch }),
-    enabled: activeTab === 1,
+    enabled: activeTab === 0,
   });
   const estimateOptions: any[] = (estimateResults as any)?.data ?? estimateResults ?? [];
 
@@ -219,6 +241,10 @@ export function NewSalePage() {
     if (!(r.karat in latestRateByKarat)) latestRateByKarat[r.karat] = Number(r.ratePerGram);
   });
 
+  // Karats for the Old Gold payment's purity picker (same master the standalone Old Gold Exchange screen uses).
+  const { data: karatsData } = useQuery({ queryKey: ['karats'], queryFn: () => apiGet<any>('/masters/karats') });
+  const karatList: any[] = (karatsData as any)?.data ?? karatsData ?? [];
+
   // C3: making-charge/wastage master, for auto-filling a picked tag's makingCharge/wastagePercent
   // — same master NewTagPage.tsx already reads, matched here by karat + category + tag makeType
   // (the server resolves the same way at submit time if these are left out; this is convenience
@@ -230,7 +256,7 @@ export function NewSalePage() {
   });
   const makingChargesList: any[] = (makingChargesData as any)?.data ?? makingChargesData ?? [];
 
-  const { control, handleSubmit, reset, watch, setValue } = useForm({
+  const { control, handleSubmit, reset, watch, setValue, getValues } = useForm({
     defaultValues: {
       clientId: '',
       branchId: '',
@@ -250,6 +276,27 @@ export function NewSalePage() {
   const selectedClientId = watch('clientId');
   const selectedClient = clientList.find((c: any) => c.id === selectedClientId);
   const branchId = watch('branchId');
+
+  // HSN codes/rates and whether this customer is same-state (CGST + SGST) or inter-state (IGST) — what the server will
+  // apply, so the bill can be previewed before it exists. Falls back to 3% / inter-state until it arrives.
+  const { data: taxCtxRes } = useQuery({
+    queryKey: ['sales-tax-context', selectedClientId],
+    queryFn: () => apiGet<any>('/sales/tax-context', selectedClientId ? { clientId: selectedClientId } : undefined),
+  });
+  const taxCtx: any = (taxCtxRes as any)?.data ?? taxCtxRes ?? {};
+  const hsnList: Array<{ code: string; description?: string; gstRate: number }> = taxCtx.hsnCodes ?? [];
+  const defaultHsn: string = taxCtx.defaultHsnCode ?? '7113';
+
+  // Credit this customer already holds (a sales return / earlier old-gold exchange) that can pay this bill as "Store
+  // Credit". Read fresh from the server — the cached client list's balance can be stale.
+  const { data: creditRes } = useQuery({
+    queryKey: ['client-credit', selectedClientId],
+    queryFn: () => apiGet<any>(`/sales/clients/${selectedClientId}/credit`),
+    enabled: !!selectedClientId,
+    staleTime: 0,
+  });
+  const creditAvailable: number = Number(((creditRes as any)?.data ?? creditRes)?.available) || 0;
+  const sameState = !!taxCtx.sameState;
 
   // An invoice is booked against a branch. With exactly one branch there is nothing to choose.
   useEffect(() => {
@@ -328,14 +375,53 @@ export function NewSalePage() {
     if (currency !== 'INR') { enqueueSnackbar('Estimates are priced in INR — set the invoice currency to INR first', { variant: 'warning' }); return; }
     const staffIds = new Set(staffList.map((x: any) => x.id));
     const current = watch('salesPersonId');
-    setPendingStaffId(current || (est.createdBy?.id && staffIds.has(est.createdBy.id) ? est.createdBy.id : ''));
+    // The sales employee the estimator recorded at the hand-off wins; then whatever is already on the bill.
+    const recorded = est.salesPerson?.id && staffIds.has(est.salesPerson.id) ? est.salesPerson.id : '';
+    setPendingStaffId(recorded || current || (est.createdBy?.id && staffIds.has(est.createdBy.id) ? est.createdBy.id : ''));
     setPendingEstimate(est);
   };
-  const confirmEstimate = () => {
+
+  // The customer the estimator took at the hand-off becomes the bill's customer: found by mobile number among
+  // the existing clients (never overwriting what is already on file — only blanks are filled), else created.
+  // An already-chosen customer on this bill is left alone.
+  const adoptEstimateCustomer = async (est: any) => {
+    if (watch('clientId') || !est.customerName) return;
+    const last10 = (v?: string) => (v ?? '').replace(/\D/g, '').slice(-10);
+    const phone = last10(est.customerPhone);
+    const dob = est.customerDob ? String(est.customerDob).slice(0, 10) : undefined;
+    const existing = phone ? clientList.find((c: any) => last10(c.phone) === phone) : undefined;
+    try {
+      if (existing) {
+        const fill: Record<string, any> = {};
+        if (!existing.panNumber && est.customerPan) fill.panNumber = est.customerPan;
+        if (!existing.address && est.customerAddress) fill.address = est.customerAddress;
+        if (!existing.dateOfBirth && dob) fill.dateOfBirth = dob;
+        if (Object.keys(fill).length > 0) await apiPatch(`/orders/clients/${existing.id}`, fill);
+        qc.invalidateQueries({ queryKey: ['clients-list'] });
+        setValue('clientId', existing.id);
+        return;
+      }
+      const res: any = await apiPost('/orders/clients', {
+        name: est.customerName, type: 'RETAIL', phone: est.customerPhone || undefined,
+        panNumber: est.customerPan || undefined, address: est.customerAddress || undefined, dateOfBirth: dob,
+      });
+      const created = res?.data ?? res;
+      await qc.invalidateQueries({ queryKey: ['clients-list'] });
+      setValue('clientId', created.id);
+      enqueueSnackbar(`Customer ${created.name} (${created.clientCode}) added from the estimate`, { variant: 'info' });
+    } catch (e: any) {
+      enqueueSnackbar(`Could not add the customer from the estimate — pick or add them manually. ${e.response?.data?.error ?? ''}`.trim(), { variant: 'warning' });
+    }
+  };
+
+  const confirmEstimate = async () => {
     if (!pendingEstimate || !pendingStaffId) return;
+    const est = pendingEstimate;
     setValue('salesPersonId', pendingStaffId);
-    addEstimateLine(pendingEstimate);
+    addEstimateLine(est);
     setPendingEstimate(null);
+    await adoptEstimateCustomer(est);
+    if (activeTab === 0 && getValues('clientId') && getValues('branchId')) setActiveTab(1); // straight on to the items
   };
 
   const addCustomLine = () => {
@@ -353,31 +439,134 @@ export function NewSalePage() {
 
   const removeLine = (key: string) => setLines((p) => p.filter((l) => l.key !== key));
 
+  // All of this mirrors createInvoice (sales.service.ts), which recomputes it authoritatively at save time.
   const subtotal = lines.reduce((s, l) => s + lineTotal(l), 0);
-  const taxableAmount = Math.max(subtotal + otherCharges - discountAmount, 0);
-  const taxRate = currency === 'INR' ? 0.03 : 0;
-  const taxAmount = taxableAmount * taxRate;
-  const total = taxableAmount + taxAmount;
+  // Discount: a flat amount, or a % of the gross — never more than the gross.
+  const discount = Math.min(
+    discountMode === 'PERCENT' ? round2(subtotal * (Number(discountPercent) || 0) / 100) : discountAmount,
+    subtotal,
+  );
+  const taxableAmount = Math.max(subtotal + otherCharges - discount, 0);
+  // GST: each line at its own HSN rate, scaled by the discount; shipping/other at the default HSN rate.
+  const rateOfHsn = (code?: string) => {
+    const h = hsnList.find((x) => x.code === (code || defaultHsn));
+    return h ? Number(h.gstRate) : 0.03;
+  };
+  const discountScale = subtotal > 0 ? (subtotal - discount) / subtotal : 0;
+  const gstByRate = new Map<number, number>();
+  if (currency === 'INR') {
+    lines.forEach((l) => { const r = rateOfHsn(l.hsnCode); gstByRate.set(r, (gstByRate.get(r) ?? 0) + lineTotal(l) * discountScale * r); });
+    if (otherCharges > 0) { const r = rateOfHsn(); gstByRate.set(r, (gstByRate.get(r) ?? 0) + otherCharges * r); }
+  }
+  const gstRows = Array.from(gstByRate.entries()).filter(([, a]) => a > 0.0005).sort(([a], [b]) => a - b).map(([rate, amount]) => ({ rate, amount }));
+  const taxAmount = gstRows.reduce((s, g) => s + g.amount, 0);
+  const preRoundTotal = taxableAmount + taxAmount;
+  // Round off: automatic to the nearest rupee on an INR bill, or a figure keyed by hand (the server allows ±₹10).
+  const MAX_ROUND_OFF = 10;
+  const roundOff = roundMode === 'MANUAL' ? (Number(roundManual) || 0) : currency === 'INR' ? Math.round(preRoundTotal) - preRoundTotal : 0;
+  const roundBad = roundMode === 'MANUAL' && Math.abs(Number(roundManual) || 0) > MAX_ROUND_OFF;
+  const total = preRoundTotal + roundOff;
+
+  // What the bill is made of, for the Summary card.
+  const figures: SaleFigures = (() => {
+    let gold = 0, stone = 0, mc = 0, va = 0, grossWeight = 0;
+    for (const l of lines) {
+      const q = Number(l.quantity) || 1;
+      if (l.estimate) {
+        const t = estimateTotals(l.estimate);
+        gold += t.metalAmount; stone += t.otherMaterials; mc += t.mcAmount; va += t.vaAmount;
+        grossWeight += Number(l.grossWeight) || 0;
+      } else {
+        gold += Number(l.netGoldWeight) * Number(l.goldRate) * q;
+        stone += Number(l.stoneValue) * q;
+        // On a plain line VA marks up the making charge (as createInvoice prices it): MC is the charge itself.
+        mc += Number(l.makingCharge) * q;
+        va += Number(l.makingCharge) * (Number(l.wastagePercent || 0) / 100) * q;
+        grossWeight += (Number(l.grossWeight) || 0) * q;
+      }
+    }
+    return { grossWeight, gold, stone, mc, va, subtotal, otherCharges, discount, taxable: taxableAmount, gst: gstRows, sameState, currency, roundOff, total };
+  })();
 
   // Rule 114B — the server refuses a sale above ₹2,00,000 for a client with no PAN / Form 60 / GSTIN; say so up front.
   const panOnFile = !!selectedClient && (!!selectedClient.panNumber || !!selectedClient.form60Received || GSTIN_WITH_PAN.test(selectedClient.gstNumber ?? ''));
   const panBlocked = currency === 'INR' && !!selectedClient && total > PAN_REQUIRED_ABOVE && !panOnFile;
 
-  const addPaymentSplit = (prefillAmount?: number) => {
+  const addPaymentSplit = (prefillAmount?: number, mode = 'CASH') => {
     setPaymentSplits((p) => [...p, {
       key: nextPayKey(),
       paymentDate: new Date().toISOString().split('T')[0],
       amount: prefillAmount ?? 0,
-      mode: 'CASH',
+      mode,
       referenceNo: '',
       notes: '',
+      og: { description: 'Old gold', karat: '', gross: '', stone: '', deduction: '' },
     }]);
   };
   const updatePaymentSplit = (key: string, field: keyof PaymentSplit, value: any) => {
     setPaymentSplits((p) => p.map((s) => (s.key === key ? { ...s, [field]: value } : s)));
   };
+  const updateOldGold = (key: string, field: keyof PaymentSplit['og'], value: string) => {
+    setPaymentSplits((p) => p.map((s) => (s.key === key ? { ...s, og: { ...s.og, [field]: value } } : s)));
+  };
   const removePaymentSplit = (key: string) => setPaymentSplits((p) => p.filter((s) => s.key !== key));
-  const paymentSplitsTotal = paymentSplits.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+
+  // Old gold: net weight x today's rate for the karat, less the deduction % — the same figure the server books
+  // (it re-values on its own; this is the live preview). 0 until karat, weight and a rate are all there.
+  const oldGoldValue = (s: PaymentSplit) => {
+    const gross = Number(s.og.gross) || 0;
+    const rate = latestRateByKarat[s.og.karat];
+    if (!(gross > 0) || !rate) return 0;
+    const net = Math.max(gross - (Number(s.og.stone) || 0), 0);
+    return Math.round(net * rate * (1 - (Number(s.og.deduction) || 0) / 100) * 100) / 100;
+  };
+  const splitAmount = (s: PaymentSplit) => (s.mode === 'OLD_GOLD' ? oldGoldValue(s) : Number(s.amount) || 0);
+  const paymentSplitsTotal = paymentSplits.reduce((s, p) => s + splitAmount(p), 0);
+
+  // Picking a mode. Store Credit pre-fills what the customer can spend, capped at what is still due on the bill.
+  const changePaymentMode = (split: PaymentSplit, mode: string) => {
+    const others = paymentSplits.filter((x) => x.key !== split.key).reduce((s, x) => s + splitAmount(x), 0);
+    setPaymentSplits((p) => p.map((s) => (s.key === split.key ? {
+      ...s, mode,
+      amount: mode === 'STORE_CREDIT' ? Math.round(Math.min(creditAvailable, Math.max(total - others, 0)) * 100) / 100 : s.amount,
+    } : s)));
+  };
+  // "Use credit" shortcut: one Store Credit split for as much as the customer has (not already used) and the bill
+  // needs, taken off the last money split so the bill is not collected twice.
+  const useStoreCredit = () => {
+    setCollectPayment(true);
+    const creditSplit = (x: PaymentSplit) => x.mode === 'STORE_CREDIT' || x.mode === 'OLD_GOLD';
+    const settledByCredit = paymentSplits.filter(creditSplit).reduce((s, x) => s + splitAmount(x), 0);
+    const alreadyStoreCredit = paymentSplits.filter((x) => x.mode === 'STORE_CREDIT').reduce((s, x) => s + (Number(x.amount) || 0), 0);
+    const use = Math.round(Math.max(Math.min(creditAvailable - alreadyStoreCredit, total - settledByCredit), 0) * 100) / 100;
+    if (use <= 0) return;
+    setPaymentSplits((prev) => {
+      let overshoot = Math.max(prev.reduce((s, x) => s + splitAmount(x), 0) + use - total, 0);
+      const trimmed = [...prev];
+      for (let i = trimmed.length - 1; i >= 0 && overshoot > 0.005; i--) {
+        if (creditSplit(trimmed[i])) continue;
+        const cut = Math.min(Number(trimmed[i].amount) || 0, overshoot);
+        trimmed[i] = { ...trimmed[i], amount: Math.round(((Number(trimmed[i].amount) || 0) - cut) * 100) / 100 };
+        overshoot -= cut;
+      }
+      return [...trimmed, {
+        key: nextPayKey(), paymentDate: new Date().toISOString().split('T')[0], amount: use, mode: 'STORE_CREDIT',
+        referenceNo: '', notes: '', og: { description: 'Old gold', karat: '', gross: '', stone: '', deduction: '' },
+      }];
+    });
+  };
+
+  // Store credit cannot be spent beyond what the account holds; old gold needs its metal details and a rate for the karat.
+  const storeCreditUsed = collectPayment ? paymentSplits.filter((x) => x.mode === 'STORE_CREDIT').reduce((s, x) => s + (Number(x.amount) || 0), 0) : 0;
+  const creditBlocked = storeCreditUsed > creditAvailable + 0.005;
+  const oldGoldSplits = collectPayment ? paymentSplits.filter((x) => x.mode === 'OLD_GOLD') : [];
+  const oldGoldIncomplete = oldGoldSplits.some((x) => !x.og.description.trim() || !x.og.karat || !((Number(x.og.gross) || 0) > 0)
+    || (Number(x.og.stone) || 0) > (Number(x.og.gross) || 0) || oldGoldValue(x) <= 0);
+  // More metal than the bill needs is allowed — the surplus stays as credit on the customer's account.
+  const oldGoldTotal = oldGoldSplits.reduce((s, x) => s + oldGoldValue(x), 0);
+  // What is still owed after what is being collected now (the whole bill when nothing is collected: it goes on the customer's account).
+  const collected = collectPayment ? paymentSplitsTotal : 0;
+  const pending = Math.max(total - collected, 0);
 
   // Sec 269ST — cash taken from one person in a day must stay under ₹2,00,000 (the server also adds up cash already
   // taken from this client earlier that day, which this screen cannot see).
@@ -404,20 +593,32 @@ export function NewSalePage() {
     mutationFn: (data: any) => apiPost('/sales/invoices', {
       ...data,
       invoiceDate: new Date(data.invoiceDate),
-      discountAmount: Number(data.discountAmount) || 0,
+      discountAmount: discount,
       otherCharges: Number(data.otherCharges) || 0,
+      // Left out on AUTO so the server rounds to the rupee itself; a keyed figure (0 = none) is sent as typed.
+      roundOff: roundMode === 'MANUAL' ? Number(roundManual) || 0 : undefined,
       salesPersonId: data.salesPersonId || undefined,
       terms: data.terms || undefined,
       estimateIds: lines.filter((l) => l.estimateId).map((l) => l.estimateId),
       payments: collectPayment && paymentSplits.length > 0
         ? paymentSplits
-            .filter((p) => Number(p.amount) > 0)
+            .filter((p) => p.mode === 'OLD_GOLD' || Number(p.amount) > 0)
             .map((p) => ({
               paymentDate: new Date(p.paymentDate),
-              amount: Number(p.amount),
+              // Old gold: the server values the metal itself — this is only the preview figure.
+              amount: splitAmount(p),
               mode: p.mode,
               referenceNo: p.referenceNo || undefined,
               notes: p.notes || undefined,
+              ...(p.mode === 'OLD_GOLD' && {
+                oldGold: {
+                  description: p.og.description.trim(),
+                  karat: p.og.karat,
+                  grossWeight: Number(p.og.gross),
+                  stoneWeight: Number(p.og.stone) || undefined,
+                  deductionPercent: Number(p.og.deduction) || undefined,
+                },
+              }),
             }))
         : undefined,
       items: lines.map((l) => (l.estimate ? estimateInvoiceLine(l) : {
@@ -442,11 +643,15 @@ export function NewSalePage() {
         stoneValue: Number(l.stoneValue) || 0,
         tagId: l.tagId,
         categoryId: l.categoryId || undefined,
+        hsnCode: l.hsnCode || undefined,
       })),
     }),
     onSuccess: (res: any) => {
       const inv = res?.data ?? res;
       qc.invalidateQueries({ queryKey: ['sales-invoices'] });
+      // Credit was spent (or old gold left some behind) and the customer's balance moved.
+      qc.invalidateQueries({ queryKey: ['client-credit'] });
+      qc.invalidateQueries({ queryKey: ['clients-list'] });
       setCreatedInvoice(inv);
       enqueueSnackbar(`Invoice ${inv?.invoiceNumber ?? ''} created`, { variant: 'success' });
     },
@@ -462,17 +667,48 @@ export function NewSalePage() {
     setLines([]);
     setCollectPayment(false);
     setPaymentSplits([]);
+    setDiscountMode('AMOUNT'); setDiscountPercent(''); setRoundMode('AUTO'); setRoundManual('');
     setActiveTab(0);
   };
+
+  // Loading an estimate lives on the first tab only: it supplies the customer, so it must not sit behind the
+  // 'pick a client' gate that locks the Items tab.
+  const renderEstimatePicker = () => (
+    <Autocomplete
+      options={estimateOptions.filter((e) => !lines.find((l) => l.estimateId === e.id))}
+      getOptionLabel={(e) => `${e.estimateNumber} — ${e.tag?.name ?? ''}${e.customerName ? ` — ${e.customerName}` : ''} — ₹${Number(e.totalSaleAmount).toLocaleString('en-IN')}`}
+      filterOptions={(x) => x}
+      inputValue={estimateSearch}
+      onInputChange={(_, v, reason) => { if (reason !== 'reset') setEstimateSearch(v); }}
+      onChange={(_, val) => { if (val) pickEstimate(val); }}
+      value={null}
+      renderOption={(props, e) => (
+        <li {...props} key={e.id}>
+          <Stack sx={{ width: '100%' }}>
+            <Stack direction="row" justifyContent="space-between">
+              <Typography sx={{ fontFamily: 'monospace', fontWeight: 700 }}>{e.estimateNumber}</Typography>
+              <Typography sx={{ fontFamily: 'monospace' }}>₹{Number(e.totalSaleAmount).toLocaleString('en-IN')} + GST</Typography>
+            </Stack>
+            <Typography variant="caption" color="text.secondary">
+              {e.tag?.tagNumber} · {e.tag?.name}{e.customerName ? ` · ${e.customerName}` : ''}{e.customerPhone ? ` (${e.customerPhone})` : ''}
+              {e.expired ? ' · quote expired' : ''}
+            </Typography>
+          </Stack>
+        </li>
+      )}
+      renderInput={(params) => (
+        <TextField {...params} size="small" label="Bill an estimate (search by estimate number, item name or customer name)" />
+      )}
+      noOptionsText={estimateSearch ? 'No estimate sent to billing matches' : 'No estimates waiting at billing'}
+    />
+  );
 
   const tab1Ready = !!selectedClientId && !!branchId;
   const tab2Ready = tab1Ready && lines.length > 0;
 
   return (
     <Box>
-      <PageHeader title="New Sale"
-        breadcrumbs={[{ label: 'Sales', path: '/sales/invoices' }, { label: 'Invoices', path: '/sales/invoices' }, { label: 'New Sale' }]}
-        actions={[{ label: 'Back to Invoices', icon: <ArrowBack />, onClick: () => navigate('/sales/invoices'), variant: 'outlined' as const }]} />
+      <PageHeader title="New Sale" />
 
       <Grid container spacing={3} alignItems="flex-start">
         <Grid item xs={12} md={activeTab === 1 ? 12 : 8}>
@@ -497,16 +733,37 @@ export function NewSalePage() {
               </Box>
             ) : (
               <form onSubmit={handleSubmit((d) => mutation.mutate(d))}>
-                <Tabs value={activeTab} onChange={(_, v) => setActiveTab(v)} sx={{ borderBottom: 1, borderColor: 'divider', px: 2 }}>
-                  <Tab label="1 · Sale Details" />
-                  <Tab label="2 · Items" disabled={!tab1Ready} />
-                  <Tab label="3 · Charges & Payment" disabled={!tab2Ready} />
-                </Tabs>
+                {/* The way back sits on the tab row — it used to cost a header line of its own. */}
+                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 2, borderBottom: 1, borderColor: 'divider', px: 2 }}>
+                  <Tabs value={activeTab} onChange={(_, v) => setActiveTab(v)}>
+                    <Tab label="1 · Sale Details" />
+                    <Tab label="2 · Items" disabled={!tab1Ready} />
+                    <Tab label="3 · Charges & Payment" disabled={!tab2Ready} />
+                  </Tabs>
+                  <Stack direction="row" spacing={1} alignItems="center" sx={{ flexShrink: 0 }}>
+                    <Tooltip title={tab2Ready ? 'Discount, charges & tax' : 'Add items first'}>
+                      <span>
+                        <IconButton color="primary" size="small" disabled={!tab2Ready} aria-label="Discount, charges and tax"
+                          onClick={() => setAdjustOpen(true)}
+                          sx={{ border: 1, borderColor: 'divider', borderRadius: 2, p: 0.75 }}>
+                          {/* a dot when anything has been changed off the plain bill */}
+                          <Badge variant="dot" color="secondary"
+                            invisible={!(discount > 0.005 || otherCharges > 0 || roundMode === 'MANUAL' || lines.some((l) => l.hsnCode))}>
+                            <Tune fontSize="small" />
+                          </Badge>
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                    <Button variant="outlined" size="small" startIcon={<ArrowBack />} sx={{ whiteSpace: 'nowrap' }}
+                      onClick={() => navigate('/sales/invoices')}>Back to Invoices</Button>
+                  </Stack>
+                </Box>
 
                 {/* ── Tab 1: Sale Details ── */}
                 {activeTab === 0 && (
                   <Box sx={{ p: 3 }}>
                     <Grid container spacing={2}>
+                      <Grid item xs={12}>{renderEstimatePicker()}</Grid>
                       <Grid item xs={12} sm={7}>
                         <Stack direction="row" spacing={1} alignItems="flex-start">
                           <Controller name="clientId" control={control} rules={{ required: true }}
@@ -616,55 +873,26 @@ export function NewSalePage() {
                         />
                       </Grid>
                       <Grid item xs={4} sx={{ display: 'flex', alignItems: 'center' }}>
-                        <Button startIcon={<Add />} onClick={addCustomLine}>Add custom line</Button>
+                        <Button variant="outlined" startIcon={<Add />} onClick={addCustomLine} sx={{ whiteSpace: 'nowrap' }}>Add custom line</Button>
                       </Grid>
 
-                      <Grid item xs={12}>
-                        <Autocomplete
-                          options={estimateOptions.filter((e) => !lines.find((l) => l.estimateId === e.id))}
-                          getOptionLabel={(e) => `${e.estimateNumber} — ${e.tag?.name ?? ''}${e.customerName ? ` — ${e.customerName}` : ''} — ₹${Number(e.totalSaleAmount).toLocaleString('en-IN')}`}
-                          filterOptions={(x) => x}
-                          inputValue={estimateSearch}
-                          onInputChange={(_, v, reason) => { if (reason !== 'reset') setEstimateSearch(v); }}
-                          onChange={(_, val) => { if (val) pickEstimate(val); }}
-                          value={null}
-                          renderOption={(props, e) => (
-                            <li {...props} key={e.id}>
-                              <Stack sx={{ width: '100%' }}>
-                                <Stack direction="row" justifyContent="space-between">
-                                  <Typography sx={{ fontFamily: 'monospace', fontWeight: 700 }}>{e.estimateNumber}</Typography>
-                                  <Typography sx={{ fontFamily: 'monospace' }}>₹{Number(e.totalSaleAmount).toLocaleString('en-IN')} + GST</Typography>
-                                </Stack>
-                                <Typography variant="caption" color="text.secondary">
-                                  {e.tag?.tagNumber} · {e.tag?.name}{e.customerName ? ` · ${e.customerName}` : ''}{e.customerPhone ? ` (${e.customerPhone})` : ''}
-                                  {e.expired ? ' · quote expired' : ''}
-                                </Typography>
-                              </Stack>
-                            </li>
-                          )}
-                          renderInput={(params) => (
-                            <TextField {...params} size="small" label="Bill an estimate (search by estimate number, item name or customer name)" />
-                          )}
-                          noOptionsText={estimateSearch ? 'No estimate sent to billing matches' : 'No estimates waiting at billing'}
-                        />
-                      </Grid>
 
                       {lines.length > 0 && (
                         <Grid item xs={12}>
                           <Box sx={{ overflowX: 'auto' }}>
-                            <Table size="small" sx={{ '& .MuiTableCell-root': { px: 1 } }}>
+                            <Table size="small" sx={{ tableLayout: 'fixed', minWidth: 940, '& .MuiTableCell-root': { px: 1, py: 1, verticalAlign: 'middle' }, '& .MuiTableCell-head': { whiteSpace: 'nowrap' } }}>
                               <TableHead>
                                 <TableRow>
-                                  <TableCell>Item</TableCell>
-                                  <TableCell sx={{ minWidth: 82 }}>Category</TableCell>
-                                  <TableCell align="right" sx={{ minWidth: 66 }}>Net Wt (g)</TableCell>
-                                  <TableCell align="right" sx={{ minWidth: 74 }}>Gold Rate (₹/g)</TableCell>
-                                  <TableCell align="right" sx={{ minWidth: 66 }}>Making (₹)</TableCell>
-                                  <TableCell align="right" sx={{ minWidth: 48 }}>VA %</TableCell>
-                                  <TableCell align="right" sx={{ minWidth: 66 }}>Stones (₹)</TableCell>
-                                  <TableCell align="right" sx={{ minWidth: 44 }}>Qty</TableCell>
-                                  <TableCell align="right">Line Total</TableCell>
-                                  <TableCell />
+                                  <TableCell sx={{ width: '22%' }}>Item</TableCell>
+                                  <TableCell sx={{ width: '11%' }}>Category</TableCell>
+                                  <TableCell align="right" sx={{ width: '9%' }}>Net Wt (g)</TableCell>
+                                  <TableCell align="right" sx={{ width: '11%' }}>Gold Rate (₹/g)</TableCell>
+                                  <TableCell align="right" sx={{ width: '10%' }}>Making (₹)</TableCell>
+                                  <TableCell align="right" sx={{ width: '7%' }}>VA %</TableCell>
+                                  <TableCell align="right" sx={{ width: '10%' }}>Stones (₹)</TableCell>
+                                  <TableCell align="right" sx={{ width: '6%' }}>Qty</TableCell>
+                                  <TableCell align="right" sx={{ width: '12%' }}>Line Total</TableCell>
+                                  <TableCell sx={{ width: 48 }} />
                                 </TableRow>
                               </TableHead>
                               <TableBody>
@@ -672,17 +900,19 @@ export function NewSalePage() {
                                   <TableRow key={l.key}>
                                     <TableCell>
                                       {l.tagId ? (
-                                        <>
-                                          <Typography sx={{ fontFamily: 'monospace', fontSize: 11, color: '#44C47A', fontWeight: 700 }}>
-                                            {l.tagNumber}
-                                          </Typography>
-                                          <Typography variant="caption" color="text.secondary">{l.description}</Typography>
-                                          {l.estimateNumber && (
-                                            <Chip size="small" color="info" variant="outlined" label={l.estimateNumber} sx={{ ml: 0.5, height: 18, fontSize: 10, fontFamily: 'monospace' }} />
-                                          )}
-                                        </>
+                                        <Box>
+                                          <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
+                                            <Typography sx={{ fontFamily: 'monospace', fontSize: 12, color: '#44C47A', fontWeight: 700 }}>
+                                              {l.tagNumber}
+                                            </Typography>
+                                            {l.estimateNumber && (
+                                              <Chip size="small" color="info" variant="outlined" label={l.estimateNumber} sx={{ height: 18, fontSize: 10, fontFamily: 'monospace' }} />
+                                            )}
+                                          </Stack>
+                                          <Typography variant="body2" color="text.secondary" noWrap title={l.description}>{l.description}</Typography>
+                                        </Box>
                                       ) : (
-                                        <TextField size="small" placeholder="Description" value={l.description}
+                                        <TextField size="small" fullWidth placeholder="Description" value={l.description}
                                           onChange={(e) => updateLine(l.key, 'description', e.target.value)} />
                                       )}
                                     </TableCell>
@@ -690,7 +920,7 @@ export function NewSalePage() {
                                       {l.tagId ? (
                                         <Typography variant="body2">{l.categoryName ?? '—'}</Typography>
                                       ) : (
-                                        <TextField size="small" select value={l.categoryId ?? ''} sx={{ minWidth: 76 }}
+                                        <TextField size="small" select fullWidth value={l.categoryId ?? ''}
                                           onChange={(e) => {
                                             const cat = categoryList.find((c: any) => c.id === e.target.value);
                                             updateLine(l.key, 'categoryId', e.target.value);
@@ -704,50 +934,54 @@ export function NewSalePage() {
                                       )}
                                     </TableCell>
                                     <TableCell align="right">
-                                      {l.tagId ? Number(l.netGoldWeight).toFixed(3) : (
-                                        <TextField size="small" type="number" value={l.netGoldWeight}
+                                      {l.tagId ? <Typography component="span" variant="body2" sx={{ fontFamily: 'monospace' }}>{Number(l.netGoldWeight).toFixed(3)}</Typography> : (
+                                        <TextField size="small" fullWidth type="number" value={l.netGoldWeight}
                                           inputProps={{ step: 0.001, min: 0, style: { textAlign: 'right', width: 50 } }}
                                           onChange={(e) => updateLine(l.key, 'netGoldWeight', Number(e.target.value))} />
                                       )}
                                     </TableCell>
                                     {l.estimate ? (
-                                      <TableCell colSpan={4} align="right">
-                                        <Stack direction="row" spacing={1} justifyContent="flex-end" alignItems="center">
-                                          <Typography variant="caption" color="text.secondary">
-                                            {l.estimate.rows.length} row{l.estimate.rows.length === 1 ? '' : 's'} · MC {l.estimate.mcRate}/g · VA {l.estimate.vaPercent}%
-                                            {Math.abs(lineTotal(l) - (l.quotedTotal ?? 0)) > 0.005 ? ` · quoted ₹${Number(l.quotedTotal).toLocaleString('en-IN')}` : ''}
-                                          </Typography>
-                                          <Button size="small" variant="outlined" onClick={() => setEditingKey(l.key)}>Edit rates / rows</Button>
+                                      <TableCell colSpan={4}>
+                                        <Stack direction="row" spacing={1.5} justifyContent="space-between" alignItems="center"
+                                          sx={{ bgcolor: 'action.hover', borderRadius: 1.5, px: 1.5, py: 0.75 }}>
+                                          <Box sx={{ minWidth: 0 }}>
+                                            <Typography variant="caption" fontWeight={700} display="block">Priced from estimate</Typography>
+                                            <Typography variant="caption" color="text.secondary" display="block">
+                                              {l.estimate.rows.length} row{l.estimate.rows.length === 1 ? '' : 's'} · MC ₹{l.estimate.mcRate}/g · VA {l.estimate.vaPercent}%
+                                              {Math.abs(lineTotal(l) - (l.quotedTotal ?? 0)) > 0.005 ? ` · quoted ₹${Number(l.quotedTotal).toLocaleString('en-IN')}` : ''}
+                                            </Typography>
+                                          </Box>
+                                          <Button size="small" variant="outlined" sx={{ whiteSpace: 'nowrap', flexShrink: 0 }} onClick={() => setEditingKey(l.key)}>Edit rates / rows</Button>
                                         </Stack>
                                       </TableCell>
                                     ) : (<>
                                     <TableCell align="right">
-                                      <TextField size="small" type="number" value={l.goldRate}
-                                        inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right', width: 58 } }}
+                                      <TextField size="small" fullWidth type="number" value={l.goldRate}
+                                        inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right' } }}
                                         onChange={(e) => updateLine(l.key, 'goldRate', Number(e.target.value))} />
                                     </TableCell>
                                     <TableCell align="right">
-                                      <TextField size="small" type="number" value={l.makingCharge}
-                                        inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right', width: 52 } }}
+                                      <TextField size="small" fullWidth type="number" value={l.makingCharge}
+                                        inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right' } }}
                                         onChange={(e) => updateLine(l.key, 'makingCharge', Number(e.target.value))} />
                                     </TableCell>
                                     <TableCell align="right">
-                                      <TextField size="small" type="number" value={l.wastagePercent}
-                                        inputProps={{ step: 0.1, min: 0, style: { textAlign: 'right', width: 36 } }}
+                                      <TextField size="small" fullWidth type="number" value={l.wastagePercent}
+                                        inputProps={{ step: 0.1, min: 0, style: { textAlign: 'right' } }}
                                         onChange={(e) => updateLine(l.key, 'wastagePercent', Number(e.target.value))} />
                                     </TableCell>
                                     <TableCell align="right">
-                                      <TextField size="small" type="number" value={l.stoneValue}
-                                        inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right', width: 50 } }}
+                                      <TextField size="small" fullWidth type="number" value={l.stoneValue}
+                                        inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right' } }}
                                         onChange={(e) => updateLine(l.key, 'stoneValue', Number(e.target.value))} />
                                     </TableCell>
                                     </>)}
                                     <TableCell align="right">
-                                      <TextField size="small" type="number" value={l.quantity} disabled={!!l.estimate}
-                                        inputProps={{ step: 1, min: 1, style: { textAlign: 'right', width: 30 } }}
+                                      <TextField size="small" fullWidth type="number" value={l.quantity} disabled={!!l.estimate}
+                                        inputProps={{ step: 1, min: 1, style: { textAlign: 'right' } }}
                                         onChange={(e) => updateLine(l.key, 'quantity', Number(e.target.value))} />
                                     </TableCell>
-                                    <TableCell align="right" sx={{ fontFamily: 'monospace', fontWeight: 700 }}>
+                                    <TableCell align="right" sx={{ fontFamily: 'monospace', fontWeight: 700, whiteSpace: 'nowrap' }}>
                                       {fmt(lineTotal(l))}
                                     </TableCell>
                                     <TableCell>
@@ -762,11 +996,11 @@ export function NewSalePage() {
                           </Box>
 
                           {categoryRows.length > 0 && (
-                            <Box sx={{ mt: 2 }}>
-                              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
-                                By Category
+                            <Box sx={{ mt: 2.5, ml: 'auto', maxWidth: 460 }}>
+                              <Typography variant="overline" color="text.secondary" sx={{ display: 'block', lineHeight: 1.8 }}>
+                                By category
                               </Typography>
-                              <Table size="small" sx={{ width: 'auto' }}>
+                              <Table size="small" sx={{ border: 1, borderColor: 'divider', borderRadius: 1, '& .MuiTableCell-root': { px: 1.5 } }}>
                                 <TableHead>
                                   <TableRow>
                                     <TableCell>Category</TableCell>
@@ -794,14 +1028,16 @@ export function NewSalePage() {
 
                     <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mt: 3 }}>
                       <Button variant="text" onClick={() => setActiveTab(0)}>← Back</Button>
-                      {lines.length > 0 && (
-                        <Typography sx={{ fontFamily: 'monospace' }}>
-                          {lines.length} line{lines.length === 1 ? '' : 's'} · Subtotal <b>{fmt(subtotal)}</b>
-                        </Typography>
-                      )}
-                      <Button variant="contained" size="large" disabled={!tab2Ready} onClick={() => setActiveTab(2)}>
-                        Next: Charges & Payment →
-                      </Button>
+                      <Stack direction="row" spacing={3} alignItems="center">
+                        {lines.length > 0 && (
+                          <Typography sx={{ fontFamily: 'monospace' }}>
+                            {lines.length} line{lines.length === 1 ? '' : 's'} · Subtotal <b>{fmt(subtotal)}</b>
+                          </Typography>
+                        )}
+                        <Button variant="contained" size="large" disabled={!tab2Ready} onClick={() => setActiveTab(2)}>
+                          Next: Charges & Payment →
+                        </Button>
+                      </Stack>
                     </Stack>
                   </Box>
                 )}
@@ -809,51 +1045,17 @@ export function NewSalePage() {
                 {/* ── Tab 3: Charges & Payment ── */}
                 {activeTab === 2 && (
                   <Box sx={{ p: 3 }}>
-                    <Grid container spacing={2}>
-                      <Grid item xs={6} sm={3}>
-                        <Controller name="discountAmount" control={control}
-                          render={({ field }) => (
-                            <TextField {...field} fullWidth label="Discount" type="number" inputProps={{ step: 0.01, min: 0 }} />
-                          )} />
-                      </Grid>
-                      <Grid item xs={6} sm={4}>
-                        <Controller name="otherCharges" control={control}
-                          render={({ field }) => (
-                            <TextField {...field} fullWidth label="Shipping / Other Charges" type="number" inputProps={{ step: 0.01, min: 0 }} />
-                          )} />
-                      </Grid>
-                    </Grid>
-
-                    <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 2 }}>
-                      <Stack spacing={0.5} sx={{ minWidth: 280 }}>
-                        <Stack direction="row" justifyContent="space-between">
-                          <Typography variant="body2" color="text.secondary">Subtotal</Typography>
-                          <Typography sx={{ fontFamily: 'monospace' }}>{fmt(subtotal)}</Typography>
-                        </Stack>
-                        <Stack direction="row" justifyContent="space-between">
-                          <Typography variant="body2" color="text.secondary">Shipping / Other Charges</Typography>
-                          <Typography sx={{ fontFamily: 'monospace' }}>+{fmt(otherCharges)}</Typography>
-                        </Stack>
-                        <Stack direction="row" justifyContent="space-between">
-                          <Typography variant="body2" color="text.secondary">Discount</Typography>
-                          <Typography sx={{ fontFamily: 'monospace' }}>-{fmt(discountAmount)}</Typography>
-                        </Stack>
-                        <Stack direction="row" justifyContent="space-between">
-                          <Typography variant="body2" color="text.secondary">GST ({(taxRate * 100).toFixed(0)}%)</Typography>
-                          <Typography sx={{ fontFamily: 'monospace' }}>{fmt(taxAmount)}</Typography>
-                        </Stack>
-                        <Divider />
-                        <Stack direction="row" justifyContent="space-between">
-                          <Typography fontWeight={700}>Total</Typography>
-                          <Typography fontWeight={700} sx={{ fontFamily: 'monospace' }}>{fmt(total)}</Typography>
-                        </Stack>
-                      </Stack>
-                    </Box>
-
                     {panBlocked && (
-                      <Alert severity="warning" sx={{ mt: 2 }}
+                      <Alert severity="warning" sx={{ mb: 2 }}
                         action={<Button color="inherit" size="small" onClick={() => setKycOpen(true)}>Add PAN / Form 60</Button>}>
                         This sale is {fmt(total)}, above ₹2,00,000. {selectedClient?.name} needs a PAN (or a Form 60 on file) before the invoice can be created.
+                      </Alert>
+                    )}
+
+                    {creditAvailable > 0 && (
+                      <Alert severity="info" sx={{ mb: 1 }}
+                        action={<Button color="inherit" size="small" onClick={useStoreCredit}>Use credit</Button>}>
+                        {selectedClient?.name} has <b>{fmt(creditAvailable)}</b> credit on account (from a sales return or old gold exchange). Pay with it using the Store Credit mode.
                       </Alert>
                     )}
 
@@ -881,26 +1083,34 @@ export function NewSalePage() {
                               </TableHead>
                               <TableBody>
                                 {paymentSplits.map((p) => (
-                                  <TableRow key={p.key}>
+                                  <Fragment key={p.key}>
+                                  <TableRow>
                                     <TableCell>
                                       <TextField size="small" type="date" value={p.paymentDate}
                                         InputLabelProps={{ shrink: true }} sx={{ width: 145 }}
                                         onChange={(e) => updatePaymentSplit(p.key, 'paymentDate', e.target.value)} />
                                     </TableCell>
                                     <TableCell align="right">
-                                      <TextField size="small" type="number" value={p.amount}
-                                        inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right', width: 100 } }}
-                                        onChange={(e) => updatePaymentSplit(p.key, 'amount', Number(e.target.value))} />
+                                      {p.mode === 'OLD_GOLD' ? (
+                                        // Not typed: valued from the metal below.
+                                        <Typography sx={{ fontFamily: 'monospace', fontWeight: 700 }}>{fmt(oldGoldValue(p))}</Typography>
+                                      ) : (
+                                        <TextField size="small" type="number" value={p.amount}
+                                          inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right', width: 100 } }}
+                                          error={p.mode === 'STORE_CREDIT' && creditBlocked}
+                                          onChange={(e) => updatePaymentSplit(p.key, 'amount', Number(e.target.value))} />
+                                      )}
                                     </TableCell>
                                     <TableCell>
-                                      <TextField size="small" select value={p.mode} sx={{ width: 130 }}
-                                        onChange={(e) => updatePaymentSplit(p.key, 'mode', e.target.value)}>
-                                        <MenuItem value="CASH">Cash</MenuItem>
-                                        <MenuItem value="CARD">Card</MenuItem>
-                                        <MenuItem value="UPI">UPI</MenuItem>
-                                        <MenuItem value="BANK_TRANSFER">Bank Transfer</MenuItem>
-                                        <MenuItem value="CHEQUE">Cheque</MenuItem>
-                                      </TextField>
+                                      {/* Native select: arrow keys / type-ahead change it without opening it (CLAUDE.md §10). */}
+                                      <SelectField size="small" fullWidth={false} value={p.mode} sx={{ width: 170 }}
+                                        onChange={(e) => changePaymentMode(p, e.target.value)}>
+                                        {PAYMENT_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                                        <option value="OLD_GOLD">Old Gold (metal)</option>
+                                        <option value="STORE_CREDIT" disabled={creditAvailable <= 0 && p.mode !== 'STORE_CREDIT'}>
+                                          {creditAvailable > 0 ? `Store Credit (${fmt(creditAvailable)})` : 'Store Credit (none)'}
+                                        </option>
+                                      </SelectField>
                                     </TableCell>
                                     <TableCell>
                                       <TextField size="small" value={p.referenceNo} sx={{ width: 130 }}
@@ -916,6 +1126,37 @@ export function NewSalePage() {
                                       </IconButton>
                                     </TableCell>
                                   </TableRow>
+                                  {p.mode === 'OLD_GOLD' && (
+                                    <TableRow sx={{ '& td': { bgcolor: 'action.hover' } }}>
+                                      <TableCell colSpan={6}>
+                                        <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" useFlexGap>
+                                          <TextField size="small" label="Old item" value={p.og.description} sx={{ width: 170 }}
+                                            InputLabelProps={{ shrink: true }}
+                                            onChange={(e) => updateOldGold(p.key, 'description', e.target.value)} />
+                                          <SelectField size="small" fullWidth={false} label="Karat" value={p.og.karat} sx={{ width: 110 }}
+                                            emptyLabel="—" onChange={(e) => updateOldGold(p.key, 'karat', e.target.value)}>
+                                            {karatList.map((k: any) => <option key={k.code} value={k.code}>{k.code}</option>)}
+                                          </SelectField>
+                                          <TextField size="small" type="number" label="Gross wt (g)" value={p.og.gross} sx={{ width: 120 }}
+                                            InputLabelProps={{ shrink: true }} inputProps={{ step: 0.001, min: 0 }}
+                                            onChange={(e) => updateOldGold(p.key, 'gross', e.target.value)} />
+                                          <TextField size="small" type="number" label="Stone wt (g)" value={p.og.stone} sx={{ width: 120 }}
+                                            InputLabelProps={{ shrink: true }} inputProps={{ step: 0.001, min: 0 }}
+                                            onChange={(e) => updateOldGold(p.key, 'stone', e.target.value)} />
+                                          <TextField size="small" type="number" label="Deduction %" value={p.og.deduction} sx={{ width: 110 }}
+                                            InputLabelProps={{ shrink: true }} inputProps={{ step: 0.1, min: 0, max: 100 }}
+                                            onChange={(e) => updateOldGold(p.key, 'deduction', e.target.value)} />
+                                          <Typography variant="body2" color="text.secondary" sx={{ fontFamily: 'monospace' }}>
+                                            Net {Math.max((Number(p.og.gross) || 0) - (Number(p.og.stone) || 0), 0).toFixed(3)} g
+                                            {p.og.karat && (latestRateByKarat[p.og.karat]
+                                              ? ` × ${fmt(latestRateByKarat[p.og.karat])}/g today`
+                                              : ' — no rate for this karat today')}
+                                          </Typography>
+                                        </Stack>
+                                      </TableCell>
+                                    </TableRow>
+                                  )}
+                                  </Fragment>
                                 ))}
                               </TableBody>
                             </Table>
@@ -925,14 +1166,32 @@ export function NewSalePage() {
                               Cash of ₹2,00,000 or more from one customer in a day is not allowed (Sec 269ST). Take the rest by UPI, card, cheque or bank transfer.
                             </Alert>
                           )}
+                          {creditBlocked && (
+                            <Alert severity="error" sx={{ mt: 1 }}>
+                              {selectedClient?.name} has {fmt(creditAvailable)} of store credit, but {fmt(storeCreditUsed)} is entered.
+                            </Alert>
+                          )}
+                          {oldGoldIncomplete && (
+                            <Alert severity="warning" sx={{ mt: 1 }}>
+                              Old gold needs a description, a karat with today's rate, and a weight (stone weight cannot exceed gross) to be valued.
+                            </Alert>
+                          )}
                           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mt: 1 }}>
                             <Button size="small" startIcon={<Add />} onClick={() => addPaymentSplit()}>
                               Add split (e.g. part cash, part UPI)
                             </Button>
                             <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
                               Collecting <b>{fmt(paymentSplitsTotal)}</b> of {fmt(total)}
-                              {paymentSplitsTotal > total && (
+                              {paymentSplitsTotal > total + 0.005 && paymentSplitsTotal - total <= oldGoldTotal + 0.005 ? (
+                                <Typography component="span" color="info.main" sx={{ ml: 1.5 }}>
+                                  {fmt(paymentSplitsTotal - total)} of old gold stays as credit on the account
+                                </Typography>
+                              ) : paymentSplitsTotal > total + 0.005 ? (
                                 <Typography component="span" color="error.main" sx={{ ml: 1 }}>(exceeds total)</Typography>
+                              ) : pending > 0.005 ? (
+                                <Typography component="span" color="warning.main" sx={{ ml: 1.5 }}>Pending <b>{fmt(pending)}</b></Typography>
+                              ) : (
+                                <Typography component="span" color="success.main" sx={{ ml: 1.5 }}>Fully collected</Typography>
                               )}
                             </Typography>
                           </Stack>
@@ -942,7 +1201,7 @@ export function NewSalePage() {
 
                     <Stack direction="row" justifyContent="space-between" sx={{ mt: 3 }}>
                       <Button variant="text" onClick={() => setActiveTab(1)}>← Back</Button>
-                      <Button type="submit" variant="contained" size="large" disabled={mutation.isPending || panBlocked || cashBlocked}>
+                      <Button type="submit" variant="contained" size="large" disabled={mutation.isPending || panBlocked || cashBlocked || roundBad || creditBlocked || oldGoldIncomplete}>
                         {mutation.isPending ? 'Creating…' : 'Create Invoice'}
                       </Button>
                     </Stack>
@@ -957,6 +1216,29 @@ export function NewSalePage() {
              row width instead of needing to scroll sideways within a narrower column. ── */}
         {activeTab !== 1 && (
           <Grid item xs={12} md={4}>
+            {activeTab === 2 ? (
+              <>
+                <SaleSummary f={figures} />
+                {/* Under the Net Amount: what is being taken now, and what is still owed. */}
+                <Card sx={{ mt: 1.5, px: 2, py: 1.25 }}>
+                  <Stack spacing={0.5}>
+                    <Stack direction="row" justifyContent="space-between">
+                      <Typography variant="body2" color="text.secondary">Collecting now</Typography>
+                      <Typography variant="body2" sx={{ fontFamily: 'monospace', color: 'success.main' }}>{fmt(collected)}</Typography>
+                    </Stack>
+                    <Stack direction="row" justifyContent="space-between">
+                      <Typography variant="body2" fontWeight={700}>Pending</Typography>
+                      <Typography variant="body2" fontWeight={700} sx={{ fontFamily: 'monospace', color: pending > 0.005 ? 'warning.main' : 'success.main' }}>
+                        {fmt(pending)}
+                      </Typography>
+                    </Stack>
+                  </Stack>
+                </Card>
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1, ml: 0.5 }}>
+                  {selectedClient?.name ?? '— no customer —'} · {lines.length} line{lines.length === 1 ? '' : 's'}
+                </Typography>
+              </>
+            ) : (<>
             <Typography variant="caption" color="text.secondary"
               sx={{ display: 'block', mb: 1, ml: 0.5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1 }}>
               Summary
@@ -981,18 +1263,168 @@ export function NewSalePage() {
                   <Typography fontWeight={700} sx={{ fontFamily: 'monospace' }}>{fmt(total)}</Typography>
                 </Stack>
                 {collectPayment && (
-                  <Stack direction="row" justifyContent="space-between">
-                    <Typography variant="body2" color="text.secondary">Collecting now</Typography>
-                    <Typography sx={{ fontFamily: 'monospace', color: 'success.main' }}>
-                      {fmt(paymentSplitsTotal)}
-                    </Typography>
-                  </Stack>
+                  <>
+                    <Stack direction="row" justifyContent="space-between">
+                      <Typography variant="body2" color="text.secondary">Collecting now</Typography>
+                      <Typography sx={{ fontFamily: 'monospace', color: 'success.main' }}>
+                        {fmt(paymentSplitsTotal)}
+                      </Typography>
+                    </Stack>
+                    <Stack direction="row" justifyContent="space-between">
+                      <Typography variant="body2" color="text.secondary">Pending</Typography>
+                      <Typography sx={{ fontFamily: 'monospace', color: pending > 0.005 ? 'warning.main' : 'success.main' }}>{fmt(pending)}</Typography>
+                    </Stack>
+                  </>
                 )}
               </Stack>
             </Card>
+            </>)}
           </Grid>
         )}
       </Grid>
+
+      {/* Discount, shipping, GST and round-off — everything that moves the bill off the gross, all editable. The Summary
+          on the payment tab updates live behind it. */}
+      <Dialog open={adjustOpen} onClose={() => setAdjustOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle fontWeight={700}>Discount, charges &amp; tax</DialogTitle>
+        <DialogContent>
+                <Table size="small" sx={{ '& .MuiTableCell-root': { px: 1.5, py: 1, verticalAlign: 'middle' } }}>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell sx={{ width: '22%' }}>Prompt</TableCell>
+                      <TableCell>Value</TableCell>
+                      <TableCell align="right" sx={{ width: '24%' }}>Amount</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    <TableRow>
+                      <TableCell>Discount</TableCell>
+                      <TableCell>
+                        <Stack direction="row" spacing={1} alignItems="center">
+                          <ToggleButtonGroup exclusive size="small" value={discountMode}
+                            onChange={(_, v) => { if (v) setDiscountMode(v); }} aria-label="Discount type">
+                            <ToggleButton value="AMOUNT" sx={{ px: 1.5 }}>₹</ToggleButton>
+                            <ToggleButton value="PERCENT" sx={{ px: 1.5 }}>%</ToggleButton>
+                          </ToggleButtonGroup>
+                          {discountMode === 'AMOUNT' ? (
+                            <Controller name="discountAmount" control={control}
+                              render={({ field }) => (
+                                <TextField {...field} size="small" type="number" sx={{ width: 150 }}
+                                  inputProps={{ step: 0.01, min: 0, 'aria-label': 'Discount amount' }} />
+                              )} />
+                          ) : (
+                            <TextField size="small" type="number" sx={{ width: 150 }} value={discountPercent}
+                              onChange={(e) => setDiscountPercent(e.target.value === '' ? '' : Number(e.target.value))}
+                              inputProps={{ step: 0.01, min: 0, max: 100, 'aria-label': 'Discount percent' }} />
+                          )}
+                        </Stack>
+                      </TableCell>
+                      <TableCell align="right" sx={{ fontFamily: 'monospace' }}>− {fmt(discount)}</TableCell>
+                    </TableRow>
+                    <TableRow>
+                      <TableCell>Shipping / Other</TableCell>
+                      <TableCell>
+                        <Controller name="otherCharges" control={control}
+                          render={({ field }) => (
+                            <TextField {...field} size="small" type="number" sx={{ width: 150 }}
+                              inputProps={{ step: 0.01, min: 0, 'aria-label': 'Shipping or other charges' }} />
+                          )} />
+                      </TableCell>
+                      <TableCell align="right" sx={{ fontFamily: 'monospace' }}>+ {fmt(otherCharges)}</TableCell>
+                    </TableRow>
+                    <TableRow>
+                      <TableCell>GST</TableCell>
+                      <TableCell>
+                        <Stack direction="row" spacing={1.5} alignItems="center">
+                          <Typography variant="body2" color="text.secondary">
+                            {currency !== 'INR' ? 'Not charged on a non-INR bill'
+                              : gstRows.length === 0 ? '—'
+                              : gstRows.map((g) => `${Number((g.rate * 100).toFixed(3))}%`).join(' · ')}
+                            {currency === 'INR' && gstRows.length > 0 && (sameState ? ' · CGST + SGST' : ' · IGST')}
+                          </Typography>
+                          <Button size="small" variant="outlined" disabled={currency !== 'INR' || lines.length === 0}
+                            onClick={() => setGstOpen(true)}>Edit GST (HSN)</Button>
+                        </Stack>
+                      </TableCell>
+                      <TableCell align="right" sx={{ fontFamily: 'monospace' }}>+ {fmt(taxAmount)}</TableCell>
+                    </TableRow>
+                    <TableRow>
+                      <TableCell>Round off</TableCell>
+                      <TableCell>
+                        <Stack direction="row" spacing={1.5} alignItems="center">
+                          <FormControlLabel sx={{ mr: 0 }}
+                            control={<Switch size="small" checked={roundMode === 'AUTO'}
+                              onChange={(e) => {
+                                if (e.target.checked) { setRoundMode('AUTO'); return; }
+                                setRoundManual(Math.round(roundOff * 100) / 100); // start the manual figure from what auto gave
+                                setRoundMode('MANUAL');
+                              }} />}
+                            label={<Typography variant="body2">Auto (nearest ₹1)</Typography>} />
+                          {roundMode === 'MANUAL' && (
+                            <TextField size="small" type="number" sx={{ width: 130 }} value={roundManual}
+                              onChange={(e) => setRoundManual(e.target.value === '' ? '' : Number(e.target.value))}
+                              error={roundBad} helperText={roundBad ? `Within ±₹${MAX_ROUND_OFF} — use Discount for more` : undefined}
+                              inputProps={{ step: 0.01, 'aria-label': 'Round off amount' }} />
+                          )}
+                        </Stack>
+                      </TableCell>
+                      <TableCell align="right" sx={{ fontFamily: 'monospace' }}>
+                        {Math.abs(roundOff) < 0.005 ? '0.00' : `${roundOff > 0 ? '+' : '−'} ${fmt(Math.abs(roundOff))}`}
+                      </TableCell>
+                    </TableRow>
+                    <TableRow>
+                      <TableCell colSpan={2} sx={{ fontWeight: 700 }}>Net Amount</TableCell>
+                      <TableCell align="right" sx={{ fontFamily: 'monospace', fontWeight: 700, fontSize: 16 }}>{fmt(total)}</TableCell>
+                    </TableRow>
+                  </TableBody>
+                </Table>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button variant="contained" onClick={() => setAdjustOpen(false)}>Done</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* GST is per line, by HSN: rates come from the HSN master, never typed — pick the HSN a line is billed under. */}
+      <Dialog open={gstOpen} onClose={() => setGstOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle fontWeight={700}>Edit GST — HSN per line</DialogTitle>
+        <DialogContent>
+          <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 2, mt: 0.5 }}>
+            <Typography variant="body2" color="text.secondary" sx={{ whiteSpace: 'nowrap' }}>Set all lines to</Typography>
+            <SelectField size="small" emptyLabel="—" value="" inputProps={{ 'aria-label': 'Set all lines to HSN' }}
+              onChange={(e) => { const v = e.target.value; if (v) setLines((p) => p.map((l) => ({ ...l, hsnCode: v }))); }}
+              options={hsnList.map((h) => ({ value: h.code, label: `${h.code} — ${Number((h.gstRate * 100).toFixed(3))}%${h.description ? ` · ${h.description}` : ''}` }))} />
+          </Stack>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Item</TableCell>
+                <TableCell sx={{ width: '48%' }}>HSN / GST rate</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {lines.map((l) => (
+                <TableRow key={l.key}>
+                  <TableCell>
+                    <Typography variant="body2" fontWeight={600}>{l.tagNumber ?? (l.description || 'Custom line')}</Typography>
+                    <Typography variant="caption" color="text.secondary">{fmt(lineTotal(l))}</Typography>
+                  </TableCell>
+                  <TableCell>
+                    <SelectField size="small" value={l.hsnCode ?? defaultHsn} inputProps={{ 'aria-label': `HSN for ${l.tagNumber ?? l.description}` }}
+                      onChange={(e) => updateLine(l.key, 'hsnCode', e.target.value)}
+                      options={hsnList.map((h) => ({ value: h.code, label: `${h.code} — ${Number((h.gstRate * 100).toFixed(3))}%` }))} />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
+            Rates come from the HSN master, so a line can only be billed at a rate that is on it. Shipping / other charges are taxed at {Number((rateOfHsn() * 100).toFixed(3))}% ({defaultHsn}).
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button variant="contained" onClick={() => setGstOpen(false)}>Done</Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Converting an estimate asks who made the sale. */}
       <Dialog open={!!pendingEstimate} onClose={() => setPendingEstimate(null)} maxWidth="xs" fullWidth>
@@ -1004,6 +1436,25 @@ export function NewSalePage() {
           </Typography>
         </DialogTitle>
         <DialogContent sx={{ pt: 2 }}>
+          {pendingEstimate?.customerName && (
+            <Box sx={{ mb: 2, p: 1.5, bgcolor: 'action.hover', borderRadius: 1 }}>
+              <Typography variant="caption" color="text.secondary">Customer (taken by the estimator)</Typography>
+              <Typography variant="body2" fontWeight={700}>
+                {pendingEstimate.customerName}{pendingEstimate.customerPhone ? ` · ${pendingEstimate.customerPhone}` : ''}
+              </Typography>
+              {(pendingEstimate.customerDob || pendingEstimate.customerPan) && (
+                <Typography variant="caption" display="block">
+                  {pendingEstimate.customerDob ? `DOB ${new Date(pendingEstimate.customerDob).toLocaleDateString('en-IN', { timeZone: 'UTC' })}` : ''}
+                  {pendingEstimate.customerDob && pendingEstimate.customerPan ? ' · ' : ''}
+                  {pendingEstimate.customerPan ? `PAN ${pendingEstimate.customerPan}` : ''}
+                </Typography>
+              )}
+              {pendingEstimate.customerAddress && <Typography variant="caption" display="block">{pendingEstimate.customerAddress}</Typography>}
+              <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+                {watch('clientId') ? 'A customer is already chosen on this bill — it will be kept.' : 'Becomes the bill’s customer (matched by mobile number, or added).'}
+              </Typography>
+            </Box>
+          )}
           <SelectField label="Sales person *" autoFocus value={pendingStaffId} emptyLabel="Select…"
             onChange={(e) => setPendingStaffId(e.target.value)}
             options={staffList.map((x: any) => ({ value: x.id, label: `${x.name}${x.employeeId ? ` (${x.employeeId})` : ''}` }))} />

@@ -22,6 +22,7 @@ export function printInvoice(invoice: any) {
   const otherCharges = Number(invoice.otherCharges ?? 0);
   const taxAmount = Number(invoice.taxAmount ?? 0);
   const total = Number(invoice.totalAmount);
+  const roundOff = Number(invoice.roundOff ?? 0);
   const cgst = Number(tax?.cgst ?? 0);
   const sgst = Number(tax?.sgst ?? 0);
   const igst = Number(tax?.igst ?? 0);
@@ -233,7 +234,9 @@ export function printInvoice(invoice: any) {
       ${invoice.client?.address ? `<div class="line">${invoice.client.address}</div>` : ''}
       ${invoice.client?.city || invoice.client?.state ? `<div class="line">${[invoice.client?.city, invoice.client?.state].filter(Boolean).join(', ')}</div>` : ''}
       <div class="line">${invoice.client?.gstNumber ? `GSTIN: ${invoice.client.gstNumber}` : 'Unregistered (B2C)'}</div>
-      ${invoice.client?.phone ? `<div class="line">${invoice.client.phone}</div>` : ''}
+      ${invoice.client?.phone ? `<div class="line">Mobile: ${invoice.client.phone}</div>` : ''}
+      ${invoice.client?.dateOfBirth ? `<div class="line">DOB: ${new Date(invoice.client.dateOfBirth).toLocaleDateString('en-IN', { timeZone: 'UTC' })}</div>` : ''}
+      ${invoice.client?.panNumber ? `<div class="line">PAN: ${invoice.client.panNumber}</div>` : ''}
     </div>
     <div class="info-box">
       <div class="title">Payment Status</div>
@@ -272,6 +275,7 @@ export function printInvoice(invoice: any) {
           ${!isInterState ? row('CGST', `₹ ${INR(cgst)}`) : ''}
           ${!isInterState ? row('SGST', `₹ ${INR(sgst)}`) : ''}
           ${isInterState ? row('IGST', `₹ ${INR(igst)}`) : ''}
+          ${Math.abs(roundOff) >= 0.005 ? row('Round off', `${roundOff > 0 ? '+' : '-'} ₹ ${INR(Math.abs(roundOff))}`) : ''}
           <tr class="divider total-row">
             <td class="label bold" style="font-size:15px">Total</td>
             <td class="value bold accent" style="font-size:18px">₹ ${INR(total)}</td>

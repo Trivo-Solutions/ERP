@@ -228,9 +228,10 @@ CLI equivalent: `npm run company:provision -- --code VASAVI --name "Vasavi Jewel
 | GET | `/tags/search` | `estimation:view` | Find a piece to quote |
 | GET | `/tags/:tagId` | `estimation:view` | The piece + its materials (sale side only — no cost) |
 | GET | `/tags/:tagId/estimates` | `estimation:view` | Estimates saved for a piece |
-| POST | `/tags/:tagId/estimates` | `estimation:manage` | Save an estimate; `sendToBilling: true` (+ `customerName` / `customerPhone`) also hands it to billing |
+| POST | `/tags/:tagId/estimates` | `estimation:manage` | Save an estimate; `sendToBilling: true` (+ the customer fields below) also hands it to billing |
 | GET | `/estimates/:id` | `estimation:view` | One estimate |
-| POST | `/estimates/:id/send-to-billing` | `estimation:manage` | Hand a saved estimate to the billing counter (I5) |
+| POST | `/estimates/:id/send-to-billing` | `estimation:manage` | Hand a saved estimate to the billing counter (I5). Body: `customerName`*, `customerPhone`* (10-digit mobile), `salesPersonId`* (a User of this company), `customerDob`, `customerAddress`, `customerPan` (*required; omitted fields keep what the estimate already holds) |
+| GET | `/staff` | `estimation:view` | Active staff of this company for the sales-employee picker (`id` = User id) |
 | GET/POST/PUT | `/templates…` | `estimateTemplate:view` / `manage` | Print templates |
 
 ### Inventory — `/inventory` (metal vault live; stones/consumables dormant)
@@ -309,10 +310,12 @@ CLI equivalent: `npm run company:provision -- --code VASAVI --name "Vasavi Jewel
 | POST | `/memos/:id/convert` | `memo:manage` | Convert a memo to an invoice — the wholesale sale path |
 | GET | `/invoices` | `sales:view` | List invoices |
 | GET | `/invoices/:id` | `sales:view` | Get an invoice (items, tax, payments, export docs) |
+| GET | `/tax-context?clientId=` | `invoice:create` | HSN codes + rates and same-state vs inter-state for a customer — the New Sale screen's GST preview |
 | GET | `/staff` | `invoice:create` | Salesperson picker for the New Sale form |
 | GET | `/branches` | `invoice:create` | Branches the caller may bill from (the invoice needs one) |
 | GET | `/estimates?q=` | `invoice:create` | Estimates sent to billing, searchable by number / item / tag / customer name — sale-side data only (I5) |
-| POST | `/invoices` | `invoice:create` | Create a direct invoice — tag-aware (Gap #2) |
+| POST | `/invoices` | `invoice:create` | Create a direct invoice — tag-aware (Gap #2). `payments[]` may split across `CASH`/`CARD`/`UPI`/`BANK_TRANSFER`/`CHEQUE` **and** the credit modes `OLD_GOLD` (send `oldGold: {description, karat, grossWeight, stoneWeight?, deductionPercent?}`; `amount` is ignored, the server values the metal) and `STORE_CREDIT` (`amount` ≤ the customer's available credit) |
+| GET | `/clients/:clientId/credit` | `invoice:create` | `{balance, available}` — credit on the customer's account (from returns / old-gold exchanges) that `STORE_CREDIT` can spend |
 | POST | `/invoices/:id/payment` | `invoice:create` | Record a payment against an invoice |
 | GET | `/invoices/:id/packing-list` | `export:doc` | Generate a packing list |
 | GET | `/clients/:clientId/payments` | `sales:view` | List a client's payments, invoice-scoped + standalone (F2) |

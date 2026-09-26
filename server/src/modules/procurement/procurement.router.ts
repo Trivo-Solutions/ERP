@@ -110,7 +110,8 @@ procurementRouter.get('/grn', requirePermission('grn:create'), async (req: Reque
           poItem: { select: { materialCode: true, materialName: true, materialType: true, karat: true, weight: true, netWeight: true, quantity: true, totalAmount: true } },
           jewelryTag: { select: { id: true, tagNumber: true } },
           // FINISHED_LOT lines: the bag this receipt opened (tagged piece by piece from New Tag).
-          purchaseLot: { select: { id: true, pieces: true, status: true } },
+          // grossWeight/netWeight + what its tags already carry: the GRN page shows how much of the bag is still untagged.
+          purchaseLot: { select: { id: true, pieces: true, status: true, netWeight: true, tags: { select: { netWeight: true } } } },
         },
       },
     },

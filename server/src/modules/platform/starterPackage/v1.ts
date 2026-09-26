@@ -130,6 +130,7 @@ export const STARTER_PACKAGE_V1: StarterPackageDefinition = {
     { code: '6300', name: 'Administrative Expenses', type: 'EXPENSE', isSystem: true },
     { code: '6400', name: 'Hallmarking Charges', type: 'EXPENSE', isSystem: true },
     { code: '6500', name: 'Bank Charges', type: 'EXPENSE', isSystem: true },
+    { code: '6600', name: 'Round Off', type: 'EXPENSE', isSystem: true },
     { code: '7000', name: 'Forex Gain/Loss', type: 'EXPENSE', isSystem: true },
   ],
 

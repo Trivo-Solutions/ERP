@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { platformPrisma as prisma } from '../../config/database'; // tests act as the platform/admin role for fixtures and verification; the code under test uses the runtime client
 import { AppError } from '../../middleware/error';
-import { createInvoice as _createInvoice, createMemoOut, convertMemoToInvoice, recordPayment, createSalesReturn, createOldGoldExchange, recordClientPayment, listClientPayments, getSalesRegister } from './sales.service';
+import { createInvoice as _createInvoice, getTaxContext, createMemoOut, convertMemoToInvoice, recordPayment, createSalesReturn, createOldGoldExchange, recordClientPayment, listClientPayments, getSalesRegister, getClientCredit } from './sales.service';
+import { getClientLedger, getDayBook } from '../finance/finance.service';
 import { LEDGER_ACCOUNT } from '../../shared/ledgerAccounts';
+import { DEFAULT_HSN_CODE } from '../../shared/constants';
 import { cleanupJournalEntries, getJournalEntry, lineAmount } from '../../test/ledger';
 import { createTestTenant, cleanupTestTenant, TestTenant } from '../../test/fixtures';
 
@@ -1062,6 +1064,110 @@ describe('createInvoice (tag-aware direct invoicing)', () => {
     });
   });
 
+  // Round-off: an INR bill is rounded to the nearest rupee automatically; the biller can key a figure instead.
+  // The adjustment is part of totalAmount, is stored on the invoice, and is posted to the Round Off account so the
+  // journal still balances to the paisa.
+  describe('round-off (auto to the nearest ₹1, editable)', () => {
+    const oneLine = (rate: number) => [baseItem({ netGoldWeight: 1, grossWeight: 1, goldRate: rate })];
+
+    it('rounds an INR bill DOWN to the rupee and posts the difference as a debit to Round Off', async () => {
+      // subtotal 48001.37 + 3% GST 1440.0411 = 49441.4111 -> 49441, round-off -0.4111
+      const invoice = await createInvoice({ clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: oneLine(48001.37) }, userId);
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.totalAmount)).toBe(49441);
+      expect(Number(invoice.roundOff)).toBeCloseTo(-0.41, 2);
+      expect(Number(invoice.balanceDue)).toBe(49441);
+
+      const entry = await getJournalEntry(invoice.id);
+      expect(Number(entry!.totalDebit)).toBeCloseTo(Number(entry!.totalCredit), 2);
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE).debit).toBeCloseTo(49441, 2);
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.ROUND_OFF).debit).toBeCloseTo(0.41, 2);
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.ROUND_OFF).credit).toBe(0);
+    });
+
+    it('rounds an INR bill UP to the rupee and posts the difference as a credit to Round Off', async () => {
+      // subtotal 100.60 + 3% = 103.618 -> 104, round-off +0.382
+      const invoice = await createInvoice({ clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: oneLine(100.6) }, userId);
+      invoiceIds.push(invoice.id);
+
+      expect(Number(invoice.totalAmount)).toBe(104);
+      expect(Number(invoice.roundOff)).toBeCloseTo(0.38, 2);
+
+      const entry = await getJournalEntry(invoice.id);
+      expect(Number(entry!.totalDebit)).toBeCloseTo(Number(entry!.totalCredit), 2);
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.ROUND_OFF).credit).toBeCloseTo(0.38, 2);
+      expect(lineAmount(entry!, LEDGER_ACCOUNT.ROUND_OFF).debit).toBe(0);
+    });
+
+    it('keeps subtotal + charges - discount + GST + round-off equal to the total', async () => {
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', discountAmount: 11, otherCharges: 25.5, items: oneLine(48001.37) }, userId);
+      invoiceIds.push(invoice.id);
+      const parts = Number(invoice.subtotal) + Number(invoice.otherCharges) - Number(invoice.discountAmount) + Number(invoice.taxAmount) + Number(invoice.roundOff);
+      expect(parts).toBeCloseTo(Number(invoice.totalAmount), 1);
+      expect(Number(invoice.totalAmount) % 1).toBe(0); // whole rupees
+    });
+
+    it('uses a keyed round-off instead of the automatic one — 0 turns rounding off', async () => {
+      const off = await createInvoice({ clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', roundOff: 0, items: oneLine(48001.37) }, userId);
+      invoiceIds.push(off.id);
+      expect(Number(off.roundOff)).toBe(0);
+      expect(Number(off.totalAmount)).toBeCloseTo(49441.41, 2); // unrounded
+      const offEntry = await getJournalEntry(off.id);
+      expect(offEntry!.lines.some((l) => l.account.code === LEDGER_ACCOUNT.ROUND_OFF)).toBe(false);
+
+      const keyed = await createInvoice({ clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', roundOff: 0.59, items: oneLine(48001.37) }, userId);
+      invoiceIds.push(keyed.id);
+      expect(Number(keyed.roundOff)).toBeCloseTo(0.59, 2);
+      expect(Number(keyed.totalAmount)).toBeCloseTo(49442, 2);
+      const keyedEntry = await getJournalEntry(keyed.id);
+      expect(Number(keyedEntry!.totalDebit)).toBeCloseTo(Number(keyedEntry!.totalCredit), 2);
+      expect(lineAmount(keyedEntry!, LEDGER_ACCOUNT.ROUND_OFF).credit).toBeCloseTo(0.59, 2);
+    });
+
+    it('refuses a round-off bigger than ±₹10 (that is a discount) and one that is not a number', async () => {
+      for (const bad of [10.5, -11, 'abc' as unknown as number, NaN]) {
+        await expect(
+          createInvoice({ clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', roundOff: bad, items: oneLine(48001.37) }, userId),
+        ).rejects.toThrow(/Round-off must be a number/);
+      }
+    });
+
+    it('does not round a non-INR bill on its own', async () => {
+      const invoice = await createInvoice({ clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', currency: 'USD', items: oneLine(48001.37) }, userId);
+      invoiceIds.push(invoice.id);
+      expect(Number(invoice.roundOff)).toBe(0);
+      expect(Number(invoice.totalAmount)).toBeCloseTo(48001.37, 2);
+    });
+  });
+
+  // The New Sale screen previews a bill (HSN rates, CGST+SGST vs IGST) before it exists; this is what it reads.
+  describe('getTaxContext (GST preview for New Sale)', () => {
+    it('lists the active HSN codes with their rates, including the default one', async () => {
+      const t = await getTaxContext(tenant.ctx);
+      expect(t.defaultHsnCode).toBe(DEFAULT_HSN_CODE);
+      expect(t.hsnCodes.find((h) => h.code === DEFAULT_HSN_CODE)?.gstRate).toBeCloseTo(0.03, 4);
+      expect(t.sameState).toBe(false); // no customer given
+    });
+
+    it("says same-state only when the customer's state resolves to the company's, and inter-state otherwise", async () => {
+      const company = await prisma.company.findUniqueOrThrow({ where: { id: tenant.company.id }, select: { stateCode: true } });
+      await prisma.company.update({ where: { id: tenant.company.id }, data: { stateCode: '24' } }); // Gujarat
+      const local = await prisma.client.create({ data: { companyId: tenant.company.id, clientCode: `TSTGS-${suffix}-a`, name: 'Local', type: 'RETAIL', state: 'Gujarat' } });
+      const away = await prisma.client.create({ data: { companyId: tenant.company.id, clientCode: `TSTGS-${suffix}-b`, name: 'Away', type: 'RETAIL', state: 'Kerala' } });
+      const unknown = await prisma.client.create({ data: { companyId: tenant.company.id, clientCode: `TSTGS-${suffix}-c`, name: 'Walk-in', type: 'RETAIL' } });
+      try {
+        expect((await getTaxContext(tenant.ctx, local.id)).sameState).toBe(true);
+        expect((await getTaxContext(tenant.ctx, away.id)).sameState).toBe(false);
+        expect((await getTaxContext(tenant.ctx, unknown.id)).sameState).toBe(false); // blank state -> inter-state, as createInvoice
+      } finally {
+        await prisma.client.deleteMany({ where: { id: { in: [local.id, away.id, unknown.id] } } });
+        await prisma.company.update({ where: { id: tenant.company.id }, data: { stateCode: company.stateCode } });
+      }
+    });
+  });
+
   // F1: createInvoice/applyPayment/createSalesReturn now each post a balanced double-entry
   // JournalEntry (via postAutoJournalEntry) alongside their existing client.currentBalance
   // bump — previously nothing ever called createJournalEntry, so the Trial Balance/P&L/Balance
@@ -1610,6 +1716,303 @@ describe('createOldGoldExchange (D4)', () => {
     await expect(
       createOldGoldExchange({ clientId, description: 'Platinum piece', karat: 'PT', grossWeight: 5 }, tenant.ctx, userId)
     ).rejects.toThrow(/No metal rate found/);
+  });
+});
+
+// Billing with credit: the customer's old metal (OLD_GOLD) and credit already on their account from a return or an
+// earlier exchange (STORE_CREDIT) are payment modes on the bill. Neither moves cash: the credit was booked when it
+// arose, so the sale's debit already nets it — the payment row only marks the invoice paid.
+describe('createInvoice — old gold & store credit as payment modes', () => {
+  const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const karat = '22K'; // seeded in every DB by the karat_master migration (C1)
+
+  let tenant: TestTenant;
+  let userId: string;
+  let branchId: string;
+  const clientIds: string[] = [];
+  const invoiceIds: string[] = [];
+  const tagIds: string[] = [];
+  const rateIds: string[] = [];
+
+  async function makeClient(label: string) {
+    const c = await prisma.client.create({
+      data: { companyId: tenant.company.id, clientCode: `TSTCL-${label}-${suffix}`, name: `Client ${label}`, panNumber: 'ABCDE1234F', type: 'RETAIL' },
+    });
+    clientIds.push(c.id);
+    return c.id;
+  }
+  async function makeTag(name: string) {
+    const tag = await prisma.jewelryTag.create({
+      data: {
+        tagNumber: `TSTTAG-CR-${suffix}-${tagIds.length}`, companyId: tenant.company.id, branchId, name,
+        metalType: 'GOLD', metalKarat: karat, grossWeight: 1, netWeight: 1, stoneWeight: 0,
+        costPrice: 4000, sellingPrice: 5150, createdById: userId,
+      },
+    });
+    tagIds.push(tag.id);
+    return tag;
+  }
+  // 1 g x ₹5,000 + 3% GST = ₹5,150 a piece, no making charge.
+  const item = (over: Partial<Parameters<typeof _createInvoice>[0]['items'][number]> = {}) => ({
+    productCode: 'MISC', description: 'Chain', quantity: 1, grossWeight: 1, netGoldWeight: 1,
+    rateType: 'PER_GRAM', goldRate: 5000, makingCharge: 0, ...over,
+  });
+  const sell = async (clientId: string, over: Partial<Parameters<typeof _createInvoice>[0]> = {}) => {
+    const inv = await _createInvoice({
+      branchId, clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [item()], ...over,
+    }, tenant.ctx, userId);
+    invoiceIds.push(inv.id);
+    return inv;
+  };
+  const balanceOf = async (clientId: string) =>
+    Number((await prisma.client.findUniqueOrThrow({ where: { id: clientId } })).currentBalance);
+
+  // Credit on the account the way it really arises: sell a tagged piece (paid in full) and take it back.
+  async function clientWithReturnCredit(label: string) {
+    const clientId = await makeClient(label);
+    const tag = await makeTag(`Returned ${label}`);
+    const sold = await sell(clientId, { items: [item({ tagId: tag.id })], payments: [{ paymentDate: new Date(), amount: 5150, mode: 'UPI' }] });
+    await createSalesReturn({ invoiceId: sold.id, items: [{ invoiceItemId: sold.items[0].id }] }, tenant.ctx, userId);
+    return clientId;
+  }
+
+  beforeAll(async () => {
+    tenant = await createTestTenant(`CR${suffix}`, ['invoice:create']);
+    userId = tenant.user.id;
+    branchId = tenant.branch.id;
+    const today = new Date(new Date().toISOString().split('T')[0]);
+    rateIds.push((await prisma.metalRate.create({
+      data: { companyId: tenant.company.id, date: today, karat, purity: 0.916, ratePerGram: 5000 },
+    })).id);
+  });
+
+  afterAll(async () => {
+    const returnIds = (await prisma.salesReturn.findMany({ where: { clientId: { in: clientIds } }, select: { id: true } })).map((r) => r.id);
+    const payIds = (await prisma.invoicePayment.findMany({ where: { clientId: { in: clientIds } }, select: { id: true } })).map((p) => p.id);
+    const exchanges = await prisma.oldGoldExchange.findMany({ where: { clientId: { in: clientIds } }, select: { id: true, metalStockId: true } });
+    await cleanupJournalEntries([...invoiceIds, ...returnIds, ...payIds, ...exchanges.map((e) => e.id)]);
+    await prisma.salesReturn.deleteMany({ where: { clientId: { in: clientIds } } });
+    await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
+    await prisma.invoicePayment.deleteMany({ where: { clientId: { in: clientIds } } });
+    await prisma.oldGoldExchange.deleteMany({ where: { clientId: { in: clientIds } } });
+    await prisma.metalStock.deleteMany({ where: { id: { in: exchanges.map((e) => e.metalStockId).filter(Boolean) as string[] } } });
+    await prisma.salesInvoice.deleteMany({ where: { id: { in: invoiceIds } } });
+    await prisma.jewelryTag.deleteMany({ where: { id: { in: tagIds } } });
+    await prisma.metalRate.deleteMany({ where: { id: { in: rateIds } } });
+    await prisma.client.deleteMany({ where: { id: { in: clientIds } } });
+    await cleanupTestTenant(tenant);
+    await prisma.$disconnect();
+  });
+
+  describe('STORE_CREDIT (credit from a sales return)', () => {
+    it('reports the credit a return left on the account', async () => {
+      const clientId = await clientWithReturnCredit('rep');
+      expect(await getClientCredit(tenant.ctx, clientId)).toEqual({ clientId, balance: -5150, available: 5150 });
+    });
+
+    it('settles a bill out of that credit: invoice PAID, balance back to zero, no cash and no journal for the settlement', async () => {
+      const clientId = await clientWithReturnCredit('full');
+      const tag = await makeTag('New piece');
+
+      const inv = await sell(clientId, {
+        items: [item({ tagId: tag.id })],
+        payments: [{ paymentDate: new Date(), amount: 5150, mode: 'STORE_CREDIT' }],
+      });
+
+      expect(inv.status).toBe('PAID');
+      expect(Number(inv.paidAmount)).toBe(5150);
+      expect(Number(inv.balanceDue)).toBe(0);
+      expect(await balanceOf(clientId)).toBeCloseTo(0); // -5150 credit + 5150 sale; the credit is what paid for it
+      expect((await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } })).status).toBe('SOLD');
+
+      const [pay] = await prisma.invoicePayment.findMany({ where: { invoiceId: inv.id } });
+      expect(pay.mode).toBe('STORE_CREDIT');
+      expect(await getJournalEntry(pay.id)).toBeNull(); // credit was already booked when the return happened
+      expect((await getClientCredit(tenant.ctx, clientId)).available).toBe(0);
+    });
+
+    it('part credit + part UPI on one bill', async () => {
+      const clientId = await clientWithReturnCredit('mix');
+      const inv = await sell(clientId, {
+        items: [item({ quantity: 2 })], // ₹10,300
+        payments: [
+          { paymentDate: new Date(), amount: 5150, mode: 'STORE_CREDIT' },
+          { paymentDate: new Date(), amount: 5150, mode: 'UPI' },
+        ],
+      });
+      expect(inv.status).toBe('PAID');
+      expect(await balanceOf(clientId)).toBeCloseTo(0);
+
+      const pays = await prisma.invoicePayment.findMany({ where: { invoiceId: inv.id } });
+      const upi = pays.find((p) => p.mode === 'UPI')!;
+      expect(await getJournalEntry(upi.id)).not.toBeNull(); // real money still hits the books
+      expect(await getJournalEntry(pays.find((p) => p.mode === 'STORE_CREDIT')!.id)).toBeNull();
+    });
+
+    it('refuses more credit than the customer has — nothing is sold, the tag stays in stock', async () => {
+      const clientId = await clientWithReturnCredit('over');
+      const tag = await makeTag('Blocked piece');
+      const invoicesBefore = await prisma.salesInvoice.count({ where: { clientId } });
+
+      await expect(sell(clientId, {
+        items: [item({ tagId: tag.id, quantity: 1, goldRate: 6000 })], // ₹6,180 bill
+        payments: [{ paymentDate: new Date(), amount: 6180, mode: 'STORE_CREDIT' }],
+      })).rejects.toThrow(/Only 5150 of store credit is available/);
+
+      expect((await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } })).status).toBe('IN_STOCK');
+      expect(await prisma.salesInvoice.count({ where: { clientId } })).toBe(invoicesBefore);
+      expect(await balanceOf(clientId)).toBeCloseTo(-5150);
+    });
+
+    it('refuses credit for a customer with none', async () => {
+      const clientId = await makeClient('none');
+      await expect(sell(clientId, { payments: [{ paymentDate: new Date(), amount: 100, mode: 'STORE_CREDIT' }] }))
+        .rejects.toThrow(/Only 0 of store credit is available/);
+    });
+
+    it('refuses credit larger than what is still due on the bill', async () => {
+      const clientId = await clientWithReturnCredit('gt');
+      await expect(sell(clientId, {
+        items: [item({ goldRate: 500 })], // ₹515 bill, credit is ₹5,150
+        payments: [{ paymentDate: new Date(), amount: 5150, mode: 'STORE_CREDIT' }],
+      })).rejects.toThrow(/more than the .* still due/);
+    });
+
+    it('cannot spend the same credit twice on one bill', async () => {
+      const clientId = await clientWithReturnCredit('twice');
+      await expect(sell(clientId, {
+        items: [item({ quantity: 2 })],
+        payments: [
+          { paymentDate: new Date(), amount: 5150, mode: 'STORE_CREDIT' },
+          { paymentDate: new Date(), amount: 5150, mode: 'STORE_CREDIT' },
+        ],
+      })).rejects.toThrow(/store credit is available/);
+    });
+  });
+
+  describe('OLD_GOLD (customer hands over old metal on the bill)', () => {
+    const oldGold = (over: Partial<{ grossWeight: number; stoneWeight: number; deductionPercent: number; karat: string }> = {}) =>
+      ({ description: 'Old chain', karat, grossWeight: 1.2, stoneWeight: 0.2, ...over });
+
+    it('values the metal, books the exchange, tracks it in the vault and settles the bill with it', async () => {
+      const clientId = await makeClient('og1');
+      const inv = await sell(clientId, { // ₹5,150 bill: old gold worth 1 g x ₹5,000 = ₹5,000, ₹150 by UPI
+        payments: [
+          { paymentDate: new Date(), amount: 0, mode: 'OLD_GOLD', oldGold: oldGold() },
+          { paymentDate: new Date(), amount: 150, mode: 'UPI' },
+        ],
+      });
+
+      expect(inv.status).toBe('PAID');
+      expect(await balanceOf(clientId)).toBeCloseTo(0);
+
+      const [ex] = await prisma.oldGoldExchange.findMany({ where: { clientId } });
+      expect(ex.exchangeNumber).toMatch(/^OGX-/);
+      expect(Number(ex.netWeight)).toBeCloseTo(1);
+      expect(Number(ex.valuedAmount)).toBe(5000);
+
+      const stock = await prisma.metalStock.findUniqueOrThrow({ where: { id: ex.metalStockId! } });
+      expect(stock.sourceType).toBe('CUSTOMER_SUPPLIED');
+      expect(Number(stock.netWeight)).toBeCloseTo(1);
+
+      // The exchange posts its own Dr Inventory / Cr AR; the settlement on the bill posts nothing more.
+      const exEntry = await getJournalEntry(ex.id);
+      expect(lineAmount(exEntry!, LEDGER_ACCOUNT.INVENTORY).debit).toBe(5000);
+      expect(lineAmount(exEntry!, LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE).credit).toBe(5000);
+
+      const pays = await prisma.invoicePayment.findMany({ where: { invoiceId: inv.id } });
+      const og = pays.find((p) => p.mode === 'OLD_GOLD')!;
+      expect(Number(og.amount)).toBe(5000);
+      expect(og.referenceNo).toBe(ex.exchangeNumber);
+      expect(await getJournalEntry(og.id)).toBeNull();
+    });
+
+    it('applies the melting-loss deduction % to the value', async () => {
+      const clientId = await makeClient('og2');
+      await sell(clientId, {
+        payments: [{ paymentDate: new Date(), amount: 0, mode: 'OLD_GOLD', oldGold: oldGold({ stoneWeight: 0.2, deductionPercent: 10 }) }],
+      });
+      const [ex] = await prisma.oldGoldExchange.findMany({ where: { clientId } });
+      expect(Number(ex.valuedAmount)).toBe(4500); // 1 g x ₹5,000 x 90%
+    });
+
+    it('metal worth more than the bill pays it off and leaves the rest as credit on the account', async () => {
+      const clientId = await makeClient('og3');
+      const inv = await sell(clientId, { // bill ₹5,150, old gold ₹10,000
+        payments: [{ paymentDate: new Date(), amount: 0, mode: 'OLD_GOLD', oldGold: oldGold({ grossWeight: 2, stoneWeight: 0 }) }],
+      });
+
+      expect(inv.status).toBe('PAID');
+      expect(Number(inv.paidAmount)).toBe(5150);
+      expect(Number(inv.balanceDue)).toBe(0);
+      expect(await balanceOf(clientId)).toBeCloseTo(-4850);
+      expect((await getClientCredit(tenant.ctx, clientId)).available).toBeCloseTo(4850);
+    });
+
+    it('needs the metal details, and rejects a bad karat before any tag is sold', async () => {
+      const clientId = await makeClient('og4');
+      const tag = await makeTag('Guarded piece');
+
+      await expect(sell(clientId, { items: [item({ tagId: tag.id })], payments: [{ paymentDate: new Date(), amount: 100, mode: 'OLD_GOLD' }] }))
+        .rejects.toThrow(/Old gold details/);
+      await expect(sell(clientId, {
+        items: [item({ tagId: tag.id })],
+        payments: [{ paymentDate: new Date(), amount: 0, mode: 'OLD_GOLD', oldGold: oldGold({ karat: '99K' }) }],
+      })).rejects.toThrow(/Unknown karat/);
+
+      expect((await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } })).status).toBe('IN_STOCK');
+      expect(await prisma.oldGoldExchange.count({ where: { clientId } })).toBe(0);
+    });
+
+    it('rolls the whole bill back — exchange and vault entry included — if a later split fails', async () => {
+      const clientId = await makeClient('og5');
+      const tag = await makeTag('Rollback piece');
+      const stocksBefore = await prisma.metalStock.count({ where: { companyId: tenant.company.id } });
+
+      await expect(sell(clientId, {
+        items: [item({ tagId: tag.id })],
+        payments: [
+          { paymentDate: new Date(), amount: 0, mode: 'OLD_GOLD', oldGold: oldGold() },
+          { paymentDate: new Date(), amount: 100, mode: 'STORE_CREDIT' }, // this customer has no credit to spend
+        ],
+      })).rejects.toThrow(/store credit is available/);
+
+      expect((await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } })).status).toBe('IN_STOCK');
+      expect(await prisma.oldGoldExchange.count({ where: { clientId } })).toBe(0);
+      expect(await prisma.metalStock.count({ where: { companyId: tenant.company.id } })).toBe(stocksBefore);
+      expect(await balanceOf(clientId)).toBe(0);
+    });
+  });
+
+  describe('outside a bill', () => {
+    it('recordPayment / recordClientPayment refuse the credit modes', async () => {
+      const clientId = await makeClient('rec');
+      const inv = await sell(clientId);
+      await expect(recordPayment({ invoiceId: inv.id, paymentDate: new Date(), amount: 100, mode: 'STORE_CREDIT' }, tenant.ctx, userId))
+        .rejects.toThrow(/only be used while creating an invoice/);
+      await expect(recordClientPayment({ clientId, paymentDate: new Date(), amount: 100, mode: 'old_gold' }, tenant.ctx, userId))
+        .rejects.toThrow(/only be used while creating an invoice/);
+    });
+
+    it("the client's ledger does not count a credit settlement twice, and still closes on the account balance", async () => {
+      const clientId = await clientWithReturnCredit('led');
+      await sell(clientId, { // ₹10,300 bill: ₹2,000 from the return credit, ₹5,000 old gold, ₹3,000 UPI, ₹300 left due
+        items: [item({ quantity: 2 })],
+        payments: [
+          { paymentDate: new Date(), amount: 2000, mode: 'STORE_CREDIT' },
+          { paymentDate: new Date(), amount: 0, mode: 'OLD_GOLD', oldGold: { description: 'Old ring', karat, grossWeight: 1 } },
+          { paymentDate: new Date(), amount: 3000, mode: 'UPI' },
+        ],
+      });
+
+      const ledger = await getClientLedger(tenant.ctx, clientId);
+      expect(ledger.rows.some((r: any) => /STORE_CREDIT|OLD_GOLD/.test(r.description))).toBe(false);
+      expect(ledger.rows.filter((r: any) => r.type === 'EXCHANGE')).toHaveLength(1);
+      expect(ledger.closingBalance).toBeCloseTo(await balanceOf(clientId)); // -2850: ₹3,150 credit left, ₹300 due
+
+      const day = await getDayBook(tenant.company.id, new Date());
+      expect(day.payments.byMode.some((m: any) => m.mode === 'STORE_CREDIT' || m.mode === 'OLD_GOLD')).toBe(false);
+    });
   });
 });
 

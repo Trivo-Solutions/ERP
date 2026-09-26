@@ -18,7 +18,13 @@ estimationRouter.get('/tags/search', requirePermission('estimation:view'), async
   res.json({ success: true, data: tags });
 });
 
-estimationRouter.get('/tags/:tagId', requirePermission('estimation:view'), async (req: Request, res: Response) => {
+// Staff picker for "Send to billing"'s sales-employee field. Lives here (estimation:view) because an estimator
+// need not hold invoice:create, which /sales/staff requires. `id` is the User id, as SalesInvoice.salesPersonId expects.
+estimationRouter.get('/staff', requirePermission('estimation:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await svc.listSalesStaff(req.tenant!) });
+});
+
+estimationRouter.get('/tags/:tagId',requirePermission('estimation:view'), async (req: Request, res: Response) => {
   res.json({ success: true, data: await svc.getTagForEstimation(req.tenant!, req.params.tagId) });
 });
 

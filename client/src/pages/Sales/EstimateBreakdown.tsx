@@ -40,6 +40,9 @@ export function estimateTotals(b: EstimateBreakdown) {
   return {
     total: t.totalSaleAmount,
     making: t.makingSaleAmount,
+    // Making charge (labour, ₹/g of metal) and value addition (a % of the metal's value), shown as their own lines.
+    mcAmount: t.metalWeight * Number(b.mcRate || 0),
+    vaAmount: (metalAmount * Number(b.vaPercent || 0)) / 100,
     metalWeight: t.metalWeight,
     metalAmount,
     otherMaterials: t.materialsSaleAmt - metalAmount,   // stones etc.
@@ -121,6 +124,35 @@ export function EstimateBreakdownDialog({ title, quotedTotal, value, onClose, on
               {draft.rows.length === 0 && (
                 <TableRow><TableCell colSpan={6}><Typography color="text.secondary">No rows — the line will price at the making charge only.</Typography></TableCell></TableRow>
               )}
+              {/* Labour on the metal, in the same Weight / Rate / Amount columns as the materials above. */}
+              <TableRow sx={{ bgcolor: 'action.hover' }}>
+                <TableCell>
+                  <Typography variant="body2" fontWeight={600}>Making Charge (MC)</Typography>
+                  <Typography variant="caption" color="text.secondary">₹ per gram of metal</Typography>
+                </TableCell>
+                <TableCell><Typography variant="caption" color="text.secondary">LABOUR</Typography></TableCell>
+                <TableCell align="right" sx={{ fontFamily: 'monospace' }}>{totals.metalWeight.toFixed(3)}</TableCell>
+                <TableCell align="right">
+                  <NumberField size="small" value={draft.mcRate} inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right' } }}
+                    onChange={(e) => setDraft({ ...draft, mcRate: Number(e.target.value) })} />
+                </TableCell>
+                <TableCell align="right" sx={{ fontFamily: 'monospace' }}>{fmt(totals.mcAmount)}</TableCell>
+                <TableCell />
+              </TableRow>
+              <TableRow sx={{ bgcolor: 'action.hover' }}>
+                <TableCell>
+                  <Typography variant="body2" fontWeight={600}>Value Addition (VA)</Typography>
+                  <Typography variant="caption" color="text.secondary">% of the metal's value ({fmt(totals.metalAmount)})</Typography>
+                </TableCell>
+                <TableCell><Typography variant="caption" color="text.secondary">LABOUR</Typography></TableCell>
+                <TableCell align="right" sx={{ color: 'text.disabled' }}>—</TableCell>
+                <TableCell align="right">
+                  <NumberField size="small" value={draft.vaPercent} inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right' } }}
+                    onChange={(e) => setDraft({ ...draft, vaPercent: Number(e.target.value) })} />
+                </TableCell>
+                <TableCell align="right" sx={{ fontFamily: 'monospace' }}>{fmt(totals.vaAmount)}</TableCell>
+                <TableCell />
+              </TableRow>
             </TableBody>
           </Table>
         </Box>
@@ -131,17 +163,9 @@ export function EstimateBreakdownDialog({ title, quotedTotal, value, onClose, on
 
         <Divider sx={{ my: 2 }} />
         <Grid container spacing={2} alignItems="center">
-          <Grid item xs={6} sm={3}>
-            <NumberField size="small" label="Making (₹/g of metal)" value={draft.mcRate}
-              onChange={(e) => setDraft({ ...draft, mcRate: Number(e.target.value) })} />
-          </Grid>
-          <Grid item xs={6} sm={3}>
-            <NumberField size="small" label="VA % (of metal value)" value={draft.vaPercent}
-              onChange={(e) => setDraft({ ...draft, vaPercent: Number(e.target.value) })} />
-          </Grid>
-          <Grid item xs={12} sm={6}>
+          <Grid item xs={12}>
             <Stack spacing={0.25} alignItems="flex-end">
-              <Typography variant="body2" color="text.secondary">Materials {fmt(totals.metalAmount + totals.otherMaterials)} · Making {fmt(totals.making)}</Typography>
+              <Typography variant="body2" color="text.secondary">Materials {fmt(totals.metalAmount + totals.otherMaterials)} · MC {fmt(totals.mcAmount)} · VA {fmt(totals.vaAmount)}</Typography>
               <Typography variant="h6" fontWeight={800} sx={{ fontFamily: 'monospace' }}>{fmt(totals.total)}</Typography>
               {Math.abs(totals.total - quotedTotal) > 0.005 && (
                 <Typography variant="caption" color="warning.main">

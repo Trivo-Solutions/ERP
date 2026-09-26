@@ -3,7 +3,7 @@ import { prisma } from '../../config/database';
 import { AppError } from '../../middleware/error';
 import { createAuditEntry } from '../../middleware/audit';
 import { emit } from '../../shared/websocket';
-import { DEFAULT_HSN_CODE } from '../../shared/constants';
+import { DEFAULT_HSN_CODE, CREDIT_SETTLEMENT_MODES, PAYMENT_MODE_OLD_GOLD, PAYMENT_MODE_STORE_CREDIT } from '../../shared/constants';
 import { assertPanIfRequired, assertCashLimit } from '../../shared/compliance';
 import { resolveStateCode } from '../../shared/stateMaster';
 import { resolveMetalRate } from '../../shared/metalRate';
@@ -15,10 +15,28 @@ import { nextDocumentNumber } from '../../shared/numberSequence';
 import { TenantContext, tenantTransaction, tenantQuery, tenantBatch } from '../../shared/tenantContext';
 import { assertBranchAccessible, assertOwnedByCompany, assertAllOwned } from '../../middleware/tenant';
 
+// The customer's old metal handed over against this bill (mode OLD_GOLD) — see createInvoice.
+type OldGoldInput = {
+  description: string; karat: string; grossWeight: number; stoneWeight?: number; deductionPercent?: number;
+};
+
 type PaymentInput = {
   paymentDate: Date; amount: number; mode: string;
   referenceNo?: string; forexRate?: number; notes?: string;
+  /** Required when mode is OLD_GOLD; `amount` is then ignored — the server values the metal itself. */
+  oldGold?: OldGoldInput;
 };
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+const normalizeMode = (mode: string) => mode.trim().toUpperCase();
+
+// OLD_GOLD / STORE_CREDIT only exist inside createInvoice (they settle a bill from credit); a standalone
+// "record a payment" has no such thing to draw on, so it must not accept them.
+function assertReceiptMode(mode: string) {
+  if (CREDIT_SETTLEMENT_MODES.includes(normalizeMode(mode))) {
+    throw new AppError(`${mode} can only be used while creating an invoice`, 400);
+  }
+}
 
 export async function createMemoOut(data: {
   clientId: string; branchId: string; sentDate: Date; returnDeadline: Date; notes?: string;
@@ -149,9 +167,38 @@ function checkCreditLimit(
   }
 }
 
+// What the New Sale screen needs to preview a bill the way createInvoice will price it: the HSN codes a line can be
+// billed under (with their GST rate) and whether this customer is same-state (CGST + SGST) or inter-state (IGST).
+// Read-only; the answer createInvoice acts on is always recomputed there, never taken from here.
+export async function getTaxContext(ctx: TenantContext, clientId?: string) {
+  const hsnCodes = await prisma.hsnCode.findMany({ where: { isActive: true }, orderBy: { code: 'asc' } });
+  let sameState = false;
+  if (clientId) {
+    const [company, client] = await tenantBatch(ctx.companyId, (tx) => [
+      tx.company.findUniqueOrThrow({ where: { id: ctx.companyId }, select: { stateCode: true } }),
+      tx.client.findFirst({ where: { id: clientId, companyId: ctx.companyId }, select: { state: true } }),
+    ]);
+    // Same comparison as createInvoice: no confident match for the client's state counts as inter-state.
+    const clientStateCode = client ? await resolveStateCode(client.state) : null;
+    sameState = clientStateCode != null && clientStateCode === (company.stateCode ?? '');
+  }
+  return {
+    defaultHsnCode: DEFAULT_HSN_CODE,
+    hsnCodes: hsnCodes.map((h) => ({ code: h.code, description: h.description, gstRate: Number(h.gstRate) })),
+    sameState,
+  };
+}
+
+// The most a bill can be nudged by round-off. Rounding to the rupee never exceeds 50 paise; a biller keying it
+// by hand gets some room, but a bigger movement must go through Discount so it is visible as one.
+export const MAX_ROUND_OFF = 10;
+
 export async function createInvoice(data: {
   clientId: string; invoiceDate: Date; dueDate?: Date; invoiceType: string;
   currency?: string; exchangeRate?: number; discountAmount?: number; otherCharges?: number; notes?: string;
+  /** Adjustment to the bill total. Omit to round an INR bill to the nearest rupee automatically; send a number
+   *  (0 = none) to key it by hand. Within ±MAX_ROUND_OFF — anything bigger is a discount, not a round-off. */
+  roundOff?: number;
   salesPersonId?: string; terms?: string;
   /** Estimates (TagEstimate, status SENT) this invoice bills. Each must be for a tag that is on this invoice; they are
    *  marked INVOICED against it in the same transaction, so an estimate can never be billed twice. */
@@ -374,7 +421,32 @@ export async function createInvoice(data: {
   const taxAmount = currency === 'INR'
     ? items.reduce((s, i) => s + i.totalPrice * discountScale * i.taxRate, 0) + otherCharges * defaultHsnRate
     : 0;
-  const totalAmount = taxableAmount + taxAmount;
+  const preRoundTotal = taxableAmount + taxAmount;
+  // Round-off: automatic to the nearest rupee on an INR bill unless the biller keyed a figure. Kept unrounded here so
+  // the journal below balances to the paisa; the row stores it at 2 dp.
+  if (data.roundOff !== undefined && data.roundOff !== null) {
+    if (typeof data.roundOff !== 'number' || !Number.isFinite(data.roundOff) || Math.abs(data.roundOff) > MAX_ROUND_OFF) {
+      throw new AppError(`Round-off must be a number within ±₹${MAX_ROUND_OFF} — use Discount for a larger adjustment`, 400);
+    }
+  }
+  const roundOffExact = data.roundOff != null
+    ? data.roundOff
+    : currency === 'INR' ? Math.round(preRoundTotal) - preRoundTotal : 0;
+  const totalAmount = preRoundTotal + roundOffExact;
+
+  // Old gold / store credit splits (payment modes that settle the bill from credit rather than take money).
+  // Old metal is valued up front — rate, karat and weights are checked before any tag is touched, so a bad
+  // karat or a missing rate fails the bill before it flips inventory it would only have to unwind.
+  const oldGoldValuations = new Map<PaymentInput, OldGoldValuation>();
+  for (const p of data.payments ?? []) {
+    const mode = normalizeMode(p.mode);
+    if (!CREDIT_SETTLEMENT_MODES.includes(mode)) continue;
+    if (currency !== 'INR') throw new AppError('Old gold and store credit can only be used on a rupee invoice', 400);
+    if (mode === PAYMENT_MODE_OLD_GOLD) {
+      if (!p.oldGold) throw new AppError('Old gold details (description, karat, weight) are required for an OLD_GOLD payment', 400);
+      oldGoldValuations.set(p, await valueOldGold(p.oldGold, p.paymentDate, ctx));
+    }
+  }
 
   const invoice = await tenantTransaction(ctx.companyId, async (tx) => {
     const invoiceNumber = await nextDocumentNumber(ctx.companyId, 'INV', 'INV', tx, data.invoiceDate.getFullYear());
@@ -388,6 +460,11 @@ export async function createInvoice(data: {
       throw new AppError('Client not found', 404);
     }
     checkCreditLimit(client, totalAmount);
+    // Credit the customer already holds, read BEFORE this invoice's own debit below. Negative currentBalance =
+    // money we owe them (from a return, or an earlier exchange). No row lock is needed to spend it safely: the
+    // INV number just taken above locks this company's invoice-number row until commit, so two invoices can
+    // never read the same credit at once, and nothing else in the system spends credit.
+    let creditAvailable = Math.max(-Number(client.currentBalance), 0);
     // Rule 114B: a sale above ₹2,00,000 needs the customer's PAN (or a Form 60 on file). Rupee
     // sales only — the threshold is in rupees, and an export invoice has no PAN to quote.
     if (currency === 'INR') assertPanIfRequired(client, totalAmount);
@@ -435,7 +512,7 @@ export async function createInvoice(data: {
         invoiceNumber, clientId: data.clientId, invoiceDate: data.invoiceDate,
         dueDate: data.dueDate, invoiceType: data.invoiceType,
         currency, exchangeRate: data.exchangeRate ?? 1,
-        subtotal, discountAmount: discount, otherCharges, taxAmount, totalAmount,
+        subtotal, discountAmount: discount, otherCharges, taxAmount, roundOff: roundOffExact, totalAmount,
         balanceDue: totalAmount, notes: data.notes,
         salesPersonId: data.salesPersonId ?? null, terms: data.terms ?? null,
         // Every InvoiceItem is stamped with the SAME companyId as its parent invoice —
@@ -503,7 +580,7 @@ export async function createInvoice(data: {
 
     // F1: revenue + GST payable + COGS/inventory in one compound entry — Dr totalAmount (AR) +
     // cogsAmount (COGS) must equal Cr taxableAmount (Revenue) + taxAmount (GST) + cogsAmount
-    // (Inventory), which holds by construction (totalAmount = taxableAmount + taxAmount).
+    // (Inventory) + roundOff, which holds by construction (totalAmount = taxableAmount + taxAmount + roundOff).
     await postAutoJournalEntry(tx, ctx.companyId, {
       date: data.invoiceDate, description: `Sales Invoice ${invoiceNumber}`,
       referenceType: 'SalesInvoice', referenceId: inv.id, userId,
@@ -513,6 +590,8 @@ export async function createInvoice(data: {
         { accountCode: LEDGER_ACCOUNT.CGST_PAYABLE, credit: cgstAmt },
         { accountCode: LEDGER_ACCOUNT.SGST_PAYABLE, credit: sgstAmt },
         { accountCode: LEDGER_ACCOUNT.IGST_PAYABLE, credit: igstAmt },
+        // Billed up to the rupee = credit; billed down = debit (postAutoJournalEntry drops a zero line).
+        { accountCode: LEDGER_ACCOUNT.ROUND_OFF, credit: roundOffExact > 0 ? roundOffExact : 0, debit: roundOffExact < 0 ? -roundOffExact : 0 },
         { accountCode: LEDGER_ACCOUNT.COST_OF_GOODS, debit: cogsAmount },
         { accountCode: LEDGER_ACCOUNT.INVENTORY, credit: cogsAmount },
       ],
@@ -532,8 +611,37 @@ export async function createInvoice(data: {
     if (data.payments && data.payments.length > 0) {
       let runningInvoice = inv;
       for (const p of data.payments) {
-        const result = await applyPayment(tx, ctx.companyId, runningInvoice, p, userId);
-        runningInvoice = { ...runningInvoice, paidAmount: result.paidAmount as any };
+        const mode = normalizeMode(p.mode);
+        const remaining = Math.max(Number(inv.totalAmount) - Number(runningInvoice.paidAmount), 0);
+        let result: { paidAmount: number } | null;
+
+        if (mode === PAYMENT_MODE_OLD_GOLD) {
+          // The customer's old metal: booked exactly like a standalone exchange (client credited, metal into the
+          // vault, Dr Inventory / Cr AR), then that fresh credit is used to settle this bill. If the metal is worth
+          // more than what is still due, only the due part settles the bill — the rest stays as credit on the
+          // customer's account for next time (it is already in currentBalance).
+          const v = oldGoldValuations.get(p)!;
+          const exchange = await bookOldGoldExchange(tx, ctx, userId, { clientId: data.clientId, ...p.oldGold!, notes: p.notes }, v);
+          const settle = round2(Math.min(v.valuedAmount, remaining));
+          result = settle > 0.005
+            ? await applyPayment(tx, ctx.companyId, runningInvoice, {
+                ...p, amount: settle, referenceNo: exchange.exchangeNumber, notes: p.oldGold!.description,
+              }, userId, { fromCredit: true })
+            : null;
+        } else if (mode === PAYMENT_MODE_STORE_CREDIT) {
+          if (!(p.amount > 0)) throw new AppError('Store credit amount must be positive', 400);
+          if (p.amount > creditAvailable + 0.005) {
+            throw new AppError(`Only ${round2(creditAvailable)} of store credit is available for ${client.name}; ${p.amount} was asked for`, 400);
+          }
+          if (p.amount > remaining + 0.005) {
+            throw new AppError(`Store credit of ${p.amount} is more than the ${round2(remaining)} still due on this bill`, 400);
+          }
+          creditAvailable -= p.amount;
+          result = await applyPayment(tx, ctx.companyId, runningInvoice, p, userId, { fromCredit: true });
+        } else {
+          result = await applyPayment(tx, ctx.companyId, runningInvoice, p, userId);
+        }
+        if (result) runningInvoice = { ...runningInvoice, paidAmount: result.paidAmount as any };
       }
       return tx.salesInvoice.findUniqueOrThrow({
         where: { id: inv.id },
@@ -558,6 +666,11 @@ async function applyPayment(
   invoice: { id: string; clientId: string; paidAmount: unknown; totalAmount: unknown; exchangeRate: unknown },
   data: PaymentInput,
   userId: string,
+  // fromCredit: this "payment" settles the bill out of credit the customer already holds (old gold just
+  // booked, or store credit from a return) — the row and the invoice's paid/due figures are written as for
+  // any payment, but no cash came in, so there is no journal and the client's balance is left alone (the
+  // credit was booked in the ledger and on the balance when it arose; the sale's debit already netted it).
+  opts: { fromCredit?: boolean } = {},
 ) {
   const forexGainLoss = data.forexRate
     ? (Number(invoice.exchangeRate) - data.forexRate) * data.amount
@@ -565,7 +678,7 @@ async function applyPayment(
 
   // Sec 269ST — before anything is written. Earlier splits of the same sale are already in the table
   // (same transaction), so a bill-and-collect with several CASH splits is aggregated correctly.
-  await assertCashLimit(tx, companyId, invoice.clientId, data);
+  if (!opts.fromCredit) await assertCashLimit(tx, companyId, invoice.clientId, data);
 
   const newPaid = Number(invoice.paidAmount) + data.amount;
   const newBalance = Number(invoice.totalAmount) - newPaid;
@@ -589,23 +702,25 @@ async function applyPayment(
     },
   });
 
-  // F1: cash/bank in, receivable down — the ledger mirror of the currentBalance decrement below.
-  // Forex gain/loss (when this payment's rate differs from the invoice's) isn't journaled yet —
-  // same "recorded but not yet fully wired" boundary as other deferred items (see D1/D3 notes);
-  // the field stays on InvoicePayment for later, cash/bank still nets to exactly data.amount.
-  await postAutoJournalEntry(tx, companyId, {
-    date: data.paymentDate, description: `Payment ${payment.paymentNumber} for invoice`,
-    referenceType: 'InvoicePayment', referenceId: payment.id, userId,
-    lines: [
-      { accountCode: cashOrBankAccount(data.mode), debit: data.amount },
-      { accountCode: LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE, credit: data.amount },
-    ],
-  });
+  if (!opts.fromCredit) {
+    // F1: cash/bank in, receivable down — the ledger mirror of the currentBalance decrement below.
+    // Forex gain/loss (when this payment's rate differs from the invoice's) isn't journaled yet —
+    // same "recorded but not yet fully wired" boundary as other deferred items (see D1/D3 notes);
+    // the field stays on InvoicePayment for later, cash/bank still nets to exactly data.amount.
+    await postAutoJournalEntry(tx, companyId, {
+      date: data.paymentDate, description: `Payment ${payment.paymentNumber} for invoice`,
+      referenceType: 'InvoicePayment', referenceId: payment.id, userId,
+      lines: [
+        { accountCode: cashOrBankAccount(data.mode), debit: data.amount },
+        { accountCode: LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE, credit: data.amount },
+      ],
+    });
 
-  await tx.client.update({
-    where: { id: invoice.clientId },
-    data: { currentBalance: { decrement: data.amount } },
-  });
+    await tx.client.update({
+      where: { id: invoice.clientId },
+      data: { currentBalance: { decrement: data.amount } },
+    });
+  }
 
   return { paidAmount: newPaid, balanceDue: newBalance };
 }
@@ -613,6 +728,7 @@ async function applyPayment(
 export async function recordPayment(data: PaymentInput & { invoiceId: string }, ctx: TenantContext, userId: string) {
   // Layer 2: the invoice is validated as belonging to ctx.companyId before any payment is
   // recorded against it — a Company-B invoiceId must 404, not silently accept a payment.
+  assertReceiptMode(data.mode);
   await assertOwnedByCompany('salesInvoice', data.invoiceId, ctx.companyId, 'Invoice');
   return tenantTransaction(ctx.companyId, async (tx) => {
     const invoice = await tx.salesInvoice.findUniqueOrThrow({ where: { id: data.invoiceId } });
@@ -626,6 +742,7 @@ export async function recordPayment(data: PaymentInput & { invoiceId: string }, 
 // paidAmount/balanceDue/status on: this only ever moves client.currentBalance and the ledger.
 export async function recordClientPayment(data: PaymentInput & { clientId: string }, ctx: TenantContext, userId: string) {
   if (data.amount <= 0) throw new AppError('Payment amount must be positive', 400);
+  assertReceiptMode(data.mode);
   await assertOwnedByCompany('client', data.clientId, ctx.companyId, 'Client');
 
   return tenantTransaction(ctx.companyId, async (tx) => {
@@ -822,74 +939,119 @@ export async function createOldGoldExchange(data: {
   // Layer 2: the client this exchange credits must belong to the caller's own company.
   await assertOwnedByCompany('client', data.clientId, ctx.companyId, 'Client');
 
+  const exchangeDate = data.exchangeDate ?? new Date();
+  const valuation = await valueOldGold(data, exchangeDate, ctx);
+
+  const exchange = await tenantTransaction(ctx.companyId, (tx) => bookOldGoldExchange(tx, ctx, userId, data, valuation));
+
+  await createAuditEntry('old_gold_exchanges', exchange.id, userId, 'CREATE', undefined, undefined, ctx.companyId);
+  return exchange;
+}
+
+type OldGoldValuation = {
+  exchangeDate: Date; stoneWeight: number; netWeight: number; purity: number;
+  ratePerGram: number; deductionPercent: number; deductedRate: number; valuedAmount: number;
+};
+
+// Validates and prices a piece of old metal — net weight x the day's MetalRate for its karat, less an optional
+// melting-loss %. Read-only, so it runs before any transaction; shared by the standalone exchange screen and the
+// OLD_GOLD payment on a bill, which must value the metal identically.
+async function valueOldGold(
+  data: { karat: string; grossWeight: number; stoneWeight?: number; deductionPercent?: number },
+  exchangeDate: Date,
+  ctx: TenantContext,
+): Promise<OldGoldValuation> {
   if (!(await isValidKarat(ctx.companyId, data.karat))) {
     throw new AppError(`Unknown karat/purity code: ${data.karat}`, 400);
   }
+  if (!(data.grossWeight > 0)) throw new AppError('Old gold gross weight must be more than zero', 400);
 
   const stoneWeight = data.stoneWeight ?? 0;
-  if (stoneWeight > data.grossWeight) {
+  if (stoneWeight < 0 || stoneWeight > data.grossWeight) {
     throw new AppError('Stone weight cannot exceed gross weight', 400);
   }
   const netWeight = data.grossWeight - stoneWeight;
 
-  const exchangeDate = data.exchangeDate ?? new Date();
+  const deductionPercent = data.deductionPercent ?? 0;
+  if (deductionPercent < 0 || deductionPercent > 100) throw new AppError('Deduction % must be between 0 and 100', 400);
+
   const rate = await resolveMetalRate(ctx.companyId, data.karat, exchangeDate);
   if (!rate) throw new AppError(`No metal rate found for ${data.karat} on or before ${exchangeDate.toDateString()}`, 404);
   const ratePerGram = Number(rate.ratePerGram);
 
-  const deductionPercent = data.deductionPercent ?? 0;
   const deductedRate = ratePerGram * (1 - deductionPercent / 100);
-  const valuedAmount = netWeight * deductedRate;
+  const valuedAmount = round2(netWeight * deductedRate);
 
   const karatMaster = await tenantQuery(ctx.companyId, (tx) =>
     tx.karatMaster.findUniqueOrThrow({ where: { companyId_code: { companyId: ctx.companyId, code: data.karat } } })
   );
 
-  const exchange = await tenantTransaction(ctx.companyId, async (tx) => {
-    const exchangeNumber = await nextDocumentNumber(ctx.companyId, 'OGX', 'OGX', tx, exchangeDate.getFullYear());
-    const stock = await addMetalStock(
-      {
-        materialName: data.description, karat: data.karat, purity: Number(karatMaster.purity),
-        grossWeight: data.grossWeight, netWeight,
-        sourceType: 'CUSTOMER_SUPPLIED', sourceRef: exchangeNumber, avgCostPerGram: deductedRate,
-      },
-      ctx.companyId, userId, tx
-    );
+  return { exchangeDate, stoneWeight, netWeight, purity: Number(karatMaster.purity), ratePerGram, deductionPercent, deductedRate, valuedAmount };
+}
 
-    const created = await tx.oldGoldExchange.create({
-      data: {
-        companyId: ctx.companyId,
-        exchangeNumber, clientId: data.clientId, exchangeDate, description: data.description,
-        karat: data.karat, grossWeight: data.grossWeight, stoneWeight, netWeight,
-        ratePerGram, deductionPercent, valuedAmount, metalStockId: stock.id, notes: data.notes,
-      },
-      include: { metalStock: true },
-    });
+// The write half of an old-gold exchange, inside the caller's transaction: number it, add the melted weight to the
+// Metal Vault, record it, post the ledger entry and credit the client. The client must already be checked as this
+// company's. A standalone exchange and an OLD_GOLD payment on a bill both go through here, so they cannot drift.
+async function bookOldGoldExchange(
+  tx: Prisma.TransactionClient,
+  ctx: TenantContext,
+  userId: string,
+  data: { clientId: string; description: string; karat: string; grossWeight: number; notes?: string },
+  v: OldGoldValuation,
+) {
+  const exchangeNumber = await nextDocumentNumber(ctx.companyId, 'OGX', 'OGX', tx, v.exchangeDate.getFullYear());
+  const stock = await addMetalStock(
+    {
+      materialName: data.description, karat: data.karat, purity: v.purity,
+      grossWeight: data.grossWeight, netWeight: v.netWeight,
+      sourceType: 'CUSTOMER_SUPPLIED', sourceRef: exchangeNumber, avgCostPerGram: v.deductedRate,
+    },
+    ctx.companyId, userId, tx
+  );
 
-    // F1: the melted-down metal enters the Metal Vault at exactly what it was valued at (Dr
-    // Inventory), funded by reducing what the client is owed rather than cash out the door (Cr
-    // Accounts Receivable — the same control account createInvoice debits and createSalesReturn
-    // credits; a store credit is simply a negative receivable).
-    await postAutoJournalEntry(tx, ctx.companyId, {
-      date: exchangeDate, description: `Old Gold Exchange ${exchangeNumber}`,
-      referenceType: 'OldGoldExchange', referenceId: created.id, userId,
-      lines: [
-        { accountCode: LEDGER_ACCOUNT.INVENTORY, debit: valuedAmount },
-        { accountCode: LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE, credit: valuedAmount },
-      ],
-    });
-
-    // Store credit — symmetric opposite of createInvoice's debit on sale.
-    await tx.client.update({
-      where: { id: data.clientId },
-      data: { currentBalance: { decrement: valuedAmount } },
-    });
-
-    return created;
+  const created = await tx.oldGoldExchange.create({
+    data: {
+      companyId: ctx.companyId,
+      exchangeNumber, clientId: data.clientId, exchangeDate: v.exchangeDate, description: data.description,
+      karat: data.karat, grossWeight: data.grossWeight, stoneWeight: v.stoneWeight, netWeight: v.netWeight,
+      ratePerGram: v.ratePerGram, deductionPercent: v.deductionPercent, valuedAmount: v.valuedAmount,
+      metalStockId: stock.id, notes: data.notes,
+    },
+    include: { metalStock: true },
   });
 
-  await createAuditEntry('old_gold_exchanges', exchange.id, userId, 'CREATE', undefined, undefined, ctx.companyId);
-  return exchange;
+  // F1: the melted-down metal enters the Metal Vault at exactly what it was valued at (Dr
+  // Inventory), funded by reducing what the client is owed rather than cash out the door (Cr
+  // Accounts Receivable — the same control account createInvoice debits and createSalesReturn
+  // credits; a store credit is simply a negative receivable).
+  await postAutoJournalEntry(tx, ctx.companyId, {
+    date: v.exchangeDate, description: `Old Gold Exchange ${exchangeNumber}`,
+    referenceType: 'OldGoldExchange', referenceId: created.id, userId,
+    lines: [
+      { accountCode: LEDGER_ACCOUNT.INVENTORY, debit: v.valuedAmount },
+      { accountCode: LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE, credit: v.valuedAmount },
+    ],
+  });
+
+  // Store credit — symmetric opposite of createInvoice's debit on sale.
+  await tx.client.update({
+    where: { id: data.clientId },
+    data: { currentBalance: { decrement: v.valuedAmount } },
+  });
+
+  return created;
+}
+
+// What a customer can spend on their next bill: credit sitting on their account from returns and old-gold
+// exchanges (a negative Client.currentBalance). Net of any dues — if they owe us more than we owe them there is
+// nothing to spend. Read fresh by the New Sale screen once a customer is picked.
+export async function getClientCredit(ctx: TenantContext, clientId: string) {
+  await assertOwnedByCompany('client', clientId, ctx.companyId, 'Client');
+  const client = await tenantQuery(ctx.companyId, (tx) =>
+    tx.client.findUniqueOrThrow({ where: { id: clientId }, select: { currentBalance: true } })
+  );
+  const balance = Number(client.currentBalance);
+  return { clientId, balance, available: Math.max(-balance, 0) };
 }
 
 export async function returnMemoItems(memoId: string, tagIds: string[], ctx: TenantContext, userId: string) {

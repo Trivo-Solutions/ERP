@@ -1,9 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Fragment } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Box, Card, Table, TableHead, TableBody, TableRow, TableCell, Typography, Button,
   Grid, Chip, Alert, Dialog, DialogTitle, DialogContent, DialogActions,
-  TextField, MenuItem, IconButton, Stack,
+  TextField, MenuItem, IconButton, Stack, LinearProgress,
 } from '@mui/material';
 import { CheckCircle, Warning, Bolt, LocalOffer, Print } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -21,6 +21,27 @@ import { printTsplViaAgent } from '../../utils/printAgent';
 
 const FINISHED_GOODS = 'FINISHED_GOODS';
 const FINISHED_LOT = 'FINISHED_LOT';
+
+// How far along the tagging of a bag is — live from its tags. A few hundredths of a gram is scale noise, not "untagged".
+const LOT_LEFT_TOLERANCE = 0.005;
+function lotProgress(lot: any) {
+  const net = Number(lot.netWeight ?? 0);
+  const taggedNet = (lot.tags ?? []).reduce((s: number, t: any) => s + Number(t.netWeight ?? 0), 0);
+  const tagged = (lot.tags ?? []).length;
+  return { net, taggedNet, leftNet: net - taggedNet, tagged };
+}
+
+// Whether every finished piece received on a GRN has been tagged: nothing to tag (raw material only),
+// still tagging (a bag with weight left, or a single piece with no tag yet), or done.
+function taggingState(grn: any): 'NONE' | 'PENDING' | 'DONE' {
+  const items: any[] = grn.grnItems ?? [];
+  const lots = items.filter((i) => i.poItem?.materialType === FINISHED_LOT && i.purchaseLot);
+  const pieces = items.filter((i) => i.poItem?.materialType === FINISHED_GOODS);
+  if (lots.length === 0 && pieces.length === 0) return 'NONE';
+  const pending = lots.some((i) => lotProgress(i.purchaseLot).leftNet > LOT_LEFT_TOLERANCE && i.purchaseLot.status === 'OPEN')
+    || pieces.some((i) => !i.jewelryTag);
+  return pending ? 'PENDING' : 'DONE';
+}
 const MAKE_TYPES = ['GOLD', 'DIAMOND', 'SILVER', 'PLATINUM', 'OTHER'];
 
 // ─── GRN Create Dialog ────────────────────────────────────────────────────────
@@ -510,64 +531,47 @@ export function GrnVerification() {
 
       <Card>
         <Box sx={{ overflowX: 'auto' }}>
-        <Table size="small">
+        <Table size="small" sx={{ '& .MuiTableCell-root': { whiteSpace: 'nowrap' } }}>
           <TableHead>
             <TableRow>
               <TableCell>GRN #</TableCell>
               <TableCell>PO Ref</TableCell>
               <TableCell>Supplier</TableCell>
               <TableCell>Branch</TableCell>
-              <TableCell>Received Date</TableCell>
+              <TableCell>Received</TableCell>
               <TableCell>Invoice #</TableCell>
               <TableCell>Status</TableCell>
-              <TableCell>Finished pieces</TableCell>
-              <TableCell>Actions</TableCell>
+              <TableCell align="right">Actions</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
             {isLoading ? (
-              <TableRow><TableCell colSpan={9} align="center" sx={{ py: 4 }}>Loading...</TableCell></TableRow>
-            ) : ((grns as any)?.data ?? grns ?? []).map((grn: any) => (
-              <TableRow key={grn.id} hover>
+              <TableRow><TableCell colSpan={8} align="center" sx={{ py: 4 }}>Loading...</TableCell></TableRow>
+            ) : ((grns as any)?.data ?? grns ?? []).map((grn: any) => {
+              const lots = (grn.grnItems ?? []).filter((i: any) => i.poItem?.materialType === FINISHED_LOT && i.purchaseLot);
+              const pieces = (grn.grnItems ?? []).filter((i: any) => i.poItem?.materialType === FINISHED_GOODS);
+              const hasFinished = lots.length + pieces.length > 0;
+              const tagging = taggingState(grn);
+              return (
+              <Fragment key={grn.id}>
+              <TableRow hover sx={hasFinished ? { '& > .MuiTableCell-root': { borderBottom: 'none' } } : undefined}>
                 <TableCell sx={{ fontFamily: 'monospace', fontWeight: 700, color: '#44C47A' }}>{grn.grnNumber}</TableCell>
                 <TableCell sx={{ fontFamily: 'monospace', fontSize: 12 }}>{grn.po?.poNumber}</TableCell>
-                <TableCell>{grn.po?.supplier?.name}</TableCell>
-                <TableCell sx={{ fontSize: 12 }}>{grn.branch?.name ?? '—'}</TableCell>
-                <TableCell sx={{ fontSize: 12 }}>{new Date(grn.receivedDate).toLocaleDateString('en-IN')}</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>{grn.po?.supplier?.name}</TableCell>
+                <TableCell>{grn.branch?.name ?? '—'}</TableCell>
+                <TableCell>{new Date(grn.receivedDate).toLocaleDateString('en-IN')}</TableCell>
                 <TableCell sx={{ fontFamily: 'monospace', fontSize: 12 }}>{grn.invoiceNumber ?? '—'}</TableCell>
                 <TableCell>
-                  <StatusChip status={grn.status} />
-                  {grn.status === 'DISCREPANCY' && <Warning sx={{ fontSize: 16, color: 'error.main', ml: 0.5 }} />}
+                  <Stack direction="row" spacing={0.75} alignItems="center">
+                    <StatusChip status={grn.status} />
+                    {grn.status === 'DISCREPANCY' && <Warning sx={{ fontSize: 16, color: 'error.main' }} />}
+                    {tagging !== 'NONE' && (
+                      <Chip size="small" variant="outlined" color={tagging === 'PENDING' ? 'warning' : 'success'}
+                        label={tagging === 'PENDING' ? 'Tagging incomplete' : 'Tagging complete'} />
+                    )}
+                  </Stack>
                 </TableCell>
-                <TableCell>
-                  {(grn.grnItems ?? []).filter((i: any) => i.poItem?.materialType === FINISHED_LOT && i.purchaseLot).map((i: any) => (
-                    <Box key={i.id} sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
-                      <Typography variant="caption" sx={{ minWidth: 110 }}>{i.poItem.materialName} · bag{i.purchaseLot.pieces != null ? ` of ${i.purchaseLot.pieces} pcs` : ''}</Typography>
-                      <Button size="small" variant="outlined" startIcon={<LocalOffer />}
-                        disabled={!canTag || i.purchaseLot.status !== 'OPEN'}
-                        title={canTag ? 'Tag the pieces of this lot one by one' : 'Needs the tag:create permission'}
-                        onClick={() => navigate(`/tagging/tags/new?lotId=${i.purchaseLot.id}`)}>
-                        {i.purchaseLot.status === 'OPEN' ? 'Tag pieces' : 'Closed'}
-                      </Button>
-                    </Box>
-                  ))}
-                  {(grn.grnItems ?? []).filter((i: any) => i.poItem?.materialType === FINISHED_GOODS).map((i: any) => (
-                    <Box key={i.id} sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
-                      <Typography variant="caption" sx={{ minWidth: 110 }}>{i.poItem.materialName}</Typography>
-                      {i.jewelryTag ? (
-                        <Chip size="small" color="success" label={i.jewelryTag.tagNumber} sx={{ fontFamily: 'monospace' }} />
-                      ) : (
-                        <Button size="small" variant="outlined" startIcon={<LocalOffer />}
-                          disabled={!canTag}
-                          title={canTag ? 'Create the sellable tag for this piece' : 'Needs the tag:create permission'}
-                          onClick={() => setTagTarget({ grn, item: i })}>
-                          Tag
-                        </Button>
-                      )}
-                    </Box>
-                  ))}
-                </TableCell>
-                <TableCell>
+                <TableCell align="right">
                   {grn.status === 'VERIFIED' && (
                     <Button size="small" variant="contained" color="success" startIcon={<CheckCircle />}
                       disabled={verifyMutation.isPending}
@@ -577,7 +581,67 @@ export function GrnVerification() {
                   )}
                 </TableCell>
               </TableRow>
-            ))}
+              {hasFinished && (
+                <TableRow>
+                  <TableCell colSpan={8} sx={{ pt: 0, pb: 2, pl: 4 }}>
+                    <Box sx={{ borderLeft: 3, borderColor: 'divider', pl: 2, display: 'grid', gap: 1.25 }}>
+                      {lots.map((i: any) => {
+                        const pr = lotProgress(i.purchaseLot);
+                        const left = pr.leftNet > LOT_LEFT_TOLERANCE;
+                        const open = i.purchaseLot.status === 'OPEN';
+                        return (
+                          <Box key={i.id} sx={{ display: 'grid', gridTemplateColumns: 'minmax(170px, 1fr) minmax(280px, 2fr) 130px', alignItems: 'center', columnGap: 3 }}>
+                            <Box>
+                              <Typography variant="body2" fontWeight={600}>{i.poItem.materialName}</Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                Bag{i.purchaseLot.pieces != null ? ` of ${i.purchaseLot.pieces} pcs` : ''}
+                              </Typography>
+                            </Box>
+                            <Box>
+                              <LinearProgress variant="determinate" color={left ? 'warning' : 'success'}
+                                value={pr.net > 0 ? Math.min(100, (pr.taggedNet / pr.net) * 100) : 0}
+                                sx={{ height: 6, borderRadius: 3, mb: 0.5 }} />
+                              <Typography variant="caption" sx={{ fontFamily: 'monospace' }} color={left ? 'warning.main' : 'text.secondary'}>
+                                {pr.tagged} tagged · {pr.taggedNet.toFixed(3)} of {pr.net.toFixed(3)} g net{left ? ` · ${pr.leftNet.toFixed(3)} g left` : ''}
+                              </Typography>
+                            </Box>
+                            <Button size="small" variant="outlined" startIcon={<LocalOffer />} sx={{ justifySelf: 'end' }}
+                              disabled={!canTag || !open}
+                              title={canTag ? 'Tag the pieces of this lot one by one' : 'Needs the tag:create permission'}
+                              onClick={() => navigate(`/tagging/tags/new?lotId=${i.purchaseLot.id}`)}>
+                              {open ? 'Tag pieces' : 'Closed'}
+                            </Button>
+                          </Box>
+                        );
+                      })}
+                      {pieces.map((i: any) => (
+                        <Box key={i.id} sx={{ display: 'grid', gridTemplateColumns: 'minmax(170px, 1fr) minmax(280px, 2fr) 130px', alignItems: 'center', columnGap: 3 }}>
+                          <Box>
+                            <Typography variant="body2" fontWeight={600}>{i.poItem.materialName}</Typography>
+                            <Typography variant="caption" color="text.secondary">Single piece</Typography>
+                          </Box>
+                          <Box>
+                            {i.jewelryTag
+                              ? <Chip size="small" color="success" label={`Tagged · ${i.jewelryTag.tagNumber}`} sx={{ fontFamily: 'monospace' }} />
+                              : <Chip size="small" variant="outlined" color="warning" label="Not tagged yet" />}
+                          </Box>
+                          {i.jewelryTag ? <span /> : (
+                            <Button size="small" variant="outlined" startIcon={<LocalOffer />} sx={{ justifySelf: 'end' }}
+                              disabled={!canTag}
+                              title={canTag ? 'Create the sellable tag for this piece' : 'Needs the tag:create permission'}
+                              onClick={() => setTagTarget({ grn, item: i })}>
+                              Tag
+                            </Button>
+                          )}
+                        </Box>
+                      ))}
+                    </Box>
+                  </TableCell>
+                </TableRow>
+              )}
+              </Fragment>
+              );
+            })}
           </TableBody>
         </Table>
         </Box>

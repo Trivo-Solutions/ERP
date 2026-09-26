@@ -4,6 +4,7 @@ import { AppError } from '../../middleware/error';
 import { nextDocumentNumber } from '../../shared/numberSequence';
 import { tenantQuery, tenantBatch, tenantTransaction, TenantContext } from '../../shared/tenantContext';
 import { assertOwnedByCompany } from '../../middleware/tenant';
+import { CREDIT_SETTLEMENT_MODES } from '../../shared/constants';
 import { getStarterPackage, type StarterAccount } from '../platform/starterPackage';
 
 // ═══════════════════════════════════════════════════
@@ -298,7 +299,9 @@ export async function getClientLedger(ctx: TenantContext, clientId: string, from
       select: { id: true, invoiceNumber: true, invoiceDate: true, totalAmount: true, createdAt: true },
     }),
     tx.invoicePayment.findMany({
-      where: { companyId: ctx.companyId, clientId },
+      // Not OLD_GOLD / STORE_CREDIT: those settle a bill out of credit already shown above as the exchange / return
+      // row, so listing them as receipts too would credit the customer twice.
+      where: { companyId: ctx.companyId, clientId, mode: { notIn: CREDIT_SETTLEMENT_MODES } },
       select: {
         id: true, paymentNumber: true, paymentDate: true, amount: true, mode: true, createdAt: true,
         invoice: { select: { invoiceNumber: true } },
@@ -453,7 +456,8 @@ export async function getDayBook(companyId: string, date: Date) {
       select: { invoiceNumber: true, invoiceType: true, totalAmount: true, client: { select: { name: true } } },
     }),
     tx.invoicePayment.findMany({
-      where: { companyId, paymentDate: { gte: start, lte: end } },
+      // Money received only — old gold / store credit settlements are already in the exchanges / returns below.
+      where: { companyId, paymentDate: { gte: start, lte: end }, mode: { notIn: CREDIT_SETTLEMENT_MODES } },
       select: { mode: true, amount: true },
     }),
     tx.salesReturn.findMany({
