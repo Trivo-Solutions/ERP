@@ -1106,6 +1106,18 @@ export async function createTransfer(data: {
   }
 
   const transfer = await tenantTransaction(ctx.companyId, async (tx) => {
+    // Guarded flip, reserved right away — not at approval. Otherwise the tags stay IN_STOCK and
+    // fully sellable at a billing counter through the whole DRAFT/PENDING_APPROVAL window, and a
+    // concurrent sale could race a later approval. Mirrors the count-checked pattern every other
+    // stock mutator uses (createInvoice, receiveTransfer, ...): a tag sold between the pre-check
+    // above and here fails loudly instead of being silently swept into a transfer.
+    const flipped = await tx.jewelryTag.updateMany({
+      where: { id: { in: data.tagIds }, companyId: ctx.companyId, status: 'IN_STOCK' },
+      data: { status: 'TRANSFERRED' },
+    });
+    if (flipped.count !== data.tagIds.length) {
+      throw new AppError('Some tags are no longer available (sold or already reserved) — refresh and try again', 409);
+    }
     const transferNumber = await nextDocumentNumber(ctx.companyId, 'BT', 'BT', tx);
     return tx.branchTransfer.create({
       data: {
@@ -1136,21 +1148,17 @@ export async function submitTransfer(id: string, ctx: TenantContext, userId: str
 }
 
 export async function approveTransfer(id: string, ctx: TenantContext, userId: string) {
-  const t = await tenantQuery(ctx.companyId, (_tx) => _tx.branchTransfer.findUnique({ where: { id }, include: { items: true } }));
+  const t = await tenantQuery(ctx.companyId, (_tx) => _tx.branchTransfer.findUnique({ where: { id } }));
   if (!t || t.companyId !== ctx.companyId) throw new AppError('Transfer not found', 404);
   await assertBranchAccessible(t.toBranchId, ctx, 'Destination branch'); // approving = the receiving side authorizing dispatch
   if (t.status !== 'PENDING_APPROVAL') throw new AppError('Only PENDING_APPROVAL transfers can be approved', 400);
 
-  return tenantTransaction(ctx.companyId, async (tx) => {
-    await tx.jewelryTag.updateMany({
-      where: { id: { in: t.items.map((i) => i.tagId) }, companyId: ctx.companyId },
-      data: { status: 'TRANSFERRED' },
-    });
-    return tx.branchTransfer.update({
-      where: { id },
-      data: { status: 'DISPATCHED', approvedById: userId, approvedAt: new Date(), dispatchedAt: new Date() },
-    });
-  });
+  // Tags were already reserved (flipped IN_STOCK -> TRANSFERRED) at createTransfer, so approval
+  // only advances the transfer's own status — there's no tag-side race left to guard here.
+  return tenantQuery(ctx.companyId, (_tx) => _tx.branchTransfer.update({
+    where: { id },
+    data: { status: 'DISPATCHED', approvedById: userId, approvedAt: new Date(), dispatchedAt: new Date() },
+  }));
 }
 
 /**
@@ -1202,13 +1210,23 @@ export async function receiveTransfer(id: string, ctx: TenantContext, userId: st
 }
 
 export async function cancelTransfer(id: string, ctx: TenantContext, userId: string) {
-  const t = await tenantQuery(ctx.companyId, (_tx) => _tx.branchTransfer.findUnique({ where: { id } }));
+  const t = await tenantQuery(ctx.companyId, (_tx) => _tx.branchTransfer.findUnique({ where: { id }, include: { items: true } }));
   if (!t || t.companyId !== ctx.companyId) throw new AppError('Transfer not found', 404);
   await assertBranchAccessible(t.fromBranchId, ctx, 'Source branch');
   if (!['DRAFT', 'PENDING_APPROVAL'].includes(t.status)) {
     throw new AppError('Only DRAFT or PENDING_APPROVAL transfers can be cancelled', 400);
   }
-  return tenantQuery(ctx.companyId, (_tx) => _tx.branchTransfer.update({ where: { id }, data: { status: 'CANCELLED' } }));
+  return tenantTransaction(ctx.companyId, async (tx) => {
+    // Give the reservation back. Safe as a blind updateMany: a DRAFT/PENDING_APPROVAL transfer's
+    // tags can only be TRANSFERRED because createTransfer put them there — receiveTransfer (the
+    // only other writer of this status) requires the transfer itself to be DISPATCHED or
+    // PARTIALLY_RECEIVED first, which this one isn't.
+    await tx.jewelryTag.updateMany({
+      where: { id: { in: t.items.map((i) => i.tagId) }, companyId: ctx.companyId, status: 'TRANSFERRED' },
+      data: { status: 'IN_STOCK' },
+    });
+    return tx.branchTransfer.update({ where: { id }, data: { status: 'CANCELLED' } });
+  });
 }
 
 // ─── Stock Audits (E3) ──────────────────────────────────────────────────────

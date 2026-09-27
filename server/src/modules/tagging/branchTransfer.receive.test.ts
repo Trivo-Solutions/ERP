@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { platformPrisma as prisma } from '../../config/database';
 import {
-  createTag, createTransfer, submitTransfer, approveTransfer, receiveTransfer, listTransfers,
+  createTag, createTransfer, submitTransfer, approveTransfer, receiveTransfer, cancelTransfer, listTransfers,
 } from './tagging.service';
 import { createTestTenant, cleanupTestTenant, addBranch, TestTenant } from '../../test/fixtures';
 
@@ -106,5 +106,48 @@ describe('branch transfer — receive only verified items', () => {
     expect(row.status).toBe('PARTIALLY_RECEIVED');
     expect(row.items.filter((i) => i.receivedAt)).toHaveLength(1);
     expect(res.transfers.every((x) => ['DISPATCHED', 'PARTIALLY_RECEIVED'].includes(x.status))).toBe(true);
+  });
+
+  // A tag must stop being sellable the moment a transfer is *requested*, not just once it's
+  // approved — otherwise it sits IN_STOCK and biddable at the counter through the whole
+  // DRAFT/PENDING_APPROVAL window while a transfer for it is already underway.
+  it('reserves tags (flips to TRANSFERRED) as soon as the transfer is created, before any approval', async () => {
+    const tag = await makeTag('Reserve Ring');
+    const tr = await createTransfer({ fromBranchId: tenant.branch.id, toBranchId, tagIds: [tag.id] }, tenant.ctx, tenant.user.id);
+    expect((await tagRow(tag.id)).status).toBe('TRANSFERRED');
+    expect(tr.status).toBe('DRAFT');
+
+    await submitTransfer(tr.id, tenant.ctx, tenant.user.id);
+    expect((await tagRow(tag.id)).status).toBe('TRANSFERRED');
+
+    await approveTransfer(tr.id, tenant.ctx, tenant.user.id);
+    expect((await tagRow(tag.id)).status).toBe('TRANSFERRED');
+  });
+
+  it('rejects creating a transfer for a tag that is no longer IN_STOCK (race with a concurrent sale)', async () => {
+    const tag = await makeTag('Raced Ring');
+    // Simulate a concurrent sale winning the race: the tag flips away from IN_STOCK between the
+    // caller's own lookup and the point createTransfer's guarded flip actually runs.
+    await prisma.jewelryTag.update({ where: { id: tag.id }, data: { status: 'SOLD' } });
+
+    await expect(createTransfer(
+      { fromBranchId: tenant.branch.id, toBranchId, tagIds: [tag.id] }, tenant.ctx, tenant.user.id,
+    )).rejects.toThrow('not available at source branch');
+    expect((await tagRow(tag.id)).status).toBe('SOLD');
+  });
+
+  it('cancelling a DRAFT or PENDING_APPROVAL transfer releases its reserved tags back to IN_STOCK', async () => {
+    const draftTag = await makeTag('Cancel Draft Ring');
+    const draft = await createTransfer({ fromBranchId: tenant.branch.id, toBranchId, tagIds: [draftTag.id] }, tenant.ctx, tenant.user.id);
+    expect((await tagRow(draftTag.id)).status).toBe('TRANSFERRED');
+    const cancelledDraft = await cancelTransfer(draft.id, tenant.ctx, tenant.user.id);
+    expect(cancelledDraft.status).toBe('CANCELLED');
+    expect((await tagRow(draftTag.id)).status).toBe('IN_STOCK');
+
+    const pendingTag = await makeTag('Cancel Pending Ring');
+    const pending = await createTransfer({ fromBranchId: tenant.branch.id, toBranchId, tagIds: [pendingTag.id] }, tenant.ctx, tenant.user.id);
+    await submitTransfer(pending.id, tenant.ctx, tenant.user.id);
+    await cancelTransfer(pending.id, tenant.ctx, tenant.user.id);
+    expect((await tagRow(pendingTag.id)).status).toBe('IN_STOCK');
   });
 });
