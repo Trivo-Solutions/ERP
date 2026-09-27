@@ -489,6 +489,9 @@ export function NewTagPage() {
 
   const totalMetalWt  = watchedMaterials.filter((m) => m.materialType === 'METAL').reduce((s, m) => s + Number(m.weight || 0), 0);
   const totalStoneWt  = watchedMaterials.filter((m) => m.materialType !== 'METAL').reduce((s, m) => s + Number(m.weight || 0), 0);
+  // Gross = net (metal) + stones — same convention the server uses everywhere else
+  // (createTagFromGrnItem derives netWeight as grossWeight - stoneWeight).
+  const totalGrossWt = totalMetalWt + totalStoneWt;
   const materialsCostAmt = watchedMaterials.reduce((s, m) => s + Number(m.costAmount || 0), 0);
   const materialsSaleAmt = watchedMaterials.reduce((s, m) => s + Number(m.saleAmount || 0), 0);
 
@@ -737,7 +740,7 @@ export function NewTagPage() {
         name:         derivedName,
         metalType:    data.makeType,
         metalKarat:   data.metalKarat || undefined,
-        grossWeight:  totalMetalWt || Number(data.grossWeight || 0),
+        grossWeight:  totalGrossWt || Number(data.grossWeight || 0),
         netWeight:    totalMetalWt || Number(data.netWeight   || 0),
         stoneWeight:  totalStoneWt || 0,
         huid:         data.huid         || undefined,
@@ -1267,19 +1270,23 @@ export function NewTagPage() {
                       {fields.length > 0 && (
                         <Box sx={{ mt: 2, p: 1.5, bgcolor: 'action.hover', borderRadius: 1 }}>
                           <Grid container spacing={2}>
-                            <Grid item xs={6} sm={4}>
-                              <Typography variant="caption" color="text.secondary">Total Metal Wt</Typography>
+                            <Grid item xs={6} sm={2}>
+                              <Typography variant="caption" color="text.secondary">Total Metal (Net) Wt</Typography>
                               <Typography fontWeight={700} fontFamily="monospace">{totalMetalWt.toFixed(3)} GM</Typography>
                             </Grid>
-                            <Grid item xs={6} sm={4}>
+                            <Grid item xs={6} sm={2}>
                               <Typography variant="caption" color="text.secondary">Total Stone Wt</Typography>
                               <Typography fontWeight={700} fontFamily="monospace">{totalStoneWt.toFixed(3)} CT</Typography>
                             </Grid>
                             <Grid item xs={6} sm={2}>
+                              <Typography variant="caption" color="text.secondary">Gross Wt (Net + Stone)</Typography>
+                              <Typography fontWeight={700} fontFamily="monospace">{totalGrossWt.toFixed(3)} GM</Typography>
+                            </Grid>
+                            <Grid item xs={6} sm={3}>
                               <Typography variant="caption" color="text.secondary">Total Cost</Typography>
                               <Typography fontWeight={700} color="primary.main">{fmtINR(totalCostAmt)}</Typography>
                             </Grid>
-                            <Grid item xs={6} sm={2}>
+                            <Grid item xs={6} sm={3}>
                               <Typography variant="caption" color="text.secondary">Total Sale</Typography>
                               <Typography fontWeight={700} color="secondary.main">{fmtINR(totalSaleAmt)}</Typography>
                             </Grid>
@@ -1353,13 +1360,17 @@ export function NewTagPage() {
 
                       <Box sx={{ mt: 3, p: 1.5, bgcolor: 'action.hover', borderRadius: 1 }}>
                         <Grid container spacing={2}>
-                          <Grid item xs={6} sm={3}>
-                            <Typography variant="caption" color="text.secondary">Total Metal Wt</Typography>
+                          <Grid item xs={6} sm={2}>
+                            <Typography variant="caption" color="text.secondary">Total Metal (Net) Wt</Typography>
                             <Typography fontWeight={700} fontFamily="monospace">{totalMetalWt.toFixed(3)} GM</Typography>
                           </Grid>
-                          <Grid item xs={6} sm={3}>
+                          <Grid item xs={6} sm={2}>
                             <Typography variant="caption" color="text.secondary">Total Stone Wt</Typography>
                             <Typography fontWeight={700} fontFamily="monospace">{totalStoneWt.toFixed(3)} CT</Typography>
+                          </Grid>
+                          <Grid item xs={6} sm={2}>
+                            <Typography variant="caption" color="text.secondary">Gross Wt (Net + Stone)</Typography>
+                            <Typography fontWeight={700} fontFamily="monospace">{totalGrossWt.toFixed(3)} GM</Typography>
                           </Grid>
                           <Grid item xs={6} sm={3}>
                             <Typography variant="caption" color="text.secondary">Total Cost</Typography>
