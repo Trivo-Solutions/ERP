@@ -236,7 +236,9 @@ export function TagsPage() {
       {/* Table — same DataTable every Masters screen uses: drag column headers to reorder,
           right-click a header to hide/show/auto-fit/reset, drag the right edge to resize, and
           the small funnel icon on hover opens an Excel-style per-column value filter (separate
-          from — and stacked on top of — the server-side Status/Branch/date filters above). */}
+          from — and stacked on top of — the server-side Status/Branch/date filters above).
+          Sortable + paged (buttons in the bottom bar) since a company's tag count grows well
+          past what's comfortable to scroll through unpaginated. */}
       <DataTable
         tableId="tagging-tags"
         rows={tags}
@@ -244,6 +246,10 @@ export function TagsPage() {
         getRowId={(t: any) => t.id}
         onRowClick={(t: any) => setSelectedTagId(t.id)}
         emptyLabel={hasFilter ? 'No tags match the current filters.' : 'No tags yet — click "New Tag" to start.'}
+        sortable
+        pageSizeOptions={[25, 50, 100, 250]}
+        maxHeight="70vh"
+        csvFileName="tags-inventory"
         columns={[
           {
             key: 'tagNumber', label: 'Tag Number', width: 150,
@@ -259,16 +265,77 @@ export function TagsPage() {
             render: (t: any) => <Typography fontSize={12}>{t.branch?.name}</Typography>,
           },
           {
+            key: 'category', label: 'Category', width: 130,
+            filterValue: (t: any) => t.category?.name ?? '',
+            render: (t: any) => <Typography fontSize={12}>{t.category?.name || '—'}</Typography>,
+          },
+          {
+            key: 'subCategory', label: 'Sub Category', width: 130,
+            filterValue: (t: any) => t.subCategory?.name ?? '',
+            render: (t: any) => <Typography fontSize={12}>{t.subCategory?.name || '—'}</Typography>,
+          },
+          {
+            key: 'collection', label: 'Collection', width: 130, defaultHidden: true,
+            filterValue: (t: any) => t.collection?.name ?? '',
+            render: (t: any) => <Typography fontSize={12}>{t.collection?.name || '—'}</Typography>,
+          },
+          {
+            key: 'stockType', label: 'Stock Type', width: 120, defaultHidden: true,
+            filterValue: (t: any) => t.stockType?.name ?? '',
+            render: (t: any) => <Typography fontSize={12}>{t.stockType?.name || '—'}</Typography>,
+          },
+          {
+            key: 'manufacturer', label: 'Manufacturer', width: 150,
+            filterValue: (t: any) => t.manufacturer?.name ?? '',
+            render: (t: any) => <Typography fontSize={12}>{t.manufacturer?.name || '—'}</Typography>,
+          },
+          {
             key: 'metal', label: 'Metal / Karat', width: 130,
             filterValue: (t: any) => `${t.metalType} ${t.metalKarat ?? ''}`.trim(),
             render: (t: any) => <Chip label={`${t.metalType} ${t.metalKarat ?? ''}`} size="small" />,
           },
           {
+            key: 'settingType', label: 'Setting', width: 110, defaultHidden: true,
+            filterValue: (t: any) => t.settingType ?? '',
+            render: (t: any) => <Typography fontSize={12}>{t.settingType || '—'}</Typography>,
+          },
+          {
             key: 'grossWeight', label: 'Gross Wt', align: 'right', width: 100,
+            sortValue: (t: any) => Number(t.grossWeight),
             render: (t: any) => <Typography sx={{ fontFamily: 'monospace', fontSize: 12 }}>{Number(t.grossWeight).toFixed(3)} g</Typography>,
           },
           {
+            key: 'netWeight', label: 'Net Wt', align: 'right', width: 100, defaultHidden: true,
+            sortValue: (t: any) => Number(t.netWeight),
+            render: (t: any) => <Typography sx={{ fontFamily: 'monospace', fontSize: 12 }}>{Number(t.netWeight).toFixed(3)} g</Typography>,
+          },
+          {
+            key: 'stoneWeight', label: 'Stone Wt', align: 'right', width: 100, defaultHidden: true,
+            sortValue: (t: any) => Number(t.stoneWeight),
+            render: (t: any) => <Typography sx={{ fontFamily: 'monospace', fontSize: 12 }}>{Number(t.stoneWeight).toFixed(3)} ct</Typography>,
+          },
+          {
+            key: 'mcRate', label: 'MC Rate', align: 'right', width: 100, defaultHidden: true,
+            filterValue: (t: any) => t.saleMcRate != null ? Number(t.saleMcRate).toFixed(2) : '',
+            sortValue: (t: any) => Number(t.saleMcRate ?? 0),
+            render: (t: any) => <Typography sx={{ fontFamily: 'monospace', fontSize: 12 }}>{t.saleMcRate != null ? Number(t.saleMcRate).toFixed(2) : '—'}</Typography>,
+          },
+          {
+            key: 'vaPercent', label: 'VA %', align: 'right', width: 90, defaultHidden: true,
+            filterValue: (t: any) => t.saleVaPercent != null ? Number(t.saleVaPercent).toFixed(2) : '',
+            sortValue: (t: any) => Number(t.saleVaPercent ?? 0),
+            render: (t: any) => <Typography sx={{ fontFamily: 'monospace', fontSize: 12 }}>{t.saleVaPercent != null ? `${Number(t.saleVaPercent).toFixed(2)}%` : '—'}</Typography>,
+          },
+          {
+            key: 'costPrice', label: 'Cost Price', align: 'right', width: 130, defaultHidden: true,
+            sortValue: (t: any) => Number(t.costPrice),
+            csvValue: (t: any) => Number(t.costPrice),
+            render: (t: any) => <Typography sx={{ fontFamily: 'monospace', fontSize: 12 }}>{fmt(Number(t.costPrice))}</Typography>,
+          },
+          {
             key: 'sellingPrice', label: 'Selling Price', align: 'right', width: 130,
+            sortValue: (t: any) => Number(t.sellingPrice),
+            csvValue: (t: any) => Number(t.sellingPrice),
             render: (t: any) => <Typography sx={{ fontFamily: 'monospace', fontWeight: 700, fontSize: 12 }}>{fmt(Number(t.sellingPrice))}</Typography>,
           },
           {
@@ -282,6 +349,7 @@ export function TagsPage() {
           {
             key: 'createdAt', label: 'Tagged On', width: 100,
             filterValue: (t: any) => new Date(t.createdAt).toLocaleDateString('en-IN'),
+            sortValue: (t: any) => new Date(t.createdAt).getTime(),
             render: (t: any) => <Typography fontSize={11}>{new Date(t.createdAt).toLocaleDateString('en-IN')}</Typography>,
           },
           {
