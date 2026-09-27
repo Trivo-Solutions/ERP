@@ -173,6 +173,10 @@ export function TagsPage() {
       branchId: branchFilter || undefined,
       dateFrom: dateFrom     || undefined,
       dateTo:   dateTo       || undefined,
+      // DataTable below does its own client-side filtering/sorting over the full row set (no
+      // pagination UI of its own — same convention as Clients/Sales Register/etc.), so this must
+      // fetch every matching tag, not just the service's page-1-of-30 default.
+      limit: 1_000_000,
     }),
   });
   const tags: any[] = (data as any)?.tags ?? [];
