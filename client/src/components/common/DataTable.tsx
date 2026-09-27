@@ -2,9 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Box, Card, Table, TableHead, TableBody, TableRow, TableCell, Typography,
   IconButton, Popover, TextField, Checkbox, FormControlLabel, Menu, MenuItem,
-  Divider, Button, Stack,
+  Divider, Button, Stack, TablePagination,
 } from '@mui/material';
-import { FilterList, FilterAltOff } from '@mui/icons-material';
+import { FilterList, FilterAltOff, Download } from '@mui/icons-material';
+import { exportToCsv } from '../../utils/exportToCsv';
 
 export interface DataTableColumn {
   key: string;
@@ -19,6 +20,16 @@ export interface DataTableColumn {
   hideable?: boolean;
   // Set false to omit the filter icon for a column where filtering doesn't make sense (e.g. Actions).
   filterable?: boolean;
+  // Start hidden: the column is available in the right-click column menu but
+  // not shown until the user turns it on. Once a user has a saved layout, theirs wins; a column added later that is
+  // defaultHidden stays hidden for them until they choose it.
+  defaultHidden?: boolean;
+  // Value used to sort this column when the table is `sortable`. Defaults to the cell's text (so a
+  // number column that shows a formatted string should supply this to sort numerically).
+  sortValue?: (row: any) => string | number;
+  // What CSV export writes for this column (defaults to the cell text) — e.g. a plain number for a
+  // money column that displays as "₹1,20,000.00", so Excel can sum it.
+  csvValue?: (row: any) => string | number;
 }
 
 export interface DataTableProps {
@@ -38,7 +49,28 @@ export interface DataTableProps {
   scrollable?: boolean;
   // Static row(s) appended after the data rows — e.g. a totals/summary row (Trial Balance, P&L).
   // Not filtered, sorted, or reordered along with data rows. Must be valid <TableRow> markup.
-  footer?: React.ReactNode;
+  // May be a function of the rows that survive the column filters (every page, not just the one on
+  // screen) so a totals row can follow the filters. It also gets the columns currently on screen, in
+  // their current order, so its cells can line up after the user hides or drags columns.
+  footer?: React.ReactNode | ((filteredRows: any[], visibleColumns: DataTableColumn[]) => React.ReactNode);
+  // Shows an "Export CSV" button in the bottom bar (file name without extension). Writes the columns
+  // currently visible, in their current order, for every row that passes the filters and sort.
+  csvFileName?: string;
+  // Put the export button somewhere else (e.g. a page toolbar): the table stores its export
+  // function here on every render — the page calls `ref.current?.()` from its own button — and
+  // the bottom-bar button is not shown.
+  exportRef?: React.MutableRefObject<(() => void) | null>;
+  // Called with every column key in their current order — on mount (after the saved layout is
+  // applied) and each time the user drags a column. Lets a page whose meaning depends on column
+  // order (e.g. a summary grouped by its leftmost columns) follow the drag.
+  onColumnOrderChange?: (order: string[]) => void;
+  // Click a header label to sort by it (click again to reverse, a third time to clear).
+  sortable?: boolean;
+  // Turns paging on: the first value is the default page size, the rest fill the size picker. Off
+  // by default — every existing table still renders all its rows.
+  pageSizeOptions?: number[];
+  // Caps the table's height and scrolls inside it with the header pinned — for long tables.
+  maxHeight?: string | number;
 }
 
 const STORAGE_PREFIX = 'datatable:';
@@ -66,6 +98,8 @@ function loadColumnState(tableId: string, columns: DataTableColumn[]) {
   const order = storedOrder.filter((k) => validKeys.includes(k));
   const missing = validKeys.filter((k) => !order.includes(k));
   const hidden = new Set(storedHidden.filter((k) => validKeys.includes(k)));
+  // Columns the saved layout has never seen (all of them, on first visit) start hidden if they are defaultHidden.
+  columns.forEach((c) => { if (c.defaultHidden && missing.includes(c.key)) hidden.add(c.key); });
   const widths: Record<string, number> = {};
   validKeys.forEach((k) => { if (typeof storedWidths[k] === 'number') widths[k] = storedWidths[k]; });
   return { order: [...order, ...missing], hidden, widths };
@@ -73,7 +107,7 @@ function loadColumnState(tableId: string, columns: DataTableColumn[]) {
 
 export function DataTable({
   tableId, columns, rows, isLoading, getRowId, selectedId, selectedIds, onRowClick,
-  emptyLabel, scrollable = true, footer,
+  emptyLabel, scrollable = true, footer, csvFileName, exportRef, onColumnOrderChange, sortable, pageSizeOptions, maxHeight,
 }: DataTableProps) {
   const initial = useMemo(() => loadColumnState(tableId, columns), [tableId]);
   const [columnOrder, setColumnOrder] = useState<string[]>(initial.order);
@@ -96,6 +130,10 @@ export function DataTable({
       // localStorage unavailable (private browsing, quota) — layout just won't persist.
     }
   }, [tableId, columnOrder, hiddenColumns, columnWidths]);
+
+  const onOrderRef = useRef(onColumnOrderChange);
+  onOrderRef.current = onColumnOrderChange;
+  useEffect(() => { onOrderRef.current?.(columnOrder); }, [columnOrder]);
 
   // If the component unmounts mid-resize (rare — navigating away with the mouse still down),
   // don't leave the document-level listeners attached.
@@ -136,6 +174,34 @@ export function DataTable({
     return f.has(cellValue(c, row));
   }));
 
+  // ── Optional sort + paging (both off unless the caller opts in) ──────────
+  const [sort, setSort] = useState<{ key: string; dir: 'asc' | 'desc' } | null>(null);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(pageSizeOptions?.[0] ?? 0);
+  function clickSort(key: string) {
+    setSort((s) => (s?.key !== key ? { key, dir: 'asc' } : s.dir === 'asc' ? { key, dir: 'desc' } : null));
+    setPage(0);
+  }
+  const sortedRows = useMemo(() => {
+    const col = sortable && sort ? byKey.get(sort.key) : undefined;
+    if (!col || !sort) return filteredRows;
+    const val = (r: any) => (col.sortValue ? col.sortValue(r) : cellValue(col, r).toLowerCase());
+    const dir = sort.dir === 'asc' ? 1 : -1;
+    return [...filteredRows].sort((a, b) => { const x = val(a); const y = val(b); return (x < y ? -1 : x > y ? 1 : 0) * dir; });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredRows.length, rows, columns, filters, sort, sortable]);
+  function exportCsv() {
+    if (!csvFileName) return;
+    exportToCsv(csvFileName, visibleColumns.map((c) => ({
+      header: c.label, value: (r: any) => (c.csvValue ? c.csvValue(r) : cellValue(c, r)),
+    })), sortedRows);
+  }
+  if (exportRef) exportRef.current = exportCsv;
+  // A filter can shrink the result below the current page — clamp rather than show an empty page.
+  const lastPage = pageSize ? Math.max(0, Math.ceil(sortedRows.length / pageSize) - 1) : 0;
+  const safePage = Math.min(page, lastPage);
+  const shownRows = pageSize ? sortedRows.slice(safePage * pageSize, (safePage + 1) * pageSize) : sortedRows;
+
   // ── Column reorder (native HTML5 drag-and-drop) ──────────────────────────
   // The dragged key is read from the drag event's own `dataTransfer` payload, not from `dragKey`
   // component state — a `drop` handler's closure is only as fresh as the last completed render,
@@ -168,7 +234,7 @@ export function DataTable({
   }
   function resetColumns() {
     setColumnOrder(columns.map((c) => c.key));
-    setHiddenColumns(new Set());
+    setHiddenColumns(new Set(columns.filter((c) => c.defaultHidden).map((c) => c.key)));
     setColumnWidths({});
     setContextMenu(null);
   }
@@ -282,8 +348,8 @@ export function DataTable({
 
   return (
     <Card variant="outlined">
-      <Box sx={{ overflowX: scrollable ? 'auto' : 'hidden' }}>
-        <Table ref={tableRef} size="small" sx={{ tableLayout: 'fixed', width: scrollable ? undefined : '100%' }}>
+      <Box sx={{ overflowX: scrollable ? 'auto' : 'hidden', ...(maxHeight != null && { overflowY: 'auto', maxHeight }) }}>
+        <Table ref={tableRef} size="small" stickyHeader={maxHeight != null} sx={{ tableLayout: 'fixed', width: scrollable ? undefined : '100%' }}>
           <TableHead>
             <TableRow>
               {visibleColumns.map((c, i) => {
@@ -298,7 +364,7 @@ export function DataTable({
                     onDragLeave={() => setDragOverKey((k) => (k === c.key ? null : k))}
                     onDrop={(e) => handleDrop(e, c.key)}
                     sx={(theme) => ({
-                      position: 'relative',
+                      position: maxHeight != null ? 'sticky' : 'relative', // sticky also anchors the resize handle
                       width: cellWidth(c),
                       borderRight: i < visibleColumns.length - 1 ? 1 : 0,
                       borderColor: 'divider',
@@ -317,8 +383,10 @@ export function DataTable({
                       onDragEnd={() => { setDragKey(null); setDragOverKey(null); }}
                       sx={{ display: 'flex', alignItems: 'center', gap: 0.25, cursor: 'grab', userSelect: 'none', pr: 1, overflow: 'hidden' }}
                     >
-                      <Typography component="span" noWrap sx={{ fontWeight: 'inherit', fontSize: 'inherit', textTransform: 'inherit', letterSpacing: 'inherit', flex: 1 }}>
-                        {c.label}
+                      <Typography component="span" noWrap
+                        onClick={sortable ? () => clickSort(c.key) : undefined}
+                        sx={{ fontWeight: 'inherit', fontSize: 'inherit', textTransform: 'inherit', letterSpacing: 'inherit', flex: 1 }}>
+                        {c.label}{sortable && sort?.key === c.key ? (sort.dir === 'asc' ? ' ▲' : ' ▼') : ''}
                       </Typography>
                       {c.filterable !== false && (
                         <IconButton
@@ -361,7 +429,7 @@ export function DataTable({
           <TableBody>
             {isLoading ? (
               <TableRow><TableCell colSpan={visibleColumns.length} align="center" sx={{ py: 3 }}>Loading...</TableCell></TableRow>
-            ) : filteredRows.map((row) => (
+            ) : shownRows.map((row) => (
               <TableRow key={getRowId(row)} hover
                 selected={selectedIds ? selectedIds.has(getRowId(row)) : selectedId === getRowId(row)}
                 sx={{ cursor: onRowClick ? 'pointer' : 'default' }}
@@ -377,12 +445,24 @@ export function DataTable({
             {!isLoading && filteredRows.length === 0 && (
               <TableRow><TableCell colSpan={visibleColumns.length} align="center" sx={{ py: 3 }}>{emptyLabel}</TableCell></TableRow>
             )}
-            {footer}
+            {typeof footer === 'function' ? footer(filteredRows, visibleColumns) : footer}
           </TableBody>
         </Table>
       </Box>
-      <Box sx={{ px: 1.5, py: 0.75, borderTop: 1, borderColor: 'divider' }}>
-        <Typography variant="caption" color="text.secondary">{filteredRows.length} of {rows.length} entries</Typography>
+      <Box sx={{ px: 1.5, py: pageSize ? 0 : 0.75, borderTop: 1, borderColor: 'divider', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+        <Stack direction="row" spacing={1.5} alignItems="center">
+          <Typography variant="caption" color="text.secondary">{filteredRows.length} of {rows.length} entries</Typography>
+          {csvFileName && !exportRef && (
+            <Button size="small" startIcon={<Download sx={{ fontSize: 14 }} />} disabled={sortedRows.length === 0} onClick={exportCsv}>
+              Export CSV
+            </Button>
+          )}
+        </Stack>
+        {pageSize > 0 && (
+          <TablePagination component="div" count={sortedRows.length} page={safePage} onPageChange={(_, p) => setPage(p)}
+            rowsPerPage={pageSize} rowsPerPageOptions={pageSizeOptions}
+            onRowsPerPageChange={(e) => { setPageSize(Number(e.target.value)); setPage(0); }} />
+        )}
       </Box>
 
       {/* Right-click column menu: show/hide any column, auto-fit, reset layout */}
@@ -391,6 +471,7 @@ export function DataTable({
         onClose={() => setContextMenu(null)}
         anchorReference="anchorPosition"
         anchorPosition={contextMenu ? { top: contextMenu.y, left: contextMenu.x } : undefined}
+        slotProps={{ paper: { sx: { maxHeight: '70vh' } } }}
       >
         {columns.map((c) => (
           <MenuItem key={c.key} dense onClick={() => c.hideable !== false && toggleHidden(c.key)} disabled={c.hideable === false}>

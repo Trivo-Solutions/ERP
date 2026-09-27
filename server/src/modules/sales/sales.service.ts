@@ -193,6 +193,28 @@ export async function getTaxContext(ctx: TenantContext, clientId?: string) {
 // by hand gets some room, but a bigger movement must go through Discount so it is visible as one.
 export const MAX_ROUND_OFF = 10;
 
+// One line of an invoice as the caller sends it (createInvoice and amendInvoice share this).
+type InvoiceItemInput = { productCode: string; description: string; huid?: string; karat?: string;
+  quantity: number; grossWeight: number; netGoldWeight: number; stoneWeight?: number;
+  rateType: string; goldRate?: number; /* omit on a PER_GRAM line to price off today's
+    MetalRate for `karat` as of invoiceDate (C2) — an explicit value always wins (clerk
+    override). FIXED lines must always supply it: it IS the decided price. */
+  makingCharge?: number; /* omit on a PER_GRAM line to use the tagged piece's own settled
+    saleMcRate (whatever was decided at tagging time — see JewelryTag's schema comment), or —
+    only when untagged or the tag predates that column — the MakingCharge master's rate for the
+    line's karat + category (+ tag's makeType, if tagged) (C3). An explicit value always wins.
+    Most-specific master row wins (karat+category beats either alone). */
+  stoneValue?: number;
+  wastagePercent?: number; /* "VA%" — marks up makingCharge, PER_GRAM lines only (see below).
+    Same resolution order as makingCharge: explicit > tag's own saleVaPercent > master's
+    saleWastagePercent (C3). */
+  hsnCode?: string; /* HSN/GST rate lookup key — defaults to DEFAULT_HSN_CODE (jewellery, 3%) */
+  categoryId?: string; /* ProductCategory — tagged lines default to the tag's own category */
+  /* karat (above, near goldRate) doubles as the MakingCharge master's other match key —
+    tagged lines default it to the tag's own metalKarat when omitted, same as categoryId. */
+  tagId?: string; /* optional link to real inventory — see JewelryTag */
+  id?: string; /* amendInvoice only: the existing InvoiceItem this line replaces. Ignored by createInvoice. */ };
+
 export async function createInvoice(data: {
   clientId: string; invoiceDate: Date; dueDate?: Date; invoiceType: string;
   currency?: string; exchangeRate?: number; discountAmount?: number; otherCharges?: number; notes?: string;
@@ -207,25 +229,7 @@ export async function createInvoice(data: {
   // cash, part UPI) in one screen. Each split is applied via the same applyPayment() the
   // standalone recordPayment endpoint uses — see the note on that function.
   payments?: PaymentInput[];
-  items: Array<{ productCode: string; description: string; huid?: string; karat?: string;
-    quantity: number; grossWeight: number; netGoldWeight: number; stoneWeight?: number;
-    rateType: string; goldRate?: number; /* omit on a PER_GRAM line to price off today's
-      MetalRate for `karat` as of invoiceDate (C2) — an explicit value always wins (clerk
-      override). FIXED lines must always supply it: it IS the decided price. */
-    makingCharge?: number; /* omit on a PER_GRAM line to use the tagged piece's own settled
-      saleMcRate (whatever was decided at tagging time — see JewelryTag's schema comment), or —
-      only when untagged or the tag predates that column — the MakingCharge master's rate for the
-      line's karat + category (+ tag's makeType, if tagged) (C3). An explicit value always wins.
-      Most-specific master row wins (karat+category beats either alone). */
-    stoneValue?: number;
-    wastagePercent?: number; /* "VA%" — marks up makingCharge, PER_GRAM lines only (see below).
-      Same resolution order as makingCharge: explicit > tag's own saleVaPercent > master's
-      saleWastagePercent (C3). */
-    hsnCode?: string; /* HSN/GST rate lookup key — defaults to DEFAULT_HSN_CODE (jewellery, 3%) */
-    categoryId?: string; /* ProductCategory — tagged lines default to the tag's own category */
-    /* karat (above, near goldRate) doubles as the MakingCharge master's other match key —
-      tagged lines default it to the tag's own metalKarat when omitted, same as categoryId. */
-    tagId?: string; /* optional link to real inventory — see JewelryTag */ }>;
+  items: InvoiceItemInput[];
   branchId: string; /* required, direct — never inferred from clientId or from line items
     (see the multi-tenant blueprint's §7 finding). Validated below against the caller's own
     company AND branch-access grant, same as createTag(). */
@@ -234,15 +238,8 @@ export async function createInvoice(data: {
   // before any pricing/tag work, so a request for an unauthorized branch fails fast.
   await assertBranchAccessible(data.branchId, ctx);
 
-  // Layer 2: a line's categoryId is a company-owned master id supplied by the client and stored on
-  // the InvoiceItem — a Company-B category must 404, never attach to this invoice.
-  await assertAllOwned('productCategory', data.items.map((i) => i.categoryId), ctx.companyId, 'Category');
-
-  // Tag-aware lines are optional: tagged (real inventory) and free-text lines coexist.
-  const tagIds = data.items.map((i) => i.tagId).filter(Boolean) as string[];
-  if (new Set(tagIds).size !== tagIds.length) {
-    throw new AppError('The same tag cannot appear on more than one line of an invoice', 400);
-  }
+  const { currency, tagIds, items, subtotal, discount, otherCharges, taxableAmount, taxAmount, roundOffExact, totalAmount } =
+    await priceInvoice(data, ctx);
 
   // Estimates being billed: each must exist in this company, still be awaiting billing, and be for a piece
   // that is actually a line on this invoice (a quote for ring A cannot be billed against ring B).
@@ -258,181 +255,6 @@ export async function createInvoice(data: {
       if (!tagIds.includes(e.tagId)) throw new AppError(`Estimate ${e.estimateNumber} is for a piece that is not on this invoice`, 400);
     }
   }
-
-  // A tagged line's category defaults to the tag's own (ProductCategory, already on JewelryTag) —
-  // read-only enrichment, not an authorization check; the transaction below still validates each
-  // tag's existence/availability independently. makeType rides along for the C3 making-charge
-  // lookup below (a free-text line has no makeType to match on).
-  //
-  // Layer 2, not RLS: companyId is included in this `where` explicitly. A Company-B tagId
-  // supplied here simply won't resolve (PostgreSQL FK checks alone would NOT catch this later —
-  // referential-integrity checks bypass RLS — so this explicit filter, not the eventual FK
-  // insert, is what prevents a cross-company tag from ever being priced/linked onto this
-  // invoice). The existing "missing tag" validation a few lines below (tagIds.length vs
-  // resolved count) does double duty as the tenant check for free — a Company-B id simply comes
-  // back as "not found," same error as a nonexistent id.
-  const tagInfoById = tagIds.length > 0
-    ? new Map(
-        (await tenantQuery(ctx.companyId, (tx) => tx.jewelryTag.findMany({
-          where: { id: { in: tagIds }, companyId: ctx.companyId },
-          // saleMcRate/saleVaPercent: whatever was actually decided for this piece at tagging time
-          // (see JewelryTag's schema comment) — preferred below over a fresh MakingCharge master
-          // lookup, so a later master-rate change never silently re-prices an already-tagged piece.
-          select: { id: true, categoryId: true, makeType: true, metalKarat: true, saleMcRate: true, saleVaPercent: true },
-        }))).map((t) => [t.id, t])
-      )
-    : new Map<string, { categoryId: string | null; makeType: string; metalKarat: string | null; saleMcRate: any; saleVaPercent: any }>();
-
-  // Per-line GST (B1): each line's HSN determines its own rate. Resolved once, up front, and the
-  // rate is copied onto the row (like costPrice on JewelryTag) — a later change to the HSN master
-  // must not silently reprice a past invoice. DEFAULT_HSN_CODE is always fetched too, regardless
-  // of what lines request, since otherCharges (below) is taxed at that rate independent of lines.
-  const hsnCodesRequested = Array.from(new Set([
-    ...data.items.map((i) => i.hsnCode ?? DEFAULT_HSN_CODE), DEFAULT_HSN_CODE,
-  ]));
-  const hsnRows = await prisma.hsnCode.findMany({
-    where: { code: { in: hsnCodesRequested }, isActive: true },
-  });
-  const hsnByCode = new Map(hsnRows.map((h) => [h.code, h]));
-  const missingHsn = hsnCodesRequested.filter((c) => !hsnByCode.has(c));
-  if (missingHsn.length > 0) {
-    throw new AppError(`Unknown or inactive HSN code(s): ${missingHsn.join(', ')}`, 400);
-  }
-
-  // Resolved here (not after the items map, as before) — the market-rate lookup below needs it
-  // too, and it must still be the one value the tax-rate calc and invoice row write both use.
-  const currency = data.currency ?? 'INR';
-
-  // C2: a PER_GRAM line that omits goldRate prices off today's MetalRate for its karat, as of
-  // invoiceDate — not a hand-typed number. Resolved once per distinct karat, up front, same
-  // pattern as the HSN batch above.
-  const karatsNeedingRate = Array.from(new Set(
-    data.items
-      .filter((i) => i.rateType !== 'FIXED' && (i.goldRate === undefined || i.goldRate === null) && i.karat)
-      .map((i) => i.karat!)
-  ));
-  const rateByKarat = new Map<string, number>();
-  for (const karat of karatsNeedingRate) {
-    const rate = await resolveMetalRate(ctx.companyId, karat, data.invoiceDate, currency);
-    if (!rate) throw new AppError(`No metal rate found for ${karat} on or before ${data.invoiceDate.toDateString()}`, 404);
-    rateByKarat.set(karat, Number(rate.ratePerGram));
-  }
-
-  // C3 (extended): a PER_GRAM line missing an explicit makingCharge/wastagePercent pulls the
-  // MakingCharge master's rate for its karat + category (+ tag's makeType, if tagged) — e.g. 22K
-  // gold necklaces can carry a different VA% than 18K bangles. Loaded once, unfiltered: this is a
-  // small admin-maintained rate card (not a transactional table), and a wildcard row (karat/
-  // category left blank on the master row, meaning "any") has no fixed value to batch-filter by,
-  // so trying to scope the query would risk silently excluding the very wildcard fallback rows
-  // this lookup depends on.
-  const makingChargeRows = await tenantQuery(ctx.companyId, (_tx) => _tx.makingCharge.findMany({
-    where: { companyId: ctx.companyId, isActive: true },
-    orderBy: { effectiveDate: 'desc' },
-  }));
-  // Most-specific-match-wins across three independent dimensions: a row only matches when every
-  // field IT has pinned (non-null) agrees with the line — a null field on the row means "any" for
-  // that dimension. Among matches, the row pinning the most dimensions wins (e.g. karat+category
-  // beats category-only), and effectiveDate desc (the query's own order) breaks ties.
-  function findMakingCharge(
-    categoryId: string | null | undefined,
-    karat: string | null | undefined,
-    makeType: string | null | undefined,
-  ) {
-    const eligible = makingChargeRows.filter((m) =>
-      (m.categoryId == null || m.categoryId === categoryId) &&
-      (m.karat == null || m.karat === karat) &&
-      (m.makeType == null || m.makeType === makeType)
-    );
-    if (eligible.length === 0) return undefined;
-    const specificity = (m: typeof eligible[number]) =>
-      (m.categoryId != null ? 1 : 0) + (m.karat != null ? 1 : 0) + (m.makeType != null ? 1 : 0);
-    const bestScore = Math.max(...eligible.map(specificity));
-    return eligible.find((m) => specificity(m) === bestScore);
-  }
-
-  const items = data.items.map((i) => {
-    const { hsnCode, categoryId, ...rest } = i;
-    // rateType 'FIXED': goldRate IS the decided flat unit price (e.g. a tag's own JewelryTag.sellingPrice)
-    // — used as-is, no metal-value math. Anything else ('PER_GRAM', the default): goldRate is ₹/gram,
-    // either explicit or resolved above from today's MetalRate (C2).
-    if (i.rateType === 'FIXED' && (i.goldRate === undefined || i.goldRate === null)) {
-      throw new AppError('FIXED-rate lines require an explicit goldRate', 400);
-    }
-    const goldRate = i.goldRate ?? (i.karat ? rateByKarat.get(i.karat) : undefined);
-    if (goldRate === undefined) {
-      throw new AppError('goldRate or karat (to resolve today\'s rate) is required', 400);
-    }
-    const tagInfo = i.tagId ? tagInfoById.get(i.tagId) : undefined;
-    const resolvedCategoryId = categoryId ?? tagInfo?.categoryId ?? null;
-    const resolvedKarat = i.karat ?? tagInfo?.metalKarat ?? null;
-
-    // VA% marks up the making charge (same formula NewTagPage.tsx already uses for the
-    // MakingCharge master's wastagePercent — reused, not reinvented). FIXED-rate lines ignore
-    // both, same as they already ignore netGoldWeight/goldRate math: goldRate is the whole price.
-    //
-    // Resolution order per field: an explicit request value always wins; otherwise a tagged line
-    // prefers the tag's OWN settled saleMcRate/saleVaPercent (whatever was actually decided when
-    // the piece was priced — see JewelryTag's schema comment) over a fresh master lookup, so a
-    // later master-rate change never silently re-prices an already-tagged piece; only an untagged
-    // line, or a tag that predates that column, falls back to the master.
-    const tagSaleMcRate = tagInfo?.saleMcRate != null ? Number(tagInfo.saleMcRate) : undefined;
-    const tagSaleVaPercent = tagInfo?.saleVaPercent != null ? Number(tagInfo.saleVaPercent) : undefined;
-    const masterCharge = i.rateType !== 'FIXED' && (tagSaleMcRate === undefined || tagSaleVaPercent === undefined)
-      ? findMakingCharge(resolvedCategoryId, resolvedKarat, tagInfo?.makeType)
-      : undefined;
-    const makingCharge = i.makingCharge ?? (tagSaleMcRate !== undefined
-      ? tagSaleMcRate * i.netGoldWeight
-      : masterCharge
-        ? (masterCharge.makingChargeType === 'PER_GRAM'
-            ? Number(masterCharge.makingCharge) * i.netGoldWeight
-            : Number(masterCharge.makingCharge))
-        : 0);
-    const wastagePercent = i.wastagePercent ?? (tagSaleVaPercent !== undefined
-      ? tagSaleVaPercent
-      : masterCharge ? Number(masterCharge.saleWastagePercent) : 0);
-
-    const effectiveMakingCharge = makingCharge * (1 + wastagePercent / 100);
-    const unitPrice = i.rateType === 'FIXED'
-      ? goldRate
-      : i.netGoldWeight * goldRate + effectiveMakingCharge + (i.stoneValue ?? 0);
-    const totalPrice = unitPrice * i.quantity;
-    const hsn = hsnByCode.get(hsnCode ?? DEFAULT_HSN_CODE)!;
-    return {
-      ...rest, tagId: i.tagId ?? null, goldRate, makingCharge, wastagePercent,
-      stoneWeight: i.stoneWeight ?? 0, stoneValue: i.stoneValue ?? 0, unitPrice, totalPrice,
-      hsnCodeId: hsn.id, taxRate: Number(hsn.gstRate),
-      categoryId: resolvedCategoryId,
-    };
-  });
-
-  const subtotal = items.reduce((s, i) => s + i.totalPrice, 0);
-  const discount = data.discountAmount ?? 0;
-  const otherCharges = data.otherCharges ?? 0;
-  // otherCharges (shipping/packing/misc — GATI's "Add & Less") is taxable base like the lines
-  // themselves, not tied to any one line: Gross (subtotal) + otherCharges - discount = taxable.
-  const taxableAmount = subtotal + otherCharges - discount;
-  // Each line is taxed at its own HSN rate; a discount is spread proportionally across lines by
-  // value (reduces to the old taxableAmount * flatRate exactly when every line shares one rate).
-  // otherCharges is taxed separately at the default HSN rate — it isn't tied to any line, so it
-  // can't be spread by the same per-line scale (that scale is 0 when subtotal is 0, which would
-  // silently drop otherCharges' tax entirely on a line-less or all-zero-value sale).
-  const discountScale = subtotal > 0 ? (subtotal - discount) / subtotal : 0;
-  const defaultHsnRate = Number(hsnByCode.get(DEFAULT_HSN_CODE)!.gstRate);
-  const taxAmount = currency === 'INR'
-    ? items.reduce((s, i) => s + i.totalPrice * discountScale * i.taxRate, 0) + otherCharges * defaultHsnRate
-    : 0;
-  const preRoundTotal = taxableAmount + taxAmount;
-  // Round-off: automatic to the nearest rupee on an INR bill unless the biller keyed a figure. Kept unrounded here so
-  // the journal below balances to the paisa; the row stores it at 2 dp.
-  if (data.roundOff !== undefined && data.roundOff !== null) {
-    if (typeof data.roundOff !== 'number' || !Number.isFinite(data.roundOff) || Math.abs(data.roundOff) > MAX_ROUND_OFF) {
-      throw new AppError(`Round-off must be a number within ±₹${MAX_ROUND_OFF} — use Discount for a larger adjustment`, 400);
-    }
-  }
-  const roundOffExact = data.roundOff != null
-    ? data.roundOff
-    : currency === 'INR' ? Math.round(preRoundTotal) - preRoundTotal : 0;
-  const totalAmount = preRoundTotal + roundOffExact;
 
   // Old gold / store credit splits (payment modes that settle the bill from credit rather than take money).
   // Old metal is valued up front — rate, karat and weights are checked before any tag is touched, so a bad
@@ -654,6 +476,417 @@ export async function createInvoice(data: {
 
   await createAuditEntry('sales_invoices', invoice.id, userId, 'CREATE', undefined, undefined, ctx.companyId);
   return invoice;
+}
+
+// Prices an invoice's lines and totals — everything createInvoice and amendInvoice must compute identically: per-line
+// pricing (FIXED / PER_GRAM, master rates, making charge + VA%), per-line GST by HSN, discount spreading, round-off.
+// Read-only: it touches no stock and writes nothing, so it can run before any transaction opens.
+async function priceInvoice(
+  data: { invoiceDate: Date; currency?: string; discountAmount?: number; otherCharges?: number; roundOff?: number; items: InvoiceItemInput[] },
+  ctx: TenantContext,
+) {
+  // Layer 2: a line's categoryId is a company-owned master id supplied by the client and stored on
+  // the InvoiceItem — a Company-B category must 404, never attach to this invoice.
+  await assertAllOwned('productCategory', data.items.map((i) => i.categoryId), ctx.companyId, 'Category');
+
+  // Tag-aware lines are optional: tagged (real inventory) and free-text lines coexist.
+  const tagIds = data.items.map((i) => i.tagId).filter(Boolean) as string[];
+  if (new Set(tagIds).size !== tagIds.length) {
+    throw new AppError('The same tag cannot appear on more than one line of an invoice', 400);
+  }
+
+  // A tagged line's category defaults to the tag's own (ProductCategory, already on JewelryTag) —
+  // read-only enrichment, not an authorization check; the transaction below still validates each
+  // tag's existence/availability independently. makeType rides along for the C3 making-charge
+  // lookup below (a free-text line has no makeType to match on).
+  //
+  // Layer 2, not RLS: companyId is included in this `where` explicitly. A Company-B tagId
+  // supplied here simply won't resolve (PostgreSQL FK checks alone would NOT catch this later —
+  // referential-integrity checks bypass RLS — so this explicit filter, not the eventual FK
+  // insert, is what prevents a cross-company tag from ever being priced/linked onto this
+  // invoice). The existing "missing tag" validation a few lines below (tagIds.length vs
+  // resolved count) does double duty as the tenant check for free — a Company-B id simply comes
+  // back as "not found," same error as a nonexistent id.
+  const tagInfoById = tagIds.length > 0
+    ? new Map(
+        (await tenantQuery(ctx.companyId, (tx) => tx.jewelryTag.findMany({
+          where: { id: { in: tagIds }, companyId: ctx.companyId },
+          // saleMcRate/saleVaPercent: whatever was actually decided for this piece at tagging time
+          // (see JewelryTag's schema comment) — preferred below over a fresh MakingCharge master
+          // lookup, so a later master-rate change never silently re-prices an already-tagged piece.
+          select: { id: true, categoryId: true, makeType: true, metalKarat: true, saleMcRate: true, saleVaPercent: true },
+        }))).map((t) => [t.id, t])
+      )
+    : new Map<string, { categoryId: string | null; makeType: string; metalKarat: string | null; saleMcRate: any; saleVaPercent: any }>();
+
+  // Per-line GST (B1): each line's HSN determines its own rate. Resolved once, up front, and the
+  // rate is copied onto the row (like costPrice on JewelryTag) — a later change to the HSN master
+  // must not silently reprice a past invoice. DEFAULT_HSN_CODE is always fetched too, regardless
+  // of what lines request, since otherCharges (below) is taxed at that rate independent of lines.
+  const hsnCodesRequested = Array.from(new Set([
+    ...data.items.map((i) => i.hsnCode ?? DEFAULT_HSN_CODE), DEFAULT_HSN_CODE,
+  ]));
+  const hsnRows = await prisma.hsnCode.findMany({
+    where: { code: { in: hsnCodesRequested }, isActive: true },
+  });
+  const hsnByCode = new Map(hsnRows.map((h) => [h.code, h]));
+  const missingHsn = hsnCodesRequested.filter((c) => !hsnByCode.has(c));
+  if (missingHsn.length > 0) {
+    throw new AppError(`Unknown or inactive HSN code(s): ${missingHsn.join(', ')}`, 400);
+  }
+
+  // Resolved here (not after the items map, as before) — the market-rate lookup below needs it
+  // too, and it must still be the one value the tax-rate calc and invoice row write both use.
+  const currency = data.currency ?? 'INR';
+
+  // C2: a PER_GRAM line that omits goldRate prices off today's MetalRate for its karat, as of
+  // invoiceDate — not a hand-typed number. Resolved once per distinct karat, up front, same
+  // pattern as the HSN batch above.
+  const karatsNeedingRate = Array.from(new Set(
+    data.items
+      .filter((i) => i.rateType !== 'FIXED' && (i.goldRate === undefined || i.goldRate === null) && i.karat)
+      .map((i) => i.karat!)
+  ));
+  const rateByKarat = new Map<string, number>();
+  for (const karat of karatsNeedingRate) {
+    const rate = await resolveMetalRate(ctx.companyId, karat, data.invoiceDate, currency);
+    if (!rate) throw new AppError(`No metal rate found for ${karat} on or before ${data.invoiceDate.toDateString()}`, 404);
+    rateByKarat.set(karat, Number(rate.ratePerGram));
+  }
+
+  // C3 (extended): a PER_GRAM line missing an explicit makingCharge/wastagePercent pulls the
+  // MakingCharge master's rate for its karat + category (+ tag's makeType, if tagged) — e.g. 22K
+  // gold necklaces can carry a different VA% than 18K bangles. Loaded once, unfiltered: this is a
+  // small admin-maintained rate card (not a transactional table), and a wildcard row (karat/
+  // category left blank on the master row, meaning "any") has no fixed value to batch-filter by,
+  // so trying to scope the query would risk silently excluding the very wildcard fallback rows
+  // this lookup depends on.
+  const makingChargeRows = await tenantQuery(ctx.companyId, (_tx) => _tx.makingCharge.findMany({
+    where: { companyId: ctx.companyId, isActive: true },
+    orderBy: { effectiveDate: 'desc' },
+  }));
+  // Most-specific-match-wins across three independent dimensions: a row only matches when every
+  // field IT has pinned (non-null) agrees with the line — a null field on the row means "any" for
+  // that dimension. Among matches, the row pinning the most dimensions wins (e.g. karat+category
+  // beats category-only), and effectiveDate desc (the query's own order) breaks ties.
+  function findMakingCharge(
+    categoryId: string | null | undefined,
+    karat: string | null | undefined,
+    makeType: string | null | undefined,
+  ) {
+    const eligible = makingChargeRows.filter((m) =>
+      (m.categoryId == null || m.categoryId === categoryId) &&
+      (m.karat == null || m.karat === karat) &&
+      (m.makeType == null || m.makeType === makeType)
+    );
+    if (eligible.length === 0) return undefined;
+    const specificity = (m: typeof eligible[number]) =>
+      (m.categoryId != null ? 1 : 0) + (m.karat != null ? 1 : 0) + (m.makeType != null ? 1 : 0);
+    const bestScore = Math.max(...eligible.map(specificity));
+    return eligible.find((m) => specificity(m) === bestScore);
+  }
+
+  const items = data.items.map((i) => {
+    const { hsnCode, categoryId, id: _lineId, ...rest } = i; // id never reaches the row data
+    // rateType 'FIXED': goldRate IS the decided flat unit price (e.g. a tag's own JewelryTag.sellingPrice)
+    // — used as-is, no metal-value math. Anything else ('PER_GRAM', the default): goldRate is ₹/gram,
+    // either explicit or resolved above from today's MetalRate (C2).
+    if (i.rateType === 'FIXED' && (i.goldRate === undefined || i.goldRate === null)) {
+      throw new AppError('FIXED-rate lines require an explicit goldRate', 400);
+    }
+    const goldRate = i.goldRate ?? (i.karat ? rateByKarat.get(i.karat) : undefined);
+    if (goldRate === undefined) {
+      throw new AppError('goldRate or karat (to resolve today\'s rate) is required', 400);
+    }
+    const tagInfo = i.tagId ? tagInfoById.get(i.tagId) : undefined;
+    const resolvedCategoryId = categoryId ?? tagInfo?.categoryId ?? null;
+    const resolvedKarat = i.karat ?? tagInfo?.metalKarat ?? null;
+
+    // VA% marks up the making charge (same formula NewTagPage.tsx already uses for the
+    // MakingCharge master's wastagePercent — reused, not reinvented). FIXED-rate lines ignore
+    // both, same as they already ignore netGoldWeight/goldRate math: goldRate is the whole price.
+    //
+    // Resolution order per field: an explicit request value always wins; otherwise a tagged line
+    // prefers the tag's OWN settled saleMcRate/saleVaPercent (whatever was actually decided when
+    // the piece was priced — see JewelryTag's schema comment) over a fresh master lookup, so a
+    // later master-rate change never silently re-prices an already-tagged piece; only an untagged
+    // line, or a tag that predates that column, falls back to the master.
+    const tagSaleMcRate = tagInfo?.saleMcRate != null ? Number(tagInfo.saleMcRate) : undefined;
+    const tagSaleVaPercent = tagInfo?.saleVaPercent != null ? Number(tagInfo.saleVaPercent) : undefined;
+    const masterCharge = i.rateType !== 'FIXED' && (tagSaleMcRate === undefined || tagSaleVaPercent === undefined)
+      ? findMakingCharge(resolvedCategoryId, resolvedKarat, tagInfo?.makeType)
+      : undefined;
+    const makingCharge = i.makingCharge ?? (tagSaleMcRate !== undefined
+      ? tagSaleMcRate * i.netGoldWeight
+      : masterCharge
+        ? (masterCharge.makingChargeType === 'PER_GRAM'
+            ? Number(masterCharge.makingCharge) * i.netGoldWeight
+            : Number(masterCharge.makingCharge))
+        : 0);
+    const wastagePercent = i.wastagePercent ?? (tagSaleVaPercent !== undefined
+      ? tagSaleVaPercent
+      : masterCharge ? Number(masterCharge.saleWastagePercent) : 0);
+
+    const effectiveMakingCharge = makingCharge * (1 + wastagePercent / 100);
+    const unitPrice = i.rateType === 'FIXED'
+      ? goldRate
+      : i.netGoldWeight * goldRate + effectiveMakingCharge + (i.stoneValue ?? 0);
+    const totalPrice = unitPrice * i.quantity;
+    const hsn = hsnByCode.get(hsnCode ?? DEFAULT_HSN_CODE)!;
+    return {
+      ...rest, tagId: i.tagId ?? null, goldRate, makingCharge, wastagePercent,
+      stoneWeight: i.stoneWeight ?? 0, stoneValue: i.stoneValue ?? 0, unitPrice, totalPrice,
+      hsnCodeId: hsn.id, taxRate: Number(hsn.gstRate),
+      categoryId: resolvedCategoryId,
+    };
+  });
+
+  const subtotal = items.reduce((s, i) => s + i.totalPrice, 0);
+  const discount = data.discountAmount ?? 0;
+  const otherCharges = data.otherCharges ?? 0;
+  // otherCharges (shipping/packing/misc — GATI's "Add & Less") is taxable base like the lines
+  // themselves, not tied to any one line: Gross (subtotal) + otherCharges - discount = taxable.
+  const taxableAmount = subtotal + otherCharges - discount;
+  // Each line is taxed at its own HSN rate; a discount is spread proportionally across lines by
+  // value (reduces to the old taxableAmount * flatRate exactly when every line shares one rate).
+  // otherCharges is taxed separately at the default HSN rate — it isn't tied to any line, so it
+  // can't be spread by the same per-line scale (that scale is 0 when subtotal is 0, which would
+  // silently drop otherCharges' tax entirely on a line-less or all-zero-value sale).
+  const discountScale = subtotal > 0 ? (subtotal - discount) / subtotal : 0;
+  const defaultHsnRate = Number(hsnByCode.get(DEFAULT_HSN_CODE)!.gstRate);
+  const taxAmount = currency === 'INR'
+    ? items.reduce((s, i) => s + i.totalPrice * discountScale * i.taxRate, 0) + otherCharges * defaultHsnRate
+    : 0;
+  const preRoundTotal = taxableAmount + taxAmount;
+  // Round-off: automatic to the nearest rupee on an INR bill unless the biller keyed a figure. Kept unrounded here so
+  // the journal below balances to the paisa; the row stores it at 2 dp.
+  if (data.roundOff !== undefined && data.roundOff !== null) {
+    if (typeof data.roundOff !== 'number' || !Number.isFinite(data.roundOff) || Math.abs(data.roundOff) > MAX_ROUND_OFF) {
+      throw new AppError(`Round-off must be a number within ±₹${MAX_ROUND_OFF} — use Discount for a larger adjustment`, 400);
+    }
+  }
+  const roundOffExact = data.roundOff != null
+    ? data.roundOff
+    : currency === 'INR' ? Math.round(preRoundTotal) - preRoundTotal : 0;
+  const totalAmount = preRoundTotal + roundOffExact;
+
+  return {
+    currency, tagIds, items, lineIds: data.items.map((i) => i.id), subtotal, discount, otherCharges, taxableAmount, taxAmount,
+    roundOffExact, totalAmount,
+  };
+}
+
+// Edit an issued invoice — lines, prices, discount, GST, customer, dates, everything. Gated by `invoice:edit`
+// (SUPER_ADMIN, or a role that has been granted it). The body is the invoice's full NEW state: `items` replaces the
+// lines (a line carrying an existing InvoiceItem `id` is updated in place, one without is added, an existing line left
+// out is removed); the header fields are optional and keep their value when omitted.
+//
+// It is an amendment, not a silent rewrite, all in ONE transaction:
+//   - stock: a piece taken off the bill goes back to IN_STOCK, a piece added is flipped to SOLD (count-checked, same
+//     guard as createInvoice) — a piece that stays is not touched;
+//   - ledger: the original entries are never edited or deleted. One adjustment entry is posted for the DIFFERENCE
+//     (revenue, GST, round-off, COGS/inventory, receivable), so the books show the sale and then the amendment;
+//   - the customer's balance moves by the difference in the bill total (payments stay exactly as recorded, so the
+//     invoice's paid / due / status are re-derived from them — a bill cut below what was paid shows a negative due);
+//   - the GST record is rewritten to match; the audit log keeps the full before/after (lines included) and the reason.
+// Lines that were returned (D1) are locked: the return already reversed them. A payment or return also pins the
+// customer, since those rows belong to whoever was billed.
+export async function amendInvoice(invoiceId: string, data: {
+  clientId?: string; invoiceDate?: Date; dueDate?: Date | null; invoiceType?: string;
+  discountAmount?: number; otherCharges?: number; roundOff?: number;
+  salesPersonId?: string | null; terms?: string | null; notes?: string | null;
+  reason?: string;
+  items: InvoiceItemInput[];
+}, ctx: TenantContext, userId: string) {
+  if (!Array.isArray(data.items) || data.items.length === 0) throw new AppError('An invoice needs at least one line', 400);
+
+  await assertOwnedByCompany('salesInvoice', invoiceId, ctx.companyId, 'Invoice');
+  const head = await tenantQuery(ctx.companyId, (tx) => tx.salesInvoice.findUniqueOrThrow({
+    where: { id: invoiceId }, select: { branchId: true, currency: true, invoiceDate: true, clientId: true },
+  }));
+  await assertBranchAccessible(head.branchId, ctx);
+  if (data.clientId && data.clientId !== head.clientId) await assertOwnedByCompany('client', data.clientId, ctx.companyId, 'Client');
+  if (data.salesPersonId) {
+    const member = await tenantQuery(ctx.companyId, (tx) => tx.companyUser.count({ where: { companyId: ctx.companyId, userId: data.salesPersonId! } }));
+    if (member === 0) throw new AppError('Sales executive not found', 404);
+  }
+  const lineIdsIn = data.items.map((i) => i.id).filter(Boolean) as string[];
+  if (new Set(lineIdsIn).size !== lineIdsIn.length) throw new AppError('The same invoice line appears twice', 400);
+
+  const invoiceDate = data.invoiceDate ?? head.invoiceDate;
+  const priced = await priceInvoice({
+    invoiceDate, currency: head.currency, discountAmount: data.discountAmount, otherCharges: data.otherCharges,
+    roundOff: data.roundOff, items: data.items,
+  }, ctx);
+  const { currency, tagIds: newTagIds, items, lineIds, subtotal, discount, otherCharges, taxableAmount, taxAmount, roundOffExact } = priced;
+  const newTotal = round2(priced.totalAmount);
+
+  const snapshot = (inv: any) => JSON.parse(JSON.stringify({
+    invoiceDate: inv.invoiceDate, dueDate: inv.dueDate, invoiceType: inv.invoiceType, clientId: inv.clientId,
+    salesPersonId: inv.salesPersonId, terms: inv.terms, notes: inv.notes,
+    subtotal: inv.subtotal, discountAmount: inv.discountAmount, otherCharges: inv.otherCharges, taxAmount: inv.taxAmount,
+    roundOff: inv.roundOff, totalAmount: inv.totalAmount, paidAmount: inv.paidAmount, balanceDue: inv.balanceDue, status: inv.status,
+    items: inv.items.map((i: any) => ({
+      id: i.id, productCode: i.productCode, description: i.description, tagId: i.tagId, quantity: i.quantity,
+      netGoldWeight: i.netGoldWeight, rateType: i.rateType, goldRate: i.goldRate, makingCharge: i.makingCharge,
+      wastagePercent: i.wastagePercent, stoneValue: i.stoneValue, taxRate: i.taxRate, totalPrice: i.totalPrice,
+    })),
+  }));
+
+  const { before, after, updated } = await tenantTransaction(ctx.companyId, async (tx) => {
+    // Serialise amendments of the same invoice, then read its state FRESH — payments, returns and tag statuses as
+    // they are now, not as they were when the screen was opened.
+    await tx.$queryRaw`SELECT "id" FROM "sales_invoices" WHERE "id" = ${invoiceId} FOR UPDATE`;
+    const inv = await tx.salesInvoice.findUniqueOrThrow({
+      where: { id: invoiceId },
+      include: {
+        items: true, taxDetails: true, payments: { select: { id: true } },
+        returns: { include: { items: { select: { invoiceItemId: true } } } },
+      },
+    });
+    const newClientId = data.clientId ?? inv.clientId;
+    const clientChanged = newClientId !== inv.clientId;
+    if (clientChanged && (inv.payments.length > 0 || inv.returns.length > 0)) {
+      throw new AppError('The customer cannot be changed once a payment or return is recorded on this invoice', 409);
+    }
+
+    const oldById = new Map(inv.items.map((i) => [i.id, i]));
+    for (const id of lineIdsIn) if (!oldById.has(id)) throw new AppError(`Invoice line not found on this invoice: ${id}`, 404);
+
+    // Returned lines are locked — the return has already reversed them (tag back in stock, ledger, customer credit).
+    const returnedIds = new Set(inv.returns.flatMap((r) => r.items.map((x) => x.invoiceItemId)));
+    for (const id of returnedIds) {
+      const old = oldById.get(id)!;
+      const at = lineIds.indexOf(id);
+      const now = at >= 0 ? items[at] : undefined;
+      if (!now || (now.tagId ?? null) !== old.tagId || now.quantity !== old.quantity || Math.abs(now.totalPrice - Number(old.totalPrice)) > 0.005) {
+        throw new AppError(`Line ${old.productCode} has been returned and cannot be changed or removed`, 409);
+      }
+    }
+    const removedIds = inv.items.filter((i) => !lineIdsIn.includes(i.id)).map((i) => i.id);
+
+    // Stock — only pieces that actually enter or leave this bill move.
+    const oldTagIds = inv.items.filter((i) => i.tagId).map((i) => i.tagId!);
+    const removedTagIds = oldTagIds.filter((t) => !newTagIds.includes(t));
+    const addedTagIds = newTagIds.filter((t) => !oldTagIds.includes(t));
+    const tagRows = await tx.jewelryTag.findMany({ where: { id: { in: [...oldTagIds, ...newTagIds] }, companyId: ctx.companyId } });
+    const tagById = new Map(tagRows.map((t) => [t.id, t]));
+    const missing = addedTagIds.filter((t) => !tagById.has(t));
+    if (missing.length > 0) throw new AppError(`Tag(s) not found: ${missing.join(', ')}`, 404);
+    const unavailable = addedTagIds.map((t) => tagById.get(t)!).filter((t) => t.status !== 'IN_STOCK');
+    if (unavailable.length > 0) throw new AppError(`Tags not available: ${unavailable.map((t) => t.tagNumber).join(', ')}`, 409);
+    const notSold = removedTagIds.map((t) => tagById.get(t)).filter((t) => !t || t.status !== 'SOLD');
+    if (notSold.length > 0) throw new AppError(`Tag(s) not currently SOLD, cannot take off this invoice: ${notSold.map((t) => t?.tagNumber).join(', ')}`, 409);
+    if (addedTagIds.length > 0) {
+      const flipped = await tx.jewelryTag.updateMany({ where: { id: { in: addedTagIds }, status: 'IN_STOCK', companyId: ctx.companyId }, data: { status: 'SOLD' } });
+      if (flipped.count !== addedTagIds.length) throw new AppError('One or more items were sold by another transaction just now', 409);
+    }
+    if (removedTagIds.length > 0) {
+      const flipped = await tx.jewelryTag.updateMany({ where: { id: { in: removedTagIds }, status: 'SOLD', companyId: ctx.companyId }, data: { status: 'IN_STOCK' } });
+      if (flipped.count !== removedTagIds.length) throw new AppError('One or more tags changed status just now — retry the edit', 409);
+      // A piece taken off the bill is no longer billed by the estimate that quoted it: back to awaiting billing.
+      await tx.tagEstimate.updateMany({ where: { companyId: ctx.companyId, invoiceId, tagId: { in: removedTagIds } }, data: { status: 'SENT', invoiceId: null } });
+    }
+    const costOf = (ids: string[]) => ids.reduce((s, t) => s + Number(tagById.get(t)?.costPrice ?? 0), 0);
+    const oldCogs = costOf(oldTagIds);
+    const newCogs = costOf(newTagIds);
+
+    // Customer: credit limit / PAN only where this edit makes the customer's position worse.
+    const client = await tx.client.findUnique({ where: { id: newClientId } });
+    if (!client || client.companyId !== ctx.companyId) throw new AppError('Client not found', 404);
+    const oldTotal = Number(inv.totalAmount);
+    const delta = round2(newTotal - oldTotal);
+    if (clientChanged) checkCreditLimit(client, newTotal);
+    else if (delta > 0.005) checkCreditLimit(client, delta);
+    if (currency === 'INR' && (clientChanged || delta > 0.005)) assertPanIfRequired(client, newTotal);
+
+    // GST record — same-state vs inter-state is re-resolved from the (possibly new) customer.
+    let cgstAmt = 0, sgstAmt = 0, igstAmt = 0;
+    if (currency === 'INR') {
+      if (taxableAmount > 0 && taxAmount <= 0) throw new AppError('Refusing to emit a zero-GST tax invoice on a taxable INR sale', 500);
+      const company = await tx.company.findUniqueOrThrow({ where: { id: ctx.companyId } });
+      const clientStateCode = await resolveStateCode(client.state);
+      const isSameState = clientStateCode === (company.stateCode ?? '');
+      cgstAmt = isSameState ? taxAmount / 2 : 0;
+      sgstAmt = isSameState ? taxAmount / 2 : 0;
+      igstAmt = isSameState ? 0 : taxAmount;
+      const gst = {
+        gstin: company.gstin ?? 'N/A', placeOfSupply: clientStateCode ?? client.state ?? '',
+        taxableAmount, cgst: cgstAmt, sgst: sgstAmt, igst: igstAmt, totalTax: taxAmount,
+      };
+      if (inv.taxDetails) await tx.taxInvoice.update({ where: { invoiceId }, data: gst });
+      else await tx.taxInvoice.create({ data: { companyId: ctx.companyId, invoiceId, ...gst } });
+    }
+
+    // Lines: update in place, add, remove.
+    if (removedIds.length > 0) await tx.invoiceItem.deleteMany({ where: { id: { in: removedIds }, invoiceId, companyId: ctx.companyId } });
+    const toCreate: typeof items = [];
+    for (let i = 0; i < items.length; i++) {
+      if (lineIds[i]) await tx.invoiceItem.update({ where: { id: lineIds[i]! }, data: items[i] });
+      else toCreate.push(items[i]);
+    }
+    if (toCreate.length > 0) await tx.invoiceItem.createMany({ data: toCreate.map((i) => ({ ...i, invoiceId, companyId: ctx.companyId })) });
+
+    // Header. Payments are untouched, so paid / due / status are re-derived from what has actually been received.
+    const paid = Number(inv.paidAmount);
+    const balanceDue = round2(newTotal - paid);
+    const status = paid > 0.005 ? (balanceDue <= 0.005 ? 'PAID' : 'PARTIALLY_PAID') : inv.status;
+    const upd = await tx.salesInvoice.update({
+      where: { id: invoiceId },
+      data: {
+        clientId: newClientId, invoiceDate, invoiceType: data.invoiceType ?? inv.invoiceType,
+        dueDate: data.dueDate === undefined ? inv.dueDate : data.dueDate,
+        salesPersonId: data.salesPersonId === undefined ? inv.salesPersonId : data.salesPersonId,
+        terms: data.terms === undefined ? inv.terms : data.terms,
+        notes: data.notes === undefined ? inv.notes : data.notes,
+        subtotal, discountAmount: discount, otherCharges, taxAmount, roundOff: roundOffExact, totalAmount: newTotal,
+        balanceDue, status,
+      },
+      include: {
+        client: true, items: { include: { hsnCode: true, category: true } }, taxDetails: true, payments: true,
+        salesPerson: { select: { id: true, name: true } },
+      },
+    });
+
+    // Ledger: one adjustment entry for the difference. Revenue is the balancing figure, so the entry balances to the
+    // paisa even where the stored 2-dp figures round differently from the originals.
+    const oldTax = inv.taxDetails;
+    const dCgst = round2(cgstAmt - Number(oldTax?.cgst ?? 0));
+    const dSgst = round2(sgstAmt - Number(oldTax?.sgst ?? 0));
+    const dIgst = round2(igstAmt - Number(oldTax?.igst ?? 0));
+    const dRound = round2(roundOffExact - Number(inv.roundOff));
+    const dRevenue = round2(delta - dCgst - dSgst - dIgst - dRound);
+    const dCogs = round2(newCogs - oldCogs);
+    const dr = (v: number) => (v > 0 ? v : 0);      // a positive change in a debit-normal account is a debit
+    const cr = (v: number) => (v < 0 ? -v : 0);     // ...and a negative one a credit
+    await postAutoJournalEntry(tx, ctx.companyId, {
+      date: new Date(), description: `Sales Invoice ${inv.invoiceNumber} amended`,
+      referenceType: 'SalesInvoiceAmendment', referenceId: invoiceId, userId,
+      lines: [
+        { accountCode: LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE, debit: dr(delta), credit: cr(delta) },
+        { accountCode: LEDGER_ACCOUNT.SALES_REVENUE, debit: cr(dRevenue), credit: dr(dRevenue) },
+        { accountCode: LEDGER_ACCOUNT.CGST_PAYABLE, debit: cr(dCgst), credit: dr(dCgst) },
+        { accountCode: LEDGER_ACCOUNT.SGST_PAYABLE, debit: cr(dSgst), credit: dr(dSgst) },
+        { accountCode: LEDGER_ACCOUNT.IGST_PAYABLE, debit: cr(dIgst), credit: dr(dIgst) },
+        { accountCode: LEDGER_ACCOUNT.ROUND_OFF, debit: cr(dRound), credit: dr(dRound) },
+        { accountCode: LEDGER_ACCOUNT.COST_OF_GOODS, debit: dr(dCogs), credit: cr(dCogs) },
+        { accountCode: LEDGER_ACCOUNT.INVENTORY, debit: cr(dCogs), credit: dr(dCogs) },
+      ],
+    });
+
+    // Customer balance follows the bill total (a new customer takes the whole bill, the old one gives it up).
+    if (clientChanged) {
+      await tx.client.update({ where: { id: inv.clientId }, data: { currentBalance: { decrement: oldTotal } } });
+      await tx.client.update({ where: { id: newClientId }, data: { currentBalance: { increment: newTotal } } });
+    } else if (Math.abs(delta) > 0.005) {
+      await tx.client.update({ where: { id: newClientId }, data: { currentBalance: { increment: delta } } });
+    }
+
+    return { before: snapshot(inv), after: snapshot(upd), updated: upd };
+  });
+
+  await createAuditEntry('sales_invoices', invoiceId, userId, 'AMEND', before, { ...after, reason: data.reason ?? null }, ctx.companyId);
+  return updated;
 }
 
 // Shared by recordPayment (the standalone "record a payment later" endpoint) and createInvoice's

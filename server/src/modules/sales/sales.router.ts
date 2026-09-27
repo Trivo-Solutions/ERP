@@ -3,7 +3,7 @@ import { authenticate } from '../../middleware/auth';
 import { requirePermission } from '../../middleware/rbac';
 import { resolveTenantContext, assertBranchAccessible } from '../../middleware/tenant';
 import { AppError } from '../../middleware/error';
-import { parseDate } from '../../shared/parseDate';
+import { parseDate, parseOptionalDate } from '../../shared/parseDate';
 import * as svc from './sales.service';
 import * as estimationSvc from '../tagging/estimation.service';
 import { canAccessBranch } from '../../shared/tenantContext';
@@ -67,17 +67,44 @@ salesRouter.get('/reports/register', requirePermission('report:view'), async (re
 
 // Invoices
 salesRouter.get('/invoices', requirePermission('sales:view'), async (req: Request, res: Response) => {
+  // Optional invoice-date range, both ends inclusive (`to` is a calendar day, so it runs to the end of that day).
+  // Without a range only the latest 50 come back; with one, everything in it (capped) — that is how older
+  // invoices are reached.
+  const from = typeof req.query.from === 'string' ? parseOptionalDate(req.query.from, 'From date') : undefined;
+  const toDay = typeof req.query.to === 'string' ? parseOptionalDate(req.query.to, 'To date') : undefined;
+  const toExclusive = toDay && new Date(toDay.getTime() + 24 * 60 * 60 * 1000);
   const invoices = await tenantQuery(req.tenant!.companyId, (_tx) => _tx.salesInvoice.findMany({
     where: {
       companyId: req.tenant!.companyId,
       ...(req.query.status && { status: req.query.status as string }),
+      ...((from || toExclusive) && { invoiceDate: { ...(from && { gte: from }), ...(toExclusive && { lt: toExclusive }) } }),
       ...(!req.tenant!.branchAccess.allBranches && { branchId: { in: req.tenant!.branchAccess.branchIds } }),
     },
-    include: { client: { select: { name: true, clientCode: true } }, _count: { select: { items: true } } },
+    include: {
+      client: { select: { name: true, clientCode: true } },
+      branch: { select: { name: true } },
+      salesPerson: { select: { name: true } },
+      taxDetails: { select: { placeOfSupply: true, gstin: true, taxableAmount: true, cgst: true, sgst: true, igst: true, totalTax: true } },
+      payments: { select: { mode: true } },
+      items: { select: { quantity: true, grossWeight: true, netGoldWeight: true, stoneWeight: true } },
+      _count: { select: { items: true } },
+    },
     orderBy: { invoiceDate: 'desc' },
-    take: 50,
+    take: from || toExclusive ? 2000 : 50,
   }));
-  res.json({ success: true, data: invoices });
+  // The list screen's optional columns: pieces and weights summed over the lines (weights are per piece, so x quantity),
+  // and the modes the bill was paid in. Computed here so the lines themselves never ride along on a 2,000-row list.
+  const data = invoices.map(({ items, payments, ...inv }) => ({
+    ...inv,
+    totals: {
+      quantity: items.reduce((s, i) => s + i.quantity, 0),
+      grossWeight: items.reduce((s, i) => s + Number(i.grossWeight) * i.quantity, 0),
+      netWeight: items.reduce((s, i) => s + Number(i.netGoldWeight) * i.quantity, 0),
+      stoneWeight: items.reduce((s, i) => s + Number(i.stoneWeight) * i.quantity, 0),
+    },
+    paymentModes: Array.from(new Set(payments.map((p) => p.mode))),
+  }));
+  res.json({ success: true, data });
 });
 
 salesRouter.get('/invoices/:id', requirePermission('sales:view'), async (req: Request, res: Response) => {
@@ -151,6 +178,19 @@ salesRouter.post('/invoices', requirePermission('invoice:create'), async (req: R
   };
   const invoice = await svc.createInvoice(body, req.tenant!, req.user!.userId);
   res.status(201).json({ success: true, data: invoice });
+});
+
+// Amend an issued invoice (full new state — see amendInvoice). Its own permission, deliberately not invoice:create:
+// changing a bill that already moved stock, GST and the ledger is an admin-level act.
+salesRouter.put('/invoices/:id', requirePermission('invoice:edit'), async (req: Request, res: Response) => {
+  const b = req.body ?? {};
+  const body = {
+    ...b,
+    ...(b.invoiceDate !== undefined && { invoiceDate: parseDate(b.invoiceDate, 'Invoice date') }),
+    ...(b.dueDate ? { dueDate: parseDate(b.dueDate, 'Due date') } : b.dueDate === null || b.dueDate === '' ? { dueDate: null } : { dueDate: undefined }),
+  };
+  const invoice = await svc.amendInvoice(req.params.id, body, req.tenant!, req.user!.userId);
+  res.json({ success: true, data: invoice });
 });
 
 salesRouter.post('/invoices/:id/payment', requirePermission('invoice:create'), async (req: Request, res: Response) => {

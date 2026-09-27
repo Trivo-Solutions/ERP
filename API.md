@@ -308,7 +308,7 @@ CLI equivalent: `npm run company:provision -- --code VASAVI --name "Vasavi Jewel
 | POST | `/memos/check-alerts` | `memo:manage` | Send overdue-memo alerts |
 | POST | `/memos/:id/return` | `memo:manage` | Return memo items (flips tags back to `IN_STOCK`) |
 | POST | `/memos/:id/convert` | `memo:manage` | Convert a memo to an invoice — the wholesale sale path |
-| GET | `/invoices` | `sales:view` | List invoices |
+| GET | `/invoices?from=&to=` | `sales:view` | List invoices; optional inclusive invoice-date range (`YYYY-MM-DD`). No range = latest 50; a range returns everything in it (cap 2000). Each row also carries `salesPerson`, `branch`, `taxDetails` (GST split), `paymentModes[]` and `totals` {quantity, grossWeight, netWeight, stoneWeight} summed over its lines (lines themselves are not sent) |
 | GET | `/invoices/:id` | `sales:view` | Get an invoice (items, tax, payments, export docs) |
 | GET | `/tax-context?clientId=` | `invoice:create` | HSN codes + rates and same-state vs inter-state for a customer — the New Sale screen's GST preview |
 | GET | `/staff` | `invoice:create` | Salesperson picker for the New Sale form |
@@ -316,6 +316,7 @@ CLI equivalent: `npm run company:provision -- --code VASAVI --name "Vasavi Jewel
 | GET | `/estimates?q=` | `invoice:create` | Estimates sent to billing, searchable by number / item / tag / customer name — sale-side data only (I5) |
 | POST | `/invoices` | `invoice:create` | Create a direct invoice — tag-aware (Gap #2). `payments[]` may split across `CASH`/`CARD`/`UPI`/`BANK_TRANSFER`/`CHEQUE` **and** the credit modes `OLD_GOLD` (send `oldGold: {description, karat, grossWeight, stoneWeight?, deductionPercent?}`; `amount` is ignored, the server values the metal) and `STORE_CREDIT` (`amount` ≤ the customer's available credit) |
 | GET | `/clients/:clientId/credit` | `invoice:create` | `{balance, available}` — credit on the customer's account (from returns / old-gold exchanges) that `STORE_CREDIT` can spend |
+| PUT | `/invoices/:id` | `invoice:edit` | **Amend an issued invoice** — body is the full new bill (`items[]` with `id` to update a line in place, no `id` to add, omitted to remove; optional `clientId`, `invoiceDate`, `dueDate`, `invoiceType`, `discountAmount`, `otherCharges`, `roundOff`, `salesPersonId`, `terms`, `notes`, `reason`). One transaction: tag stock, GST record, an adjustment journal for the difference, customer balance; audit-logged with before/after. Returned lines are locked; customer is fixed once a payment/return exists |
 | POST | `/invoices/:id/payment` | `invoice:create` | Record a payment against an invoice |
 | GET | `/invoices/:id/packing-list` | `export:doc` | Generate a packing list |
 | GET | `/clients/:clientId/payments` | `sales:view` | List a client's payments, invoice-scoped + standalone (F2) |
@@ -391,6 +392,7 @@ Tagging `/reports/*` rows above).
 |---|---|---|---|
 | GET | `/branches` | `tag:view` | List active branches |
 | GET | `/branches/stock-summary` | `tag:view` | Network-wide stock visibility, per branch (E2) |
+| GET | `/reports/stock-book` | `report:view` | One row per tag (all attributes + Dia/CS weights). Query: `branchId`, `status` (`IN_STOCK` default, `STOCK`, `ON_APPROVAL`, `TRANSFERRED`, `SOLD`, `RETIRED`, `ALL`), `categoryId`, `dateFrom`/`dateTo` (tagged date). **Scoped to the caller's branch grants** — returns `branches` (the picker list, grants only), `rows`, `truncated` (cap 50,000) |
 | GET | `/reports/stock-on-hand` | `report:view` | `IN_STOCK` value by branch × category (H2) |
 | GET | `/reports/dead-stock` | `report:view` | `IN_STOCK` ageing, bucketed by days (H3) |
 | POST | `/branches` | `branch:manage` | Create a branch |
@@ -405,12 +407,12 @@ Tagging `/reports/*` rows above).
 | GET | `/lots` | `tag:view` | List purchase lots (bags) with tagged/remaining pieces, weight and cost; `?status=OPEN|CLOSED` (I6) |
 | GET | `/lots/:id` | `tag:view` | One lot with its tags and remaining figures (I6) |
 | POST | `/lots/:id/close` | `tag:create` | Close a lot — no more pieces can be tagged from it; report-only, body `{ note? }` (I6) |
-| GET | `/transfers` | `tag:view` | List branch transfers |
+| GET | `/transfers` | `tag:view` | List branch transfers (`status` may be a comma list; `incoming=true` = only those the caller's branches must receive) |
 | GET | `/transfers/:id` | `tag:view` | Get a transfer |
 | POST | `/transfers` | `branch:transfer` | Create a transfer (`DRAFT`) |
 | POST | `/transfers/:id/submit` | `branch:transfer` | Submit for approval |
 | POST | `/transfers/:id/approve` | `branch:approve` | Approve (dispatches — tags → `TRANSFERRED`) |
-| POST | `/transfers/:id/receive` | `branch:transfer` | Receive (tags → `IN_STOCK` at destination) |
+| POST | `/transfers/:id/receive` | `branch:transfer` | Receive the verified pieces — body `{ tagIds }` (omit = everything outstanding). Those tags → `IN_STOCK` at destination; the rest stay `TRANSFERRED` and the transfer is `PARTIALLY_RECEIVED` until the last one is in |
 | POST | `/transfers/:id/cancel` | `branch:transfer` | Cancel a transfer |
 | GET | `/audits` | `stock:view` | List stock audits |
 | GET | `/audits/:id` | `stock:view` | Get an audit (expected/found/missing) |

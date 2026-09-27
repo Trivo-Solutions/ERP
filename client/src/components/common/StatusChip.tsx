@@ -48,6 +48,11 @@ const STATUS_CONFIG: Record<string, { label: string; color: ChipProps['color'] }
   SENT: { label: 'Sent', color: 'warning' },
   RECEIVED: { label: 'Received', color: 'success' },
 
+  // Branch transfers
+  PENDING_APPROVAL: { label: 'Pending Approval', color: 'warning' },
+  DISPATCHED: { label: 'In Transit', color: 'info' },
+  PARTIALLY_RECEIVED: { label: 'Partly Received', color: 'warning' },
+
   // Default
   ACTIVE: { label: 'Active', color: 'success' },
   INACTIVE: { label: 'Inactive', color: 'default' },

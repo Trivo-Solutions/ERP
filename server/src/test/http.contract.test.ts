@@ -91,6 +91,63 @@ describe('HTTP contract: dates, malformed ids and foreign references', () => {
     });
   });
 
+  describe('invoice list date range (GET /sales/invoices?from&to)', () => {
+    it('filters by invoice date, both ends inclusive, and rejects a garbage date with a 400', async () => {
+      const jan = (await a.post('/sales/invoices', invoiceBody(A, await newTag(a, A), { invoiceDate: '2026-01-10T00:00:00.000Z' }))).body.data;
+      const feb = (await a.post('/sales/invoices', invoiceBody(A, await newTag(a, A), { invoiceDate: '2026-02-20T00:00:00.000Z' }))).body.data;
+      const ids = async (qs: string) => ((await a.get(`/sales/invoices${qs}`)).body.data as any[]).map((i) => i.id);
+
+      expect(await ids('?from=2026-01-01&to=2026-01-31')).toEqual([jan.id]);
+      expect(await ids('?from=2026-02-01&to=2026-02-28')).toEqual([feb.id]);
+      expect(await ids('?from=2026-01-10&to=2026-01-10')).toEqual([jan.id]); // a single day is inclusive
+      expect(new Set(await ids('?from=2026-01-01&to=2026-02-28'))).toEqual(new Set([jan.id, feb.id]));
+      expect(await ids('?from=2026-03-01')).not.toContain(jan.id); // open-ended
+      expect(await ids('?to=2026-01-31')).toContain(jan.id);
+      expect((await a.get('/sales/invoices?from=garbage')).status).toBe(400);
+      // another company never sees them, range or not
+      expect(((await b.get('/sales/invoices?from=2026-01-01&to=2026-12-31')).body.data as any[]).map((i) => i.id)).not.toContain(jan.id);
+    });
+  });
+
+  describe('invoice list optional columns (GET /sales/invoices)', () => {
+    it('carries piece/weight totals, branch, GST split and payment modes without shipping the lines', async () => {
+      const tag = await newTag(a, A);
+      const two = { productCode: 'X2', description: 'two pcs', quantity: 2, grossWeight: 3, netGoldWeight: 2.5, stoneWeight: 0.5, rateType: 'FIXED', goldRate: 100, makingCharge: 0 };
+      const inv = (await a.post('/sales/invoices', invoiceBody(A, tag, {
+        items: [invoiceBody(A, tag).items[0], two], payments: [{ mode: 'UPI', amount: 10 }, { mode: 'CASH', amount: 5 }],
+      }))).body.data;
+
+      const row = ((await a.get('/sales/invoices')).body.data as any[]).find((i) => i.id === inv.id);
+      expect(row.totals).toEqual({ quantity: 3, grossWeight: 5 + 3 * 2, netWeight: 5 + 2.5 * 2, stoneWeight: 0.5 * 2 });
+      expect(row.items).toBeUndefined();
+      expect(row.payments).toBeUndefined();
+      expect([...row.paymentModes].sort()).toEqual(['CASH', 'UPI']);
+      expect(row.branch.name).toBeTruthy();
+      expect(row.taxDetails.totalTax).toBeDefined();
+      expect(row.salesPerson).toBeNull();
+      expect(row._count.items).toBe(2);
+    });
+  });
+
+  describe('amend an issued invoice (PUT /sales/invoices/:id)', () => {
+    it('the company admin can reprice a line over HTTP; a garbage date is a 400; another company gets a 404', async () => {
+      const tag = await newTag(a, A);
+      const inv = (await a.post('/sales/invoices', invoiceBody(A, tag))).body.data; // FIXED line at 200
+      const line = inv.items[0];
+      const lineBody = { id: line.id, productCode: line.productCode, description: 'x', quantity: 1, grossWeight: 5, netGoldWeight: 5, rateType: 'FIXED', goldRate: 300, makingCharge: 0, tagId: tag.id };
+
+      const ok = await a.put(`/sales/invoices/${inv.id}`, { items: [lineBody], dueDate: '2026-12-31', notes: 'fixed price', reason: 'price change' });
+      expect(ok.status).toBe(200);
+      expect(Number(ok.body.data.subtotal)).toBe(300);
+      expect(ok.body.data.notes).toBe('fixed price');
+      expect(ok.body.data.dueDate).toContain('2026-12-31');
+
+      expect((await a.put(`/sales/invoices/${inv.id}`, { items: [lineBody], invoiceDate: 'garbage' })).status).toBe(400);
+      expect((await b.put(`/sales/invoices/${inv.id}`, { items: [lineBody] })).status).toBe(404);
+      expect((await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } })).status).toBe('SOLD');
+    });
+  });
+
   describe('malformed ids are a 4xx, never a 500 and never a Prisma filter', () => {
     it('a missing branchId is a 400', async () => {
       const tag = await newTag(a, A);

@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { authenticate } from '../../middleware/auth';
 import { requirePermission } from '../../middleware/rbac';
 import { resolveTenantContext } from '../../middleware/tenant';
+import { AppError } from '../../middleware/error';
 import * as svc from './tagging.service';
 import * as lots from './purchaseLot.service';
 
@@ -24,6 +25,22 @@ taggingRouter.get('/reports/stock-on-hand', requirePermission('report:view'), as
   const data = await svc.getStockOnHand(req.tenant!.companyId, {
     branchId: req.query.branchId as string | undefined,
     categoryId: req.query.categoryId as string | undefined,
+  });
+  res.json({ success: true, data });
+});
+
+// Stock Book: one row per tag, branch-scoped to the caller's own grants (see getStockBook).
+taggingRouter.get('/reports/stock-book', requirePermission('report:view'), async (req: Request, res: Response) => {
+  const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
+  const date = (v: unknown) => {
+    const s = str(v); if (!s) return undefined;
+    const d = new Date(s);
+    if (Number.isNaN(d.getTime())) throw new AppError('Invalid date', 400);
+    return d;
+  };
+  const data = await svc.getStockBook(req.tenant!, {
+    branchId: str(req.query.branchId), status: str(req.query.status), categoryId: str(req.query.categoryId),
+    dateFrom: date(req.query.dateFrom), dateTo: date(req.query.dateTo),
   });
   res.json({ success: true, data });
 });
@@ -150,6 +167,7 @@ taggingRouter.get('/transfers', requirePermission('tag:view'), async (req: Reque
     status: req.query.status as string,
     fromBranchId: req.query.fromBranchId as string,
     toBranchId: req.query.toBranchId as string,
+    incoming: req.query.incoming === 'true',
     page: Number(req.query.page) || 1,
     limit: Number(req.query.limit) || 20,
   });
@@ -174,7 +192,11 @@ taggingRouter.post('/transfers/:id/approve', requirePermission('branch:approve')
 });
 
 taggingRouter.post('/transfers/:id/receive', requirePermission('branch:transfer'), async (req: Request, res: Response) => {
-  res.json({ success: true, data: await svc.receiveTransfer(req.params.id, req.tenant!, req.user!.userId) });
+  const { tagIds } = req.body ?? {};
+  if (tagIds !== undefined && (!Array.isArray(tagIds) || tagIds.some((x: unknown) => typeof x !== 'string'))) {
+    return res.status(400).json({ success: false, error: 'tagIds must be a list of tag ids' });
+  }
+  res.json({ success: true, data: await svc.receiveTransfer(req.params.id, req.tenant!, req.user!.userId, tagIds) });
 });
 
 taggingRouter.post('/transfers/:id/cancel', requirePermission('branch:transfer'), async (req: Request, res: Response) => {

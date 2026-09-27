@@ -354,6 +354,17 @@ new ones. `GET /sales/tax-context` feeds the screen's preview (HSN rates + CGST/
 ("round-off", "getTaxContext"). **Not done:** `convertMemoToInvoice()` (memo/wholesale path) does not round off yet — its totals are
 unrounded as before; GST *credit note* on a sales return is still I3 (not started).
 
+**Stock Book (2026-09-27).** `/reports/stock-book` (`pages/Reports/StockBook.tsx`, `tagging.service.ts: getStockBook`) — a pivot-style
+stock report: one row per tag on the shared `DataTable` (right-click a header to show/hide columns and auto-fit, drag a header to reorder,
+Excel-style column filters, layout remembered per browser), Detail or **Summary** (group by any of status/branch/category/sub-category/
+collection/stock type/make type/metal/karat/setting/manufacturer; measures summed — each grouping keeps its own remembered layout), search,
+sort, paging, CSV. Branch scope is enforced **server-side from the user's branch grants** (`ctx.branchAccess`, same rule as `listTags`): a
+restricted user sees only their branch(es) and the picker never offers others; an all-branches user picks one or all. To support this,
+`DataTable` gained optional, backward-compatible props: `sortable` (+ column `sortValue`), `pageSizeOptions`, `maxHeight` (sticky header),
+`csvFileName` (+ column `csvValue`), `onColumnOrderChange` (Summary reads its grouping order — and so its row sort — from the dragged column order), and `footer` may be a function `(filteredRows, visibleColumns)` so a totals row follows the filters. No migration. **Not a point-in-time ledger** — there is no
+stock movement history, so the date range filters on *tagged* date and status is current; a true "as of date" view would need one.
+Dia Wt = `DIAMOND` material rows, CS Wt = every other non-metal row (carats). Tests: `tagging.service.test.ts` "getStockBook".
+
 **Old gold & store credit as payment modes (2026-09-27, ROADMAP I7).** New Sale's payment splits now also take `OLD_GOLD` (customer's
 old metal, valued at the day's rate and booked as an `OldGoldExchange` + Metal Vault entry inside the same invoice transaction) and
 `STORE_CREDIT` (credit already on the account from a return/earlier exchange — `GET /sales/clients/:id/credit`). Both settle the bill from
@@ -361,6 +372,13 @@ old metal, valued at the day's rate and booked as an `OldGoldExchange` + Metal V
 was booked when it arose). **Anything that sums `InvoicePayment` as receipts must skip `CREDIT_SETTLEMENT_MODES`** (shared/constants.ts)
 — the client ledger and day book already do. No migration. Tests: `sales.service.test.ts` ("old gold & store credit as payment modes").
 Not done: memo/wholesale path, applying credit to an older unpaid invoice.
+
+**Editing an issued invoice (2026-09-27, ROADMAP I8).** `PUT /sales/invoices/:id` → `amendInvoice()` (permission `invoice:edit`, SUPER_ADMIN or granted)
+changes lines/rates/GST/customer in one transaction: stock flips for tags added/removed, GST record rewritten, **one adjustment journal for the
+difference (original entries are never edited or deleted)**, customer balance by the change in total, audit `AMEND` with before/after. The business
+explicitly chose this over "never rewrite history" for invoices; returned lines stay locked and the customer is fixed once a payment/return exists.
+`createInvoice`'s pricing lives in `priceInvoice()` and is shared. The New Sale screen is the editor (`/sales/invoices/:id/edit`); the invoice list
+has Edit actions (shown only with the permission) and From/To date filters. Tests: `sales.service.test.ts` "amendInvoice".
 
 **Next:** nothing left on the roadmap's A–H phase list — CLAUDE.md §4.2 (hallmarking optional FK)
 was resolved by G2. Remaining open items are the two documented control gaps in §8

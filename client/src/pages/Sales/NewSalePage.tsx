@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import {
   Box, Card, Table, TableHead, TableBody, TableRow, TableCell, Typography, Chip, Button,
   Grid, MenuItem, TextField, Stack, Divider, IconButton, Autocomplete, Tabs, Tab,
@@ -10,7 +10,7 @@ import { Add, Delete, Print, AddCircleOutline, CheckCircle, ArrowBack, PersonAdd
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm, Controller } from 'react-hook-form';
 import { useSnackbar } from 'notistack';
-import { apiGet, apiPost, apiPatch } from '../../api/client';
+import { apiGet, apiPost, apiPatch, apiPut } from '../../api/client';
 import { PageHeader } from '../../components/common/PageHeader';
 import { ClientKycDialog } from '../../components/common/ClientKycDialog';
 import { SelectField } from '../../components/fields/SelectField';
@@ -18,6 +18,7 @@ import { printInvoice } from '../../utils/printInvoice';
 import { findMakingCharge } from '../../utils/estimateCalc';
 import { EstimateBreakdown, EstimateBreakdownDialog, estimateTotals, newRowKey } from './EstimateBreakdown';
 import { SaleSummary, SaleFigures } from './SaleSummary';
+import { useAuthStore } from '../../store/auth.store';
 
 // Statutory limits the server enforces (shared/compliance.ts) — mirrored here only to warn before submitting.
 const PAN_REQUIRED_ABOVE = 200000;   // Rule 114B: PAN / Form 60 on a sale above this
@@ -53,12 +54,17 @@ interface LineItem {
   estimateNumber?: string;
   quotedTotal?: number;
   estimate?: EstimateBreakdown;
+  // Edit mode only: the stored InvoiceItem this row came from (sent back so it is updated in place), and how it was priced —
+  // a FIXED line's goldRate is its flat price, not a per-gram rate.
+  invoiceItemId?: string;
+  rateType?: string;
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
 function lineTotal(l: LineItem) {
   if (l.estimate) return round2(estimateTotals(l.estimate).total);
+  if (l.rateType === 'FIXED') return Number(l.goldRate) * Number(l.quantity || 1);
   const effectiveMaking = Number(l.makingCharge) * (1 + Number(l.wastagePercent || 0) / 100);
   const unit = Number(l.netGoldWeight) * Number(l.goldRate) + effectiveMaking + Number(l.stoneValue);
   return unit * Number(l.quantity || 1);
@@ -303,6 +309,50 @@ export function NewSalePage() {
     if (!branchId && branchList.length === 1) setValue('branchId', branchList[0].id);
   }, [branchId, branchList.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Edit mode (/sales/invoices/:id/edit) ─────────────────────────────────────────────────────────────────────
+  // The same screen, loaded with an issued invoice and saved with PUT (sales.service.ts amendInvoice). Payments are
+  // not touched here (they stay as recorded); returned lines are locked, as the server enforces.
+  const { id: editId } = useParams();
+  const isEdit = !!editId;
+  const { data: editInvoice } = useQuery({
+    queryKey: ['invoice-detail', editId], queryFn: () => apiGet<any>(`/sales/invoices/${editId}`), enabled: isEdit,
+  });
+  const { data: editReturnsData } = useQuery({
+    queryKey: ['invoice-returns', editId], queryFn: () => apiGet<any[]>('/sales/returns', { invoiceId: editId }), enabled: isEdit,
+  });
+  const returnedItemIds = new Set<string>(((editReturnsData as any[]) ?? []).flatMap((r: any) => r.items.map((i: any) => i.invoiceItemId)));
+  const isLocked = (l: LineItem) => !!l.invoiceItemId && returnedItemIds.has(l.invoiceItemId);
+  const editPaid = isEdit ? Number(editInvoice?.paidAmount) || 0 : 0;
+  const editLocksClient = isEdit && ((editInvoice?.payments?.length ?? 0) > 0 || (editReturnsData?.length ?? 0) > 0);
+  const [editReason, setEditReason] = useState('');
+  const editLoaded = useRef(false);
+  useEffect(() => {
+    if (!isEdit || !editInvoice || editLoaded.current) return;
+    editLoaded.current = true;
+    const inv = editInvoice;
+    reset({
+      clientId: inv.clientId, branchId: inv.branchId, invoiceType: inv.invoiceType,
+      invoiceDate: String(inv.invoiceDate).slice(0, 10), currency: inv.currency,
+      discountAmount: Number(inv.discountAmount), otherCharges: Number(inv.otherCharges),
+      salesPersonId: inv.salesPersonId ?? '', terms: inv.terms ?? 'IMMEDIATE', notes: inv.notes ?? '',
+    });
+    setLines((inv.items ?? []).map((it: any): LineItem => ({
+      key: nextKey(), invoiceItemId: it.id, rateType: it.rateType,
+      tagId: it.tagId ?? undefined, tagNumber: it.tagId ? it.productCode : undefined,
+      productCode: it.productCode, description: it.description, huid: it.huid ?? undefined, karat: it.karat ?? undefined,
+      quantity: Number(it.quantity), grossWeight: Number(it.grossWeight), netGoldWeight: Number(it.netGoldWeight),
+      stoneWeight: Number(it.stoneWeight), goldRate: Number(it.goldRate), makingCharge: Number(it.makingCharge),
+      wastagePercent: Number(it.wastagePercent), stoneValue: Number(it.stoneValue),
+      categoryId: it.categoryId ?? undefined, categoryName: it.category?.name ?? undefined, hsnCode: it.hsnCode?.code ?? undefined,
+    })));
+    // Keep the round-off as it was: automatic if that is what the bill had (nearest rupee), else the figure that was keyed.
+    const stored = Number(inv.roundOff);
+    const pre = Number(inv.totalAmount) - stored;
+    const auto = inv.currency === 'INR' ? Math.round(pre) - pre : 0;
+    if (Math.abs(auto - stored) < 0.006) setRoundMode('AUTO');
+    else { setRoundMode('MANUAL'); setRoundManual(stored); }
+  }, [isEdit, editInvoice]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const addTagLine = (tag: any) => {
     const netGoldWeight = Number(tag.netWeight ?? 0);
     // Prefer whatever MC rate/VA% was actually decided for this piece at tagging time (see
@@ -434,10 +484,10 @@ export function NewSalePage() {
   };
 
   const updateLine = (key: string, field: keyof LineItem, value: any) => {
-    setLines((p) => p.map((l) => (l.key === key ? { ...l, [field]: value } : l)));
+    setLines((p) => p.map((l) => (l.key === key && !isLocked(l) ? { ...l, [field]: value } : l)));
   };
 
-  const removeLine = (key: string) => setLines((p) => p.filter((l) => l.key !== key));
+  const removeLine = (key: string) => setLines((p) => p.filter((l) => l.key !== key || isLocked(l)));
 
   // All of this mirrors createInvoice (sales.service.ts), which recomputes it authoritatively at save time.
   const subtotal = lines.reduce((s, l) => s + lineTotal(l), 0);
@@ -476,6 +526,9 @@ export function NewSalePage() {
         const t = estimateTotals(l.estimate);
         gold += t.metalAmount; stone += t.otherMaterials; mc += t.mcAmount; va += t.vaAmount;
         grossWeight += Number(l.grossWeight) || 0;
+      } else if (l.rateType === 'FIXED') {
+        gold += Number(l.goldRate) * q; // a flat price: the whole amount is the line (no separate making / stone split)
+        grossWeight += (Number(l.grossWeight) || 0) * q;
       } else {
         gold += Number(l.netGoldWeight) * Number(l.goldRate) * q;
         stone += Number(l.stoneValue) * q;
@@ -565,8 +618,9 @@ export function NewSalePage() {
   // More metal than the bill needs is allowed — the surplus stays as credit on the customer's account.
   const oldGoldTotal = oldGoldSplits.reduce((s, x) => s + oldGoldValue(x), 0);
   // What is still owed after what is being collected now (the whole bill when nothing is collected: it goes on the customer's account).
-  const collected = collectPayment ? paymentSplitsTotal : 0;
-  const pending = Math.max(total - collected, 0);
+  // (Editing an issued invoice: what it has already received stays as recorded, so the balance is what is left of the new total.)
+  const collected = isEdit ? editPaid : collectPayment ? paymentSplitsTotal : 0;
+  const pending = isEdit ? total - editPaid : Math.max(total - collected, 0);
 
   // Sec 269ST — cash taken from one person in a day must stay under ₹2,00,000 (the server also adds up cash already
   // taken from this client earlier that day, which this screen cannot see).
@@ -590,15 +644,34 @@ export function NewSalePage() {
   const categoryRows = Object.entries(categoryTotals);
 
   const mutation = useMutation({
-    mutationFn: (data: any) => apiPost('/sales/invoices', {
+    mutationFn: (data: any) => (isEdit ? apiPut(`/sales/invoices/${editId}`, { ...buildBody(data), payments: undefined, estimateIds: undefined, reason: editReason.trim() || undefined })
+      : apiPost('/sales/invoices', buildBody(data))),
+    onSuccess: (res: any) => {
+      const inv = res?.data ?? res;
+      qc.invalidateQueries({ queryKey: ['sales-invoices'] });
+      qc.invalidateQueries({ queryKey: ['invoice-detail'] });
+      // Credit was spent (or old gold left some behind) and the customer's balance moved.
+      qc.invalidateQueries({ queryKey: ['client-credit'] });
+      qc.invalidateQueries({ queryKey: ['clients-list'] });
+      setCreatedInvoice(inv);
+      enqueueSnackbar(`Invoice ${inv?.invoiceNumber ?? ''} ${isEdit ? 'updated' : 'created'}`, { variant: 'success' });
+    },
+    onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? (isEdit ? 'Failed to update invoice' : 'Failed to create invoice'), { variant: 'error' }),
+  });
+
+  // The invoice as the server takes it (POST to create; PUT to amend sends the same bill plus each line's `id`).
+  function buildBody(data: any) {
+    return {
       ...data,
       invoiceDate: new Date(data.invoiceDate),
       discountAmount: discount,
       otherCharges: Number(data.otherCharges) || 0,
       // Left out on AUTO so the server rounds to the rupee itself; a keyed figure (0 = none) is sent as typed.
       roundOff: roundMode === 'MANUAL' ? Number(roundManual) || 0 : undefined,
-      salesPersonId: data.salesPersonId || undefined,
-      terms: data.terms || undefined,
+      // Editing: a cleared field must go through as null (undefined would mean "leave as it was").
+      salesPersonId: data.salesPersonId || (isEdit ? null : undefined),
+      terms: data.terms || (isEdit ? null : undefined),
+      notes: isEdit ? (data.notes || null) : data.notes,
       estimateIds: lines.filter((l) => l.estimateId).map((l) => l.estimateId),
       payments: collectPayment && paymentSplits.length > 0
         ? paymentSplits
@@ -630,33 +703,24 @@ export function NewSalePage() {
         grossWeight: Number(l.grossWeight) || 0,
         netGoldWeight: Number(l.netGoldWeight) || 0,
         stoneWeight: Number(l.stoneWeight) || 0,
-        rateType: 'PER_GRAM',
+        ...(l.invoiceItemId && { id: l.invoiceItemId }),
+        rateType: l.rateType ?? 'PER_GRAM',
         // Omit (rather than send 0) when unset so the server resolves today's MetalRate for
-        // `karat` (C2) instead of pricing the line at zero.
-        goldRate: Number(l.goldRate) || undefined,
+        // `karat` (C2) instead of pricing the line at zero. (A stored line being edited always sends its figures.)
+        goldRate: l.invoiceItemId ? Number(l.goldRate) : Number(l.goldRate) || undefined,
         // Omit (rather than send 0) when unset so the server pulls the MakingCharge master's rate
         // for the line's category (C3) instead of pricing the making charge at zero. wastagePercent
         // stays an always-explicit 0 default — unlike goldRate/makingCharge, a genuine 0% wastage
         // is a common, deliberate value, not a "field left blank" signal.
-        makingCharge: Number(l.makingCharge) || undefined,
+        makingCharge: l.invoiceItemId ? Number(l.makingCharge) : Number(l.makingCharge) || undefined,
         wastagePercent: Number(l.wastagePercent) || 0,
         stoneValue: Number(l.stoneValue) || 0,
         tagId: l.tagId,
         categoryId: l.categoryId || undefined,
         hsnCode: l.hsnCode || undefined,
       })),
-    }),
-    onSuccess: (res: any) => {
-      const inv = res?.data ?? res;
-      qc.invalidateQueries({ queryKey: ['sales-invoices'] });
-      // Credit was spent (or old gold left some behind) and the customer's balance moved.
-      qc.invalidateQueries({ queryKey: ['client-credit'] });
-      qc.invalidateQueries({ queryKey: ['clients-list'] });
-      setCreatedInvoice(inv);
-      enqueueSnackbar(`Invoice ${inv?.invoiceNumber ?? ''} created`, { variant: 'success' });
-    },
-    onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed to create invoice', { variant: 'error' }),
-  });
+    };
+  }
 
   const handleSaveAndNew = () => {
     setCreatedInvoice(null);
@@ -708,7 +772,7 @@ export function NewSalePage() {
 
   return (
     <Box>
-      <PageHeader title="New Sale" />
+      <PageHeader title={isEdit ? `Edit Invoice ${editInvoice?.invoiceNumber ?? ''}`.trim() : 'New Sale'} />
 
       <Grid container spacing={3} alignItems="flex-start">
         <Grid item xs={12} md={activeTab === 1 ? 12 : 8}>
@@ -716,16 +780,18 @@ export function NewSalePage() {
             {createdInvoice ? (
               <Box sx={{ p: 3 }}>
                 <Alert severity="success" icon={<CheckCircle />} sx={{ mb: 2 }}>
-                  <Typography fontWeight={700}>Invoice {createdInvoice.invoiceNumber} created!</Typography>
+                  <Typography fontWeight={700}>Invoice {createdInvoice.invoiceNumber} {isEdit ? 'updated' : 'created'}!</Typography>
                 </Alert>
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
                   <Button variant="contained" size="large" startIcon={<Print />}
                     onClick={() => printInvoice(createdInvoice)} sx={{ flex: 1 }}>
                     Print Invoice
                   </Button>
-                  <Button variant="outlined" size="large" startIcon={<AddCircleOutline />} onClick={handleSaveAndNew} sx={{ flex: 1 }}>
-                    New Sale
-                  </Button>
+                  {!isEdit && (
+                    <Button variant="outlined" size="large" startIcon={<AddCircleOutline />} onClick={handleSaveAndNew} sx={{ flex: 1 }}>
+                      New Sale
+                    </Button>
+                  )}
                   <Button variant="text" size="large" onClick={() => navigate('/sales/invoices')} sx={{ flex: 1 }}>
                     View All Invoices
                   </Button>
@@ -763,12 +829,13 @@ export function NewSalePage() {
                 {activeTab === 0 && (
                   <Box sx={{ p: 3 }}>
                     <Grid container spacing={2}>
-                      <Grid item xs={12}>{renderEstimatePicker()}</Grid>
+                      {!isEdit && <Grid item xs={12}>{renderEstimatePicker()}</Grid>}
                       <Grid item xs={12} sm={7}>
                         <Stack direction="row" spacing={1} alignItems="flex-start">
                           <Controller name="clientId" control={control} rules={{ required: true }}
                             render={({ field, fieldState }) => (
-                              <TextField {...field} select fullWidth label="Client *" error={!!fieldState.error}>
+                              <TextField {...field} select fullWidth label="Client *" error={!!fieldState.error} disabled={editLocksClient}
+                                helperText={editLocksClient ? 'Fixed — a payment or return is already recorded on this invoice' : undefined}>
                                 {clientList.map((c: any) => (
                                   <MenuItem key={c.id} value={c.id}>{c.clientCode} — {c.name}</MenuItem>
                                 ))}
@@ -798,7 +865,7 @@ export function NewSalePage() {
                       <Grid item xs={6} sm={2.5}>
                         <Controller name="currency" control={control}
                           render={({ field }) => (
-                            <TextField {...field} select fullWidth label="Currency">
+                            <TextField {...field} select fullWidth label="Currency" disabled={isEdit}>
                               <MenuItem value="INR">INR</MenuItem>
                               <MenuItem value="USD">USD</MenuItem>
                             </TextField>
@@ -807,7 +874,7 @@ export function NewSalePage() {
                       <Grid item xs={6} sm={4}>
                         <Controller name="branchId" control={control} rules={{ required: true }}
                           render={({ field, fieldState }) => (
-                            <SelectField {...field} label="Branch *" emptyLabel="Select branch…" error={!!fieldState.error}
+                            <SelectField {...field} label="Branch *" emptyLabel="Select branch…" error={!!fieldState.error} disabled={isEdit}
                               options={branchList.map((b: any) => ({ value: b.id, label: b.name }))} />
                           )} />
                       </Grid>
@@ -897,7 +964,7 @@ export function NewSalePage() {
                               </TableHead>
                               <TableBody>
                                 {lines.map((l) => (
-                                  <TableRow key={l.key}>
+                                  <TableRow key={l.key} sx={isLocked(l) ? { opacity: 0.6 } : undefined}>
                                     <TableCell>
                                       {l.tagId ? (
                                         <Box>
@@ -905,6 +972,8 @@ export function NewSalePage() {
                                             <Typography sx={{ fontFamily: 'monospace', fontSize: 12, color: '#44C47A', fontWeight: 700 }}>
                                               {l.tagNumber}
                                             </Typography>
+                                            {isLocked(l) && <Chip size="small" color="warning" label="Returned — locked" sx={{ height: 18, fontSize: 10 }} />}
+                                            {l.rateType === 'FIXED' && <Chip size="small" variant="outlined" label="Flat price" sx={{ height: 18, fontSize: 10 }} title="Rate column is this line's flat price, not ₹/g" />}
                                             {l.estimateNumber && (
                                               <Chip size="small" color="info" variant="outlined" label={l.estimateNumber} sx={{ height: 18, fontSize: 10, fontFamily: 'monospace' }} />
                                             )}
@@ -912,7 +981,7 @@ export function NewSalePage() {
                                           <Typography variant="body2" color="text.secondary" noWrap title={l.description}>{l.description}</Typography>
                                         </Box>
                                       ) : (
-                                        <TextField size="small" fullWidth placeholder="Description" value={l.description}
+                                        <TextField size="small" fullWidth placeholder="Description" value={l.description} disabled={isLocked(l)}
                                           onChange={(e) => updateLine(l.key, 'description', e.target.value)} />
                                       )}
                                     </TableCell>
@@ -920,7 +989,7 @@ export function NewSalePage() {
                                       {l.tagId ? (
                                         <Typography variant="body2">{l.categoryName ?? '—'}</Typography>
                                       ) : (
-                                        <TextField size="small" select fullWidth value={l.categoryId ?? ''}
+                                        <TextField size="small" select fullWidth value={l.categoryId ?? ''} disabled={isLocked(l)}
                                           onChange={(e) => {
                                             const cat = categoryList.find((c: any) => c.id === e.target.value);
                                             updateLine(l.key, 'categoryId', e.target.value);
@@ -935,7 +1004,7 @@ export function NewSalePage() {
                                     </TableCell>
                                     <TableCell align="right">
                                       {l.tagId ? <Typography component="span" variant="body2" sx={{ fontFamily: 'monospace' }}>{Number(l.netGoldWeight).toFixed(3)}</Typography> : (
-                                        <TextField size="small" fullWidth type="number" value={l.netGoldWeight}
+                                        <TextField size="small" fullWidth type="number" value={l.netGoldWeight} disabled={isLocked(l)}
                                           inputProps={{ step: 0.001, min: 0, style: { textAlign: 'right', width: 50 } }}
                                           onChange={(e) => updateLine(l.key, 'netGoldWeight', Number(e.target.value))} />
                                       )}
@@ -956,28 +1025,28 @@ export function NewSalePage() {
                                       </TableCell>
                                     ) : (<>
                                     <TableCell align="right">
-                                      <TextField size="small" fullWidth type="number" value={l.goldRate}
+                                      <TextField size="small" fullWidth type="number" value={l.goldRate} disabled={isLocked(l)}
                                         inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right' } }}
                                         onChange={(e) => updateLine(l.key, 'goldRate', Number(e.target.value))} />
                                     </TableCell>
                                     <TableCell align="right">
-                                      <TextField size="small" fullWidth type="number" value={l.makingCharge}
+                                      <TextField size="small" fullWidth type="number" value={l.makingCharge} disabled={isLocked(l) || l.rateType === 'FIXED'}
                                         inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right' } }}
                                         onChange={(e) => updateLine(l.key, 'makingCharge', Number(e.target.value))} />
                                     </TableCell>
                                     <TableCell align="right">
-                                      <TextField size="small" fullWidth type="number" value={l.wastagePercent}
+                                      <TextField size="small" fullWidth type="number" value={l.wastagePercent} disabled={isLocked(l) || l.rateType === 'FIXED'}
                                         inputProps={{ step: 0.1, min: 0, style: { textAlign: 'right' } }}
                                         onChange={(e) => updateLine(l.key, 'wastagePercent', Number(e.target.value))} />
                                     </TableCell>
                                     <TableCell align="right">
-                                      <TextField size="small" fullWidth type="number" value={l.stoneValue}
+                                      <TextField size="small" fullWidth type="number" value={l.stoneValue} disabled={isLocked(l) || l.rateType === 'FIXED'}
                                         inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right' } }}
                                         onChange={(e) => updateLine(l.key, 'stoneValue', Number(e.target.value))} />
                                     </TableCell>
                                     </>)}
                                     <TableCell align="right">
-                                      <TextField size="small" fullWidth type="number" value={l.quantity} disabled={!!l.estimate}
+                                      <TextField size="small" fullWidth type="number" value={l.quantity} disabled={!!l.estimate || isLocked(l)}
                                         inputProps={{ step: 1, min: 1, style: { textAlign: 'right' } }}
                                         onChange={(e) => updateLine(l.key, 'quantity', Number(e.target.value))} />
                                     </TableCell>
@@ -985,7 +1054,7 @@ export function NewSalePage() {
                                       {fmt(lineTotal(l))}
                                     </TableCell>
                                     <TableCell>
-                                      <IconButton size="small" color="error" onClick={() => removeLine(l.key)}>
+                                      <IconButton size="small" color="error" disabled={isLocked(l)} onClick={() => removeLine(l.key)}>
                                         <Delete fontSize="small" />
                                       </IconButton>
                                     </TableCell>
@@ -1052,13 +1121,24 @@ export function NewSalePage() {
                       </Alert>
                     )}
 
-                    {creditAvailable > 0 && (
+                    {!isEdit && creditAvailable > 0 && (
                       <Alert severity="info" sx={{ mb: 1 }}
                         action={<Button color="inherit" size="small" onClick={useStoreCredit}>Use credit</Button>}>
                         {selectedClient?.name} has <b>{fmt(creditAvailable)}</b> credit on account (from a sales return or old gold exchange). Pay with it using the Store Credit mode.
                       </Alert>
                     )}
 
+                    {isEdit ? (
+                    <Box sx={{ mt: 2 }}>
+                      <Alert severity="warning" sx={{ mb: 2 }}>
+                        You are editing an issued invoice. Stock, GST and {selectedClient?.name ?? 'the customer'}'s balance are adjusted to the new bill; the
+                        original ledger entries stay and a correcting entry is added. Payments already recorded ({fmt(editPaid)}) are not changed —
+                        the balance is recalculated from them.
+                      </Alert>
+                      <TextField fullWidth size="small" label="Reason for the change (kept in the audit log)" value={editReason}
+                        onChange={(e) => setEditReason(e.target.value)} />
+                    </Box>
+                    ) : (
                     <Box sx={{ mt: 2 }}>
                       <FormControlLabel
                         control={<Checkbox checked={collectPayment} onChange={(e) => {
@@ -1198,11 +1278,12 @@ export function NewSalePage() {
                         </Box>
                       )}
                     </Box>
+                    )}
 
                     <Stack direction="row" justifyContent="space-between" sx={{ mt: 3 }}>
                       <Button variant="text" onClick={() => setActiveTab(1)}>← Back</Button>
                       <Button type="submit" variant="contained" size="large" disabled={mutation.isPending || panBlocked || cashBlocked || roundBad || creditBlocked || oldGoldIncomplete}>
-                        {mutation.isPending ? 'Creating…' : 'Create Invoice'}
+                        {mutation.isPending ? (isEdit ? 'Saving…' : 'Creating…') : isEdit ? 'Save Changes' : 'Create Invoice'}
                       </Button>
                     </Stack>
                   </Box>
@@ -1223,13 +1304,13 @@ export function NewSalePage() {
                 <Card sx={{ mt: 1.5, px: 2, py: 1.25 }}>
                   <Stack spacing={0.5}>
                     <Stack direction="row" justifyContent="space-between">
-                      <Typography variant="body2" color="text.secondary">Collecting now</Typography>
+                      <Typography variant="body2" color="text.secondary">{isEdit ? 'Already paid' : 'Collecting now'}</Typography>
                       <Typography variant="body2" sx={{ fontFamily: 'monospace', color: 'success.main' }}>{fmt(collected)}</Typography>
                     </Stack>
                     <Stack direction="row" justifyContent="space-between">
-                      <Typography variant="body2" fontWeight={700}>Pending</Typography>
+                      <Typography variant="body2" fontWeight={700}>{isEdit ? (pending < -0.005 ? 'Over-paid by' : 'Balance due') : 'Pending'}</Typography>
                       <Typography variant="body2" fontWeight={700} sx={{ fontFamily: 'monospace', color: pending > 0.005 ? 'warning.main' : 'success.main' }}>
-                        {fmt(pending)}
+                        {fmt(isEdit ? Math.abs(pending) : pending)}
                       </Typography>
                     </Stack>
                   </Stack>

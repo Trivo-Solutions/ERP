@@ -47,6 +47,9 @@ import { TagsPage } from './pages/Tagging/TagsPage';
 import { NewTagPage } from './pages/Tagging/NewTagPage';
 import { BranchesPage } from './pages/Tagging/BranchesPage';
 import { BranchTransfersPage } from './pages/Tagging/BranchTransfersPage';
+import { NewBranchTransferPage } from './pages/Tagging/NewBranchTransferPage';
+import { BranchReceivesPage } from './pages/Tagging/BranchReceivesPage';
+import { BranchReceiveDetailPage } from './pages/Tagging/BranchReceiveDetailPage';
 import { StockLookupPage } from './pages/Tagging/StockLookupPage';
 import { BranchStockSummary } from './pages/Tagging/BranchStockSummary';
 import { StockAudit } from './pages/Tagging/StockAudit';
@@ -80,6 +83,7 @@ import { AgingReceivables } from './pages/Reports/AgingReceivables';
 import { SalesRegister } from './pages/Reports/SalesRegister';
 import { StockOnHand } from './pages/Reports/StockOnHand';
 import { DeadStock } from './pages/Reports/DeadStock';
+import { StockBook } from './pages/Reports/StockBook';
 import { DayBook } from './pages/Reports/DayBook';
 import { GstSummary } from './pages/Reports/GstSummary';
 import { PurchaseGstSummary } from './pages/Reports/PurchaseGstSummary';
@@ -152,6 +156,9 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="tagging/audits"       element={<StockAudit />} />
       <Route path="tagging/branches"     element={<BranchesPage />} />
       <Route path="tagging/transfers"    element={<BranchTransfersPage />} />
+      <Route path="tagging/transfers/new" element={<NewBranchTransferPage />} />
+      <Route path="tagging/receives"     element={<BranchReceivesPage />} />
+      <Route path="tagging/receives/:id" element={<BranchReceiveDetailPage />} />
 
       {/* Estimation (standalone) */}
       <Route path="estimation" element={<EstimationPage />} />
@@ -161,6 +168,7 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="sales/memos" element={<MemoOutPage />} />
       <Route path="sales/invoices" element={<SalesInvoices />} />
       <Route path="sales/invoices/new" element={<NewSalePage />} />
+      <Route path="sales/invoices/:id/edit" element={<NewSalePage />} />
       <Route path="sales/exchanges" element={<OldGoldExchange />} />
 
       {/* Finance */}
@@ -181,6 +189,7 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="reports/karigar" element={<KarigarBalances />} />
       <Route path="reports/aging" element={<AgingReceivables />} />
       <Route path="reports/sales-register" element={<SalesRegister />} />
+      <Route path="reports/stock-book" element={<StockBook />} />
       <Route path="reports/stock-on-hand" element={<StockOnHand />} />
       <Route path="reports/dead-stock" element={<DeadStock />} />
       <Route path="reports/day-book" element={<DayBook />} />

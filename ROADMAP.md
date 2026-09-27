@@ -562,6 +562,27 @@ the *code* rather than the docs. Each item has its own migration where the schem
   (`convertMemoToInvoice`) takes no payments and so no credit modes; credit cannot yet be applied to an *older* unpaid invoice;
   old-gold GST treatment (purchase from an unregistered person) is not modelled — confirm with a CA.
 
+- **I8 — edit an issued invoice + invoice-list date filters (2026-09-27). DONE.** No migration. `PUT /sales/invoices/:id`
+  (`amendInvoice`, permission **`invoice:edit`** — SUPER_ADMIN via `*`, assignable to any role later; deliberately not `invoice:create`) lets an
+  admin change *anything*: lines, rates, discount, GST/HSN, customer, dates, notes — even after payments or returns (the business's call,
+  overriding the older "never rewrite history" rule; history is kept differently, below). The body is the whole new bill; a line with its
+  InvoiceItem `id` is updated in place, one without is added, one left out is removed. **In one transaction:** tags taken off go back to
+  `IN_STOCK`, tags added flip to `SOLD` (count-checked like `createInvoice`); the GST record (`TaxInvoice`) is rewritten and same-/inter-state
+  re-resolved from the customer; the original journal entries are **never edited** — one `SalesInvoiceAmendment` entry is posted for the *difference*
+  (receivable, revenue, CGST/SGST/IGST, round-off, COGS/inventory); `Client.currentBalance` moves by the change in total (a changed customer gives the
+  whole bill back and the new one takes it); paid/due/status are re-derived from the payments, which are untouched (a bill cut below what was paid
+  shows a negative due = credit); PAN / credit-limit checks apply only where the edit worsens the customer's position. The audit log
+  (`sales_invoices`, action `AMEND`) keeps the full before/after including lines, and an optional reason. **Locks:** a *returned* line cannot be
+  changed or removed (the return already reversed it); the customer cannot change once a payment or return exists; currency and branch are fixed.
+  Amendments of one invoice are serialised with `SELECT … FOR UPDATE`. To share the maths, `createInvoice`'s pricing block became
+  `priceInvoice()` (behaviour unchanged — all existing sales tests pass untouched). **UI:** the New Sale screen doubles as the editor at
+  `/sales/invoices/:id/edit` (payments block replaced by a warning + reason box; returned lines dimmed/locked; a FIXED/estimate-priced line shows
+  a "Flat price" chip); an **Edit** icon column in the invoice table and an **Edit** button in the invoice drawer, both shown only with
+  `invoice:edit`. Also: the invoice list gained From/To date filters (`GET /sales/invoices?from&to`) and moved onto `DataTable` (column
+  filters, drag-reorder, resize) with ~20 optional columns (sales executive, branch, qty, gross/net/stone wt, subtotal, discount, GST split, paid-by, notes …) hidden until chosen from the right-click column menu (`DataTable` gained `defaultHidden`). Tests: `sales.service.test.ts` "amendInvoice" (10), `http.contract.test.ts` (PUT + date range). *Not done:*
+  amending a memo-converted (wholesale) invoice is allowed but untested against memo state; no "view amendment history" screen yet (it is in the
+  audit log); the UI edit flow was not exercised in a browser in this pass.
+
 > The old "GRN → tag is a manual, unflagged step" workflow gap is closed by I1: it stays a deliberate manual step, but the GRN page now
 > shows each untagged finished piece with a Tag button.
 
@@ -587,3 +608,10 @@ M1 masters per company · M2 identity/membership + invitations · M3 provisionin
 shared) · M4 runtime isolation (WebSocket rooms, hardware, Redis/object keys) · M5 database RLS enforced with a non-owner,
 non-bypass runtime role + composite foreign keys · M6 staging verification (two heavy companies, real HTTP/WebSocket/
 browser, backup→restore drill, performance baseline). Runbook: DEPLOY.md.
+
+## Branch transfers — page + verified receiving (2026-09-27)
+
+- **New Transfer is a page** (`/tagging/transfers/new`, `NewBranchTransferPage.tsx`): "Jewelry Detail" (branches, remarks, category overview, summary) and "Items Detail" (tag grid) in vertical tabs; the old dialog is gone. No "Term Detail" tab — a transfer carries no payment terms (decided with the user).
+- **Branch Receives** (`/tagging/receives`, `BranchReceivesPage.tsx` → `BranchReceiveDetailPage.tsx`): the receiving branch's inbox of dispatched transfers. The detail page has the same two tabs and item table; pieces are ticked off (checkbox or scan tag number/HUID + Enter) and **only verified pieces are received**.
+- **Schema:** `branch_transfer_items.receivedAt` (migration `20260927140000_transfer_item_received`, existing RECEIVED transfers backfilled). `receiveTransfer(id, ctx, userId, tagIds?)` flips only the verified tags `TRANSFERRED → IN_STOCK` at the destination (count-checked, all-or-nothing); unverified pieces stay `TRANSFERRED`; the transfer is `PARTIALLY_RECEIVED` until the last piece is in, then `RECEIVED`. Tests: `branchTransfer.receive.test.ts`.
+- **Not done:** there is no write-off / "lost in transit" action for a piece that never arrives — it stays in transit, and the transfer stays Partly Received, until it turns up. The migration was applied to the real role-split `trivo_rlstest` (FORCE RLS) and `npm run test:rls` passed (717 tests, 1 skipped).

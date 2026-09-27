@@ -1856,6 +1856,9 @@ model BranchTransferItem {
   transferId String
   tag        JewelryTag     @relation(fields: [tagId, companyId], references: [id, companyId])
   tagId      String
+  // Set when the receiving branch verified this piece and took it in. A dispatched transfer is
+  // received piece by piece — an item with no receivedAt is still in transit.
+  receivedAt DateTime?
 
   @@index([companyId])
   @@map("branch_transfer_items")

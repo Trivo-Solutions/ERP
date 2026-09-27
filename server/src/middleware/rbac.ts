@@ -95,6 +95,7 @@ export const PERMISSIONS = {
   SALES_CREATE: 'sales:create',
   MEMO_MANAGE: 'memo:manage',
   INVOICE_CREATE: 'invoice:create',
+  INVOICE_EDIT: 'invoice:edit', // amend an issued invoice (lines, prices, GST, customer) — SUPER_ADMIN via '*', or granted to a role
   EXPORT_DOC: 'export:doc',
 
   // Finance

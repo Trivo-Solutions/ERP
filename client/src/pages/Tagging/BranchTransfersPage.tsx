@@ -1,137 +1,25 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Box, Card, Table, TableHead, TableBody, TableRow, TableCell, Typography, Button,
-  Grid, MenuItem, TextField, Dialog, DialogTitle, DialogContent, DialogActions,
-  Drawer, Stack, Divider, IconButton, Chip, CircularProgress, Alert,
-  Autocomplete,
+  Grid, MenuItem, TextField, Drawer, Stack, Divider, IconButton, Chip, CircularProgress,
 } from '@mui/material';
 import { Add, Close, Send, CheckCircle, Cancel, MoveDown } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useForm, Controller } from 'react-hook-form';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost } from '../../api/client';
 import { PageHeader, PageActions } from '../../components/common/PageHeader';
 import { StatusChip } from '../../components/common/StatusChip';
 import { useAuthStore } from '../../store/auth.store';
 
-const TRANSFER_STATUSES = ['DRAFT', 'PENDING_APPROVAL', 'DISPATCHED', 'RECEIVED', 'CANCELLED'];
-
-// ─── Create Transfer Dialog ───────────────────────────────────────────────────
-
-function CreateTransferDialog({ open, onClose, branches }: {
-  open: boolean; onClose: () => void; branches: any[];
-}) {
-  const { enqueueSnackbar } = useSnackbar();
-  const qc = useQueryClient();
-  const [selectedTags, setSelectedTags] = useState<any[]>([]);
-  const [tagSearch, setTagSearch] = useState('');
-
-  const { control, handleSubmit, reset, watch } = useForm({
-    defaultValues: { fromBranchId: '', toBranchId: '', notes: '' },
-  });
-  const fromBranchId = watch('fromBranchId');
-
-  const { data: tagResults } = useQuery({
-    queryKey: ['tag-search', tagSearch, fromBranchId],
-    queryFn: () => apiGet<any>('/tagging/tags/search', { q: tagSearch, branchId: fromBranchId, status: 'IN_STOCK' }),
-    enabled: tagSearch.length >= 1 && !!fromBranchId,
-  });
-  const searchOptions: any[] = (tagResults as any)?.data ?? (tagResults as any) ?? [];
-
-  const mutation = useMutation({
-    mutationFn: (data: any) => apiPost('/tagging/transfers', {
-      ...data,
-      tagIds: selectedTags.map((t) => t.id),
-    }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['branch-transfers'] });
-      onClose();
-      reset();
-      setSelectedTags([]);
-      enqueueSnackbar('Transfer created', { variant: 'success' });
-    },
-    onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' }),
-  });
-
-  const handleClose = () => { onClose(); reset(); setSelectedTags([]); };
-
-  return (
-    <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth>
-      <form onSubmit={handleSubmit((d) => mutation.mutate(d))}>
-        <DialogTitle fontWeight={700}>New Branch Transfer</DialogTitle>
-        <DialogContent sx={{ pt: 2 }}>
-          <Grid container spacing={2}>
-            <Grid item xs={6}>
-              <Controller name="fromBranchId" control={control} rules={{ required: true }}
-                render={({ field, fieldState }) => (
-                  <TextField {...field} select fullWidth label="From Branch *" error={!!fieldState.error}>
-                    {branches.map((b: any) => <MenuItem key={b.id} value={b.id}>{b.name}</MenuItem>)}
-                  </TextField>
-                )} />
-            </Grid>
-            <Grid item xs={6}>
-              <Controller name="toBranchId" control={control} rules={{ required: true }}
-                render={({ field, fieldState }) => (
-                  <TextField {...field} select fullWidth label="To Branch *" error={!!fieldState.error}>
-                    {branches.filter((b) => b.id !== fromBranchId).map((b: any) => (
-                      <MenuItem key={b.id} value={b.id}>{b.name}</MenuItem>
-                    ))}
-                  </TextField>
-                )} />
-            </Grid>
-
-            <Grid item xs={12}>
-              <Autocomplete
-                disabled={!fromBranchId}
-                options={searchOptions.filter((o) => !selectedTags.find((t) => t.id === o.id))}
-                getOptionLabel={(o) => `${o.tagNumber} — ${o.name}`}
-                filterOptions={(x) => x}
-                onInputChange={(_, v) => setTagSearch(v)}
-                onChange={(_, val) => { if (val) { setSelectedTags((p) => [...p, val]); setTagSearch(''); } }}
-                renderInput={(params) => (
-                  <TextField {...params} label={fromBranchId ? 'Search tags at source branch...' : 'Select source branch first'}
-                    placeholder="Type tag number or name" />
-                )}
-                noOptionsText={tagSearch.length < 1 ? 'Type to search' : 'No IN_STOCK tags found'}
-              />
-            </Grid>
-
-            {selectedTags.length > 0 && (
-              <Grid item xs={12}>
-                <Typography variant="caption" color="text.secondary" gutterBottom>
-                  Selected tags ({selectedTags.length}):
-                </Typography>
-                <Stack direction="row" flexWrap="wrap" gap={0.75} sx={{ mt: 0.5 }}>
-                  {selectedTags.map((tag) => (
-                    <Chip key={tag.id} label={`${tag.tagNumber} — ${tag.name}`} size="small"
-                      onDelete={() => setSelectedTags((p) => p.filter((t) => t.id !== tag.id))} />
-                  ))}
-                </Stack>
-              </Grid>
-            )}
-
-            <Grid item xs={12}>
-              <Controller name="notes" control={control}
-                render={({ field }) => <TextField {...field} fullWidth label="Notes" />} />
-            </Grid>
-          </Grid>
-        </DialogContent>
-        <DialogActions sx={{ p: 2.5 }}>
-          <Button onClick={handleClose}>Cancel</Button>
-          <Button type="submit" variant="contained" disabled={mutation.isPending || selectedTags.length === 0}>
-            Create Transfer
-          </Button>
-        </DialogActions>
-      </form>
-    </Dialog>
-  );
-}
+const TRANSFER_STATUSES = ['DRAFT', 'PENDING_APPROVAL', 'DISPATCHED', 'PARTIALLY_RECEIVED', 'RECEIVED', 'CANCELLED'];
 
 // ─── Transfer Detail Drawer ───────────────────────────────────────────────────
 
 function TransferDrawer({ transferId, onClose }: { transferId: string; onClose: () => void }) {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const hasPermission = useAuthStore((s) => s.hasPermission);
 
   const { data, isLoading } = useQuery({
@@ -155,11 +43,6 @@ function TransferDrawer({ transferId, onClose }: { transferId: string; onClose: 
   const approveMut = useMutation({
     mutationFn: () => act(`/tagging/transfers/${transferId}/approve`),
     onSuccess: () => enqueueSnackbar('Transfer approved & dispatched', { variant: 'success' }),
-    onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' }),
-  });
-  const receiveMut = useMutation({
-    mutationFn: () => act(`/tagging/transfers/${transferId}/receive`),
-    onSuccess: () => enqueueSnackbar('Transfer received', { variant: 'success' }),
     onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' }),
   });
   const cancelMut = useMutation({
@@ -286,10 +169,10 @@ function TransferDrawer({ transferId, onClose }: { transferId: string; onClose: 
                   </Button>
                 </>
               )}
-              {tr.status === 'DISPATCHED' && (
+              {(tr.status === 'DISPATCHED' || tr.status === 'PARTIALLY_RECEIVED') && (
                 <Button variant="contained" color="secondary" startIcon={<MoveDown />}
-                  disabled={receiveMut.isPending} onClick={() => receiveMut.mutate()}>
-                  Mark Received
+                  onClick={() => navigate(`/tagging/receives/${transferId}`)}>
+                  Verify & Receive
                 </Button>
               )}
             </Stack>
@@ -303,15 +186,9 @@ function TransferDrawer({ transferId, onClose }: { transferId: string; onClose: 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export function BranchTransfersPage() {
-  const [createOpen, setCreateOpen] = useState(false);
+  const navigate = useNavigate();
   const [statusFilter, setStatusFilter] = useState('');
   const [selectedId, setSelectedId] = useState('');
-
-  const { data: branchData } = useQuery({
-    queryKey: ['branches'],
-    queryFn: () => apiGet<any>('/tagging/branches'),
-  });
-  const branches: any[] = (branchData as any)?.data ?? branchData ?? [];
 
   const { data, isLoading } = useQuery({
     queryKey: ['branch-transfers', statusFilter],
@@ -336,7 +213,7 @@ export function BranchTransfersPage() {
             <Typography variant="caption" color="text.secondary">{(data as any)?.total ?? 0} transfers</Typography>
           </Grid>
           <Grid item sx={{ ml: 'auto', alignSelf: 'center' }}>
-            <PageActions actions={[{ label: 'New Transfer', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
+            <PageActions actions={[{ label: 'New Transfer', icon: <Add />, onClick: () => navigate('/tagging/transfers/new') }]} />
           </Grid>
         </Grid>
       </Card>
@@ -381,7 +258,6 @@ export function BranchTransfersPage() {
         </Box>
       </Card>
 
-      <CreateTransferDialog open={createOpen} onClose={() => setCreateOpen(false)} branches={branches} />
       {selectedId && <TransferDrawer transferId={selectedId} onClose={() => setSelectedId('')} />}
     </Box>
   );

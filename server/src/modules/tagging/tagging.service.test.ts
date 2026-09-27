@@ -5,7 +5,7 @@ import { FINISHED_GOODS_MATERIAL_TYPE } from '../../shared/constants';
 import {
   createTag as _createTag, updateTag, createTagFromGrnItem as _createTagFromGrnItem, searchTags as _searchTags,
   getBranchStockSummary,
-  startStockAudit, scanAuditItem, completeStockAudit, getStockOnHand, getDeadStock,
+  startStockAudit, scanAuditItem, completeStockAudit, getStockOnHand, getDeadStock, getStockBook,
   getTagPrintTspl, listTagTemplates, getTagTemplateById, createTagTemplate, updateTagTemplate,
 } from './tagging.service';
 import { LEDGER_ACCOUNT } from '../../shared/ledgerAccounts';
@@ -833,6 +833,98 @@ describe('Stock reports (H2/H3)', () => {
   it('getDeadStock excludes non-IN_STOCK tags', async () => {
     const result = await getDeadStock(tenant.company.id);
     expect(result.rows.find((r) => r.id === tagIds[3])).toBeUndefined();
+  });
+});
+
+// Stock Book: one row per tag, and — the part that matters — scoped to the caller's own branch grants.
+describe('getStockBook', () => {
+  const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+  let tenant: TestTenant;
+  let userId: string;
+  let branchAId: string;
+  let branchBId: string;
+  const tagIds: string[] = [];
+  const asRestrictedTo = (...ids: string[]) => ({ ...tenant.ctx, branchAccess: { allBranches: false, branchIds: ids } });
+  let diaTagId: string;
+
+  beforeAll(async () => {
+    tenant = await createTestTenant(`STOCKBOOK${suffix}`, []);
+    userId = tenant.user.id;
+    branchAId = tenant.branch.id;
+    branchBId = (await prisma.branch.create({ data: { companyId: tenant.company.id, branchCode: `TSTBR-SB-${suffix}`, name: 'Second Branch' } })).id;
+
+    async function makeTag(branchId: string, status: string, n: number) {
+      const tag = await prisma.jewelryTag.create({
+        data: {
+          tagNumber: `TSTTAG-SB-${suffix}-${tagIds.length}`, companyId: tenant.company.id, branchId, status,
+          name: 'Piece', metalType: 'GOLD', metalKarat: '22K', grossWeight: 10 + n, netWeight: 9 + n,
+          costPrice: 1000 * (n + 1), sellingPrice: 1200 * (n + 1), createdById: userId,
+        },
+      });
+      tagIds.push(tag.id);
+      return tag;
+    }
+    diaTagId = (await makeTag(branchAId, 'IN_STOCK', 0)).id;
+    await makeTag(branchAId, 'SOLD', 1);
+    await makeTag(branchBId, 'IN_STOCK', 2);
+    await makeTag(branchBId, 'ON_APPROVAL', 3);
+
+    // METAL is neither stone column; DIAMOND -> Dia Wt; anything else non-metal -> CS Wt.
+    await prisma.jewelryTagMaterial.createMany({
+      data: [
+        { companyId: tenant.company.id, tagId: diaTagId, code: 'G22', materialType: 'METAL', weight: 8 },
+        { companyId: tenant.company.id, tagId: diaTagId, code: 'DIA', materialType: 'DIAMOND', weight: 0.5, pieces: 4 },
+        { companyId: tenant.company.id, tagId: diaTagId, code: 'RUB', materialType: 'STONE', weight: 1.25, pieces: 2 },
+      ],
+    });
+  });
+
+  afterAll(async () => {
+    await prisma.jewelryTag.deleteMany({ where: { id: { in: tagIds } } }); // materials cascade
+    await prisma.branch.deleteMany({ where: { id: branchBId } });
+    await cleanupTestTenant(tenant);
+    await prisma.$disconnect();
+  });
+
+  it('defaults to On Hand (IN_STOCK) across every branch for an all-branches user', async () => {
+    const r = await getStockBook(tenant.ctx);
+    expect(r.rows.map((x) => x.id).sort()).toEqual([tagIds[0], tagIds[2]].sort());
+    expect(r.branches.map((b) => b.id).sort()).toEqual([branchAId, branchBId].sort());
+  });
+
+  it('status filters: STOCK = in stock + memo + transit (no SOLD), ALL = everything', async () => {
+    expect((await getStockBook(tenant.ctx, { status: 'STOCK' })).rows).toHaveLength(3);
+    expect((await getStockBook(tenant.ctx, { status: 'ALL' })).rows).toHaveLength(4);
+    expect((await getStockBook(tenant.ctx, { status: 'SOLD' })).rows.map((x) => x.id)).toEqual([tagIds[1]]);
+    await expect(getStockBook(tenant.ctx, { status: 'BOGUS' })).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  it('a branch-restricted user only ever sees their own branch — asked for or not', async () => {
+    const onlyA = asRestrictedTo(branchAId);
+    const noFilter = await getStockBook(onlyA, { status: 'ALL' });
+    expect(noFilter.rows.every((x) => x.branchId === branchAId)).toBe(true);
+    expect(noFilter.rows).toHaveLength(2);
+    expect(noFilter.branches.map((b) => b.id)).toEqual([branchAId]); // the picker never offers branch B
+
+    // Asking for the other branch by id must match nothing, not redirect or widen.
+    const forged = await getStockBook(onlyA, { branchId: branchBId, status: 'ALL' });
+    expect(forged.rows).toEqual([]);
+  });
+
+  it('a user granted no branches sees no stock at all', async () => {
+    const none = await getStockBook(asRestrictedTo(), { status: 'ALL' });
+    expect(none.rows).toEqual([]);
+    expect(none.branches).toEqual([]);
+  });
+
+  it('splits stone weight into Dia Wt (DIAMOND) and CS Wt (other non-metal); metal counts as neither', async () => {
+    const row = (await getStockBook(tenant.ctx, { branchId: branchAId })).rows.find((x) => x.id === diaTagId)!;
+    expect(row.diaWt).toBeCloseTo(0.5);
+    expect(row.csWt).toBeCloseTo(1.25);
+    expect(row.stonePieces).toBe(6);
+    expect(row.qty).toBe(1);
+    expect(row.costPrice).toBe(1000);
   });
 });
 

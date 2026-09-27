@@ -80,6 +80,8 @@ grid library — see its file header) that gives every table, by construction:
 - **Right-click column menu** — right-click any header for a checklist of every column (show/hide)
   plus "Reset columns". A column can opt out of being hidden (`hideable: false`, e.g. an Actions
   column) or out of filtering (`filterable: false`).
+- **Optional columns** — a column marked `defaultHidden: true` starts hidden and is switched on from the right-click column menu — use it for the long tail of
+  "nice to have" fields (Sales Invoices has ~25 of them) so the default view stays uncluttered.
 - **Persisted layout** — column order/visibility is saved to `localStorage` per `tableId`, so a
   user's rearrangement survives a reload. **`tableId` must be a stable, unique-per-table string**
   — two tables sharing one `tableId` will clobber each other's saved layout.

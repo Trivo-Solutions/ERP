@@ -33,7 +33,10 @@ export function ownerOf(pathname: string): string {
 const EXTRA_TITLES: Array<[RegExp, string]> = [
   [/^\/tagging\/tags\/new$/, 'New Tag'],
   [/^\/tagging\/tags\/[^/]+\/edit$/, 'Edit Tag'],
+  [/^\/tagging\/transfers\/new$/, 'New Transfer'],
+  [/^\/tagging\/receives\/[^/]+$/, 'Receive Transfer'],
   [/^\/sales\/invoices\/new$/, 'New Sale'],
+  [/^\/sales\/invoices\/[^/]+\/edit$/, 'Edit Invoice'],
   [/^\/designs\/[^/]+$/, 'Design Detail'],
   [/^\/manufacturing\/jobs\/[^/]+$/, 'Job Card'],
   [/^\/finance\/client-ledger\/[^/]+$/, 'Client Ledger'],

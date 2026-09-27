@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { platformPrisma as prisma } from '../../config/database'; // tests act as the platform/admin role for fixtures and verification; the code under test uses the runtime client
 import { AppError } from '../../middleware/error';
-import { createInvoice as _createInvoice, getTaxContext, createMemoOut, convertMemoToInvoice, recordPayment, createSalesReturn, createOldGoldExchange, recordClientPayment, listClientPayments, getSalesRegister, getClientCredit } from './sales.service';
+import { createInvoice as _createInvoice, getTaxContext, createMemoOut, convertMemoToInvoice, recordPayment, createSalesReturn, createOldGoldExchange, recordClientPayment, listClientPayments, getSalesRegister, getClientCredit, amendInvoice } from './sales.service';
 import { getClientLedger, getDayBook } from '../finance/finance.service';
 import { LEDGER_ACCOUNT } from '../../shared/ledgerAccounts';
 import { DEFAULT_HSN_CODE } from '../../shared/constants';
@@ -2012,6 +2012,251 @@ describe('createInvoice — old gold & store credit as payment modes', () => {
 
       const day = await getDayBook(tenant.company.id, new Date());
       expect(day.payments.byMode.some((m: any) => m.mode === 'STORE_CREDIT' || m.mode === 'OLD_GOLD')).toBe(false);
+    });
+  });
+});
+
+// Editing an issued invoice (amendInvoice): stock, GST, ledger and the customer's balance all follow the new bill in
+// one transaction, the original ledger entries stay, and the audit log keeps before/after.
+describe('amendInvoice (edit an issued invoice)', () => {
+  const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+  let tenant: TestTenant;
+  let userId: string;
+  let branchId: string;
+  const clientIds: string[] = [];
+  const invoiceIds: string[] = [];
+  const tagIds: string[] = [];
+
+  async function makeClient(label: string) {
+    const c = await prisma.client.create({
+      data: { companyId: tenant.company.id, clientCode: `TSTCL-${label}-${suffix}`, name: `Client ${label}`, panNumber: 'ABCDE1234F', type: 'RETAIL' },
+    });
+    clientIds.push(c.id);
+    return c.id;
+  }
+  async function makeTag(name: string, costPrice = 4000) {
+    const tag = await prisma.jewelryTag.create({
+      data: {
+        tagNumber: `TSTTAG-AM-${suffix}-${tagIds.length}`, companyId: tenant.company.id, branchId, name,
+        metalType: 'GOLD', metalKarat: '22K', grossWeight: 1, netWeight: 1, stoneWeight: 0,
+        costPrice, sellingPrice: 5150, createdById: userId,
+      },
+    });
+    tagIds.push(tag.id);
+    return tag;
+  }
+  // 1 g x ₹5,000 + 3% GST = ₹5,150 a piece.
+  const item = (over: Partial<InvoiceItemInputLike> = {}) => ({
+    productCode: 'MISC', description: 'Chain', quantity: 1, grossWeight: 1, netGoldWeight: 1,
+    rateType: 'PER_GRAM', goldRate: 5000, makingCharge: 0, ...over,
+  });
+  type InvoiceItemInputLike = Parameters<typeof _createInvoice>[0]['items'][number];
+  const sell = async (clientId: string, over: Partial<Parameters<typeof _createInvoice>[0]> = {}) => {
+    const inv = await _createInvoice({ branchId, clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [item()], ...over }, tenant.ctx, userId);
+    invoiceIds.push(inv.id);
+    return inv;
+  };
+  // A stored line, sent back unchanged (with its id) plus whatever the edit overrides.
+  const keep = (l: any, over: Partial<InvoiceItemInputLike> = {}): InvoiceItemInputLike => ({
+    id: l.id, productCode: l.productCode, description: l.description, quantity: l.quantity, grossWeight: Number(l.grossWeight),
+    netGoldWeight: Number(l.netGoldWeight), rateType: l.rateType, goldRate: Number(l.goldRate), makingCharge: Number(l.makingCharge),
+    wastagePercent: Number(l.wastagePercent), stoneValue: Number(l.stoneValue), tagId: l.tagId ?? undefined, ...over,
+  });
+  const amend = (id: string, data: Parameters<typeof amendInvoice>[1]) => amendInvoice(id, data, tenant.ctx, userId);
+  const balanceOf = async (clientId: string) => Number((await prisma.client.findUniqueOrThrow({ where: { id: clientId } })).currentBalance);
+  const entriesOf = (referenceId: string) => prisma.journalEntry.findMany({
+    where: { referenceId }, include: { lines: { include: { account: { select: { code: true } } } } },
+  });
+  const amountOn = (e: Awaited<ReturnType<typeof entriesOf>>[number], code: string) => {
+    const l = e.lines.find((x) => x.account.code === code);
+    return { debit: Number(l?.debit ?? 0), credit: Number(l?.credit ?? 0) };
+  };
+  const statusOf = async (id: string) => (await prisma.jewelryTag.findUniqueOrThrow({ where: { id } })).status;
+
+  beforeAll(async () => {
+    tenant = await createTestTenant(`AM${suffix}`, ['invoice:create']);
+    userId = tenant.user.id;
+    branchId = tenant.branch.id;
+  });
+
+  afterAll(async () => {
+    const returnIds = (await prisma.salesReturn.findMany({ where: { clientId: { in: clientIds } }, select: { id: true } })).map((r) => r.id);
+    const payIds = (await prisma.invoicePayment.findMany({ where: { clientId: { in: clientIds } }, select: { id: true } })).map((p) => p.id);
+    await cleanupJournalEntries([...invoiceIds, ...returnIds, ...payIds]);
+    await prisma.salesReturn.deleteMany({ where: { clientId: { in: clientIds } } });
+    await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
+    await prisma.invoicePayment.deleteMany({ where: { clientId: { in: clientIds } } });
+    await prisma.salesInvoice.deleteMany({ where: { id: { in: invoiceIds } } });
+    await prisma.jewelryTag.deleteMany({ where: { id: { in: tagIds } } });
+    await prisma.client.deleteMany({ where: { id: { in: clientIds } } });
+    await cleanupTestTenant(tenant);
+    await prisma.$disconnect();
+  });
+
+  it('reprices a line: totals, GST record, customer balance, an adjustment journal and the audit trail all follow', async () => {
+    const clientId = await makeClient('price');
+    const inv = await sell(clientId); // ₹5,150
+    expect(await balanceOf(clientId)).toBeCloseTo(5150);
+
+    const upd = await amend(inv.id, { items: [keep(inv.items[0], { goldRate: 6000 })], reason: 'Rate was keyed wrong' }); // ₹6,180
+
+    expect(Number(upd.totalAmount)).toBe(6180);
+    expect(Number(upd.taxAmount)).toBe(180);
+    expect(Number(upd.balanceDue)).toBe(6180);
+    expect(upd.items).toHaveLength(1);
+    expect(upd.items[0].id).toBe(inv.items[0].id); // updated in place, same row
+    expect(await balanceOf(clientId)).toBeCloseTo(6180); // moved by the +1,030 difference only
+    const tax = await prisma.taxInvoice.findUniqueOrThrow({ where: { invoiceId: inv.id } });
+    expect(Number(tax.taxableAmount)).toBe(6000);
+    expect(Number(tax.totalTax)).toBe(180);
+
+    // Ledger: the original entry is untouched, plus ONE balanced adjustment for the difference.
+    const entries = await entriesOf(inv.id);
+    expect(entries).toHaveLength(2);
+    const original = entries.find((e) => e.referenceType === 'SalesInvoice')!;
+    const adj = entries.find((e) => e.referenceType === 'SalesInvoiceAmendment')!;
+    expect(amountOn(original, LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE).debit).toBe(5150);
+    expect(amountOn(adj, LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE).debit).toBe(1030);
+    expect(amountOn(adj, LEDGER_ACCOUNT.SALES_REVENUE).credit).toBe(1000);
+    expect(amountOn(adj, LEDGER_ACCOUNT.IGST_PAYABLE).credit).toBe(30);
+    expect(adj.lines.reduce((s, l) => s + Number(l.debit), 0)).toBeCloseTo(adj.lines.reduce((s, l) => s + Number(l.credit), 0));
+
+    const audit = await prisma.auditLog.findFirst({ where: { recordId: inv.id, action: 'AMEND' } });
+    expect(audit).not.toBeNull();
+    expect((audit!.oldValues as any).totalAmount).toBe('5150');
+    expect((audit!.newValues as any).totalAmount).toBe('6180');
+    expect((audit!.newValues as any).reason).toBe('Rate was keyed wrong');
+  });
+
+  it('swaps a piece: the old tag goes back in stock, the new one is sold, and the COGS difference is booked', async () => {
+    const clientId = await makeClient('swap');
+    const a = await makeTag('Piece A', 4000);
+    const b = await makeTag('Piece B', 4600);
+    const inv = await sell(clientId, { items: [item({ tagId: a.id })] });
+
+    await amend(inv.id, { items: [keep(inv.items[0], { tagId: b.id })] });
+
+    expect(await statusOf(a.id)).toBe('IN_STOCK');
+    expect(await statusOf(b.id)).toBe('SOLD');
+    const adj = (await entriesOf(inv.id)).find((e) => e.referenceType === 'SalesInvoiceAmendment')!;
+    expect(amountOn(adj, LEDGER_ACCOUNT.COST_OF_GOODS).debit).toBe(600); // 4,600 - 4,000
+    expect(amountOn(adj, LEDGER_ACCOUNT.INVENTORY).credit).toBe(600);
+  });
+
+  it('adds and removes lines; a removed piece returns to stock and a new one is sold', async () => {
+    const clientId = await makeClient('addrm');
+    const a = await makeTag('Piece A2');
+    const b = await makeTag('Piece B2');
+    const inv = await sell(clientId, { items: [item({ tagId: a.id }), item({ description: 'Gift wrap', goldRate: 100 })] }); // 5,150 + 103
+
+    const upd = await amend(inv.id, { items: [keep(inv.items[1]), item({ tagId: b.id })] }); // A out, B in, wrap kept
+
+    expect(upd.items.map((i) => i.tagId).sort()).toEqual([b.id, null].sort());
+    expect(await statusOf(a.id)).toBe('IN_STOCK');
+    expect(await statusOf(b.id)).toBe('SOLD');
+    expect(Number(upd.totalAmount)).toBe(5253); // same value in as out
+    expect(await balanceOf(clientId)).toBeCloseTo(5253);
+  });
+
+  it('re-derives paid / due / status from the payments already recorded', async () => {
+    const clientId = await makeClient('paid');
+    const inv = await sell(clientId, { payments: [{ paymentDate: new Date(), amount: 5150, mode: 'UPI' }] });
+    expect(inv.status).toBe('PAID');
+
+    const up = await amend(inv.id, { items: [keep(inv.items[0], { goldRate: 6000 })] }); // ₹6,180: 1,030 still owed
+    expect(up.status).toBe('PARTIALLY_PAID');
+    expect(Number(up.balanceDue)).toBe(1030);
+    expect(Number(up.paidAmount)).toBe(5150);
+    expect(await balanceOf(clientId)).toBeCloseTo(1030);
+
+    const down = await amend(inv.id, { items: [keep(up.items[0], { goldRate: 3000 })] }); // ₹3,090: over-paid by 2,060
+    expect(down.status).toBe('PAID');
+    expect(Number(down.balanceDue)).toBe(-2060);
+    expect(await balanceOf(clientId)).toBeCloseTo(-2060); // shows as credit on the account
+    expect(await prisma.invoicePayment.count({ where: { invoiceId: inv.id } })).toBe(1); // payments untouched
+  });
+
+  it('recomputes GST for a customer in the company state (CGST + SGST instead of IGST)', async () => {
+    const company = await prisma.company.findUniqueOrThrow({ where: { id: tenant.company.id } });
+    const stateName = (await prisma.stateMaster.findFirst({ where: { code: company.stateCode ?? '' } }))?.name;
+    expect(stateName).toBeTruthy(); // the fixture company is in state 24 (Gujarat) — seeded in StateMaster
+    const local = await prisma.client.create({ data: { companyId: tenant.company.id, clientCode: `TSTCL-loc-${suffix}`, name: 'Local', state: stateName, type: 'RETAIL' } });
+    clientIds.push(local.id);
+    const clientId = await makeClient('far');
+    const inv = await sell(clientId);
+    expect(Number((await prisma.taxInvoice.findUniqueOrThrow({ where: { invoiceId: inv.id } })).igst)).toBe(150);
+
+    await amend(inv.id, { clientId: local.id, items: [keep(inv.items[0])] });
+
+    const tax = await prisma.taxInvoice.findUniqueOrThrow({ where: { invoiceId: inv.id } });
+    expect(Number(tax.igst)).toBe(0);
+    expect(Number(tax.cgst)).toBe(75);
+    expect(Number(tax.sgst)).toBe(75);
+  });
+
+  describe('guards', () => {
+    it('a returned line is locked (cannot be changed or removed) but the rest of the bill can be edited', async () => {
+      const clientId = await makeClient('ret');
+      const a = await makeTag('Returned A');
+      const b = await makeTag('Kept B');
+      const inv = await sell(clientId, { items: [item({ tagId: a.id }), item({ tagId: b.id })] });
+      await createSalesReturn({ invoiceId: inv.id, items: [{ invoiceItemId: inv.items.find((i) => i.tagId === a.id)!.id }] }, tenant.ctx, userId);
+      const lineA = inv.items.find((i) => i.tagId === a.id)!;
+      const lineB = inv.items.find((i) => i.tagId === b.id)!;
+
+      await expect(amend(inv.id, { items: [keep(lineA, { goldRate: 9000 }), keep(lineB)] })).rejects.toThrow(/has been returned and cannot be changed/);
+      await expect(amend(inv.id, { items: [keep(lineB)] })).rejects.toThrow(/has been returned and cannot be changed or removed/);
+
+      const ok = await amend(inv.id, { items: [keep(lineA), keep(lineB, { goldRate: 6000 })] });
+      expect(ok.items).toHaveLength(2);
+      expect(await statusOf(a.id)).toBe('IN_STOCK'); // still back in stock from the return — not flipped again
+      expect(await statusOf(b.id)).toBe('SOLD');
+    });
+
+    it('the customer cannot be changed once a payment is recorded, but can before', async () => {
+      const other = await makeClient('other');
+      const unpaid = await sell(await makeClient('a1'));
+      const fromBal = await balanceOf(unpaid.clientId);
+      await amend(unpaid.id, { clientId: other, items: [keep(unpaid.items[0])] });
+      expect(await balanceOf(unpaid.clientId)).toBeCloseTo(fromBal - 5150);
+      expect(await balanceOf(other)).toBeCloseTo(5150);
+
+      const paid = await sell(await makeClient('a2'), { payments: [{ paymentDate: new Date(), amount: 100, mode: 'UPI' }] });
+      await expect(amend(paid.id, { clientId: other, items: [keep(paid.items[0])] })).rejects.toThrow(/cannot be changed once a payment/);
+    });
+
+    it('a piece already sold elsewhere is refused, and the whole edit rolls back', async () => {
+      const clientId = await makeClient('roll');
+      const gone = await makeTag('Sold elsewhere');
+      await prisma.jewelryTag.update({ where: { id: gone.id }, data: { status: 'SOLD' } });
+      const inv = await sell(clientId);
+
+      await expect(amend(inv.id, { items: [keep(inv.items[0], { goldRate: 9000 }), item({ tagId: gone.id })] })).rejects.toThrow(/Tags not available/);
+
+      const after = await prisma.salesInvoice.findUniqueOrThrow({ where: { id: inv.id }, include: { items: true } });
+      expect(Number(after.totalAmount)).toBe(5150);
+      expect(after.items).toHaveLength(1);
+      expect(Number(after.items[0].goldRate)).toBe(5000);
+      expect(await balanceOf(clientId)).toBeCloseTo(5150);
+      expect(await entriesOf(inv.id)).toHaveLength(1); // no adjustment entry
+    });
+
+    it('rejects an empty bill and a line id that is not on this invoice', async () => {
+      const inv = await sell(await makeClient('bad'));
+      const other = await sell(await makeClient('bad2'));
+      await expect(amend(inv.id, { items: [] })).rejects.toThrow(/at least one line/);
+      await expect(amend(inv.id, { items: [keep(other.items[0])] })).rejects.toThrow(/not found on this invoice/);
+    });
+
+    it("another company's invoice is a 404", async () => {
+      const inv = await sell(await makeClient('x'));
+      const outsider = await createTestTenant(`AMX${suffix}`, ['invoice:create']);
+      try {
+        await expect(amendInvoice(inv.id, { items: [keep(inv.items[0])] }, outsider.ctx, outsider.user.id)).rejects.toThrow(/Invoice not found/);
+      } finally {
+        await cleanupTestTenant(outsider);
+      }
     });
   });
 });

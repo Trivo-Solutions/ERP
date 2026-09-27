@@ -199,6 +199,107 @@ export async function getDeadStock(companyId: string, asOfDate?: Date) {
   };
 }
 
+// Stock Book: one row per tag with every attribute a person might want to slice by. The client
+// switches columns on/off and can group the rows into a summary, so this deliberately returns the
+// flat detail rather than pre-aggregating.
+//
+// Branch scope is enforced HERE from the caller's own branch grants (same rule as listTags): a
+// branch-restricted user only ever sees their assigned branches — asking for another branch's id
+// simply matches nothing, and with no branch asked they get all of *their* branches, never the whole
+// company. `branches` in the result is the picker list for the same reason (listBranches returns
+// every branch in the company, which a restricted user must not be offered).
+//
+// Not a point-in-time ledger: the system keeps no stock movement history, so "as of a past date" can't
+// be reconstructed. The date range filters on when the piece was TAGGED (createdAt); status is its
+// status right now.
+const STOCK_BOOK_LIMIT = 50_000;
+export const STOCK_BOOK_STATUS_FILTERS = ['IN_STOCK', 'ON_APPROVAL', 'TRANSFERRED', 'SOLD', 'RETIRED', 'STOCK', 'ALL'] as const;
+
+export async function getStockBook(ctx: TenantContext, filters: {
+  branchId?: string; status?: string; categoryId?: string; dateFrom?: Date; dateTo?: Date;
+} = {}) {
+  const status = filters.status ?? 'IN_STOCK';
+  if (!(STOCK_BOOK_STATUS_FILTERS as readonly string[]).includes(status)) throw new AppError('Invalid status filter', 400);
+
+  const allBranches = await tenantQuery(ctx.companyId, (_tx) => _tx.branch.findMany({
+    where: { companyId: ctx.companyId, isActive: true }, orderBy: { name: 'asc' },
+    select: { id: true, branchCode: true, name: true },
+  }));
+  const branches = allBranches.filter((b) => canAccessBranch(ctx, b.id));
+
+  const allowedBranchIds = filters.branchId
+    ? (canAccessBranch(ctx, filters.branchId) ? [filters.branchId] : ['__none__'])
+    : (ctx.branchAccess.allBranches ? undefined : ctx.branchAccess.branchIds);
+
+  const statusWhere = status === 'ALL' ? undefined
+    : status === 'STOCK' ? { in: STOCK_STATUSES as unknown as string[] }
+    : status;
+
+  const where: Prisma.JewelryTagWhereInput = {
+    companyId: ctx.companyId,
+    ...(allowedBranchIds && { branchId: { in: allowedBranchIds } }),
+    ...(statusWhere && { status: statusWhere }),
+    ...(filters.categoryId && { categoryId: filters.categoryId }),
+    ...((filters.dateFrom || filters.dateTo) && {
+      createdAt: {
+        ...(filters.dateFrom && { gte: filters.dateFrom }),
+        ...(filters.dateTo && { lte: new Date(new Date(filters.dateTo).setHours(23, 59, 59, 999)) }),
+      },
+    }),
+  };
+
+  const tags = await tenantQuery(ctx.companyId, (_tx) => _tx.jewelryTag.findMany({
+    where,
+    select: {
+      id: true, tagNumber: true, name: true, status: true, makeType: true, metalType: true, metalKarat: true,
+      huid: true, settingType: true, grossWeight: true, netWeight: true, stoneWeight: true,
+      costPrice: true, sellingPrice: true, createdAt: true, updatedAt: true,
+      branch: { select: { id: true, name: true, branchCode: true } },
+      category: { select: { name: true } },
+      subCategory: { select: { name: true } },
+      collection: { select: { name: true } },
+      stockType: { select: { name: true } },
+      manufacturer: { select: { name: true } },
+      materials: { select: { materialType: true, weight: true, pieces: true } },
+    },
+    orderBy: [{ tagNumber: 'asc' }],
+    take: STOCK_BOOK_LIMIT + 1,
+  }));
+  const truncated = tags.length > STOCK_BOOK_LIMIT;
+  if (truncated) tags.pop();
+
+  const now = Date.now();
+  const rows = tags.map((t) => {
+    // Diamonds and coloured stones are the two stone columns a jeweller reads; anything else non-metal
+    // (a plain "STONE" row, pearls…) counts with the coloured stones. Weights are already carats.
+    let diaWt = 0; let csWt = 0; let stonePieces = 0;
+    for (const m of t.materials) {
+      if (m.materialType === 'METAL') continue;
+      const w = Number(m.weight);
+      if (m.materialType === 'DIAMOND') diaWt += w; else csWt += w;
+      stonePieces += m.pieces ?? 0;
+    }
+    return {
+      id: t.id, tagNumber: t.tagNumber, name: t.name, status: t.status,
+      branchId: t.branch.id, branchName: t.branch.name, branchCode: t.branch.branchCode,
+      category: t.category?.name ?? 'Uncategorized', subCategory: t.subCategory?.name ?? '',
+      collection: t.collection?.name ?? '', stockType: t.stockType?.name ?? '',
+      manufacturer: t.manufacturer?.name ?? '',
+      makeType: t.makeType, metalType: t.metalType, metalKarat: t.metalKarat ?? '',
+      huid: t.huid ?? '', settingType: t.settingType ?? '',
+      qty: 1,
+      grossWeight: Number(t.grossWeight), netWeight: Number(t.netWeight), stoneWeight: Number(t.stoneWeight),
+      diaWt: Math.round(diaWt * 1000) / 1000, csWt: Math.round(csWt * 1000) / 1000, stonePieces,
+      costPrice: Number(t.costPrice), sellingPrice: Number(t.sellingPrice),
+      taggedOn: t.createdAt, updatedAt: t.updatedAt,
+      // Days since the status last changed — same updatedAt proxy (and caveat) as getDeadStock.
+      daysInStatus: Math.floor((now - new Date(t.updatedAt).getTime()) / 86_400_000),
+    };
+  });
+
+  return { branches, rows, truncated, limit: STOCK_BOOK_LIMIT };
+}
+
 // ─── Jewelry Tags ─────────────────────────────────────────────────────────────
 
 export async function listTags(ctx: TenantContext, filters: {
@@ -903,24 +1004,31 @@ export async function searchTags(ctx: TenantContext, query: string, branchId?: s
 // ─── Branch Transfers ─────────────────────────────────────────────────────────
 
 export async function listTransfers(ctx: TenantContext, filters: {
-  status?: string; fromBranchId?: string; toBranchId?: string; page?: number; limit?: number;
+  status?: string; fromBranchId?: string; toBranchId?: string; incoming?: boolean; page?: number; limit?: number;
 }) {
-  const { status, fromBranchId, toBranchId, page = 1, limit = 20 } = filters;
+  const { status, fromBranchId, toBranchId, incoming, page = 1, limit = 20 } = filters;
+  // `status` may be a comma list ("DISPATCHED,PARTIALLY_RECEIVED") — the receiving screen wants both.
+  const statuses = status ? status.split(',').map((x) => x.trim()).filter(Boolean) : [];
   if (fromBranchId) await assertBranchAccessible(fromBranchId, ctx);
   if (toBranchId) await assertBranchAccessible(toBranchId, ctx);
   const where = {
     companyId: ctx.companyId,
-    ...(status && { status }),
+    ...(statuses.length === 1 && { status: statuses[0] }),
+    ...(statuses.length > 1 && { status: { in: statuses } }),
     ...(fromBranchId && { fromBranchId }),
     ...(toBranchId && { toBranchId }),
     // A branch-restricted caller only sees transfers touching a branch they're granted — either
     // side counts, since a transfer they're not party to on either end isn't theirs to see.
-    ...(!ctx.branchAccess.allBranches && {
-      OR: [
-        { fromBranchId: { in: ctx.branchAccess.branchIds } },
-        { toBranchId: { in: ctx.branchAccess.branchIds } },
-      ],
-    }),
+    // `incoming` narrows that to the receiving side only: the branch-receives screen is for the
+    // branch that has to take the pieces in, not the one that sent them.
+    ...(!ctx.branchAccess.allBranches && (incoming
+      ? { toBranchId: toBranchId ? toBranchId : { in: ctx.branchAccess.branchIds } }
+      : {
+        OR: [
+          { fromBranchId: { in: ctx.branchAccess.branchIds } },
+          { toBranchId: { in: ctx.branchAccess.branchIds } },
+        ],
+      })),
   };
   const [transfers, total] = await tenantBatch(ctx.companyId, (tx) => [
     tx.branchTransfer.findMany({
@@ -930,6 +1038,7 @@ export async function listTransfers(ctx: TenantContext, filters: {
         toBranch: { select: { name: true, branchCode: true } },
         requestedBy: { select: { name: true } },
         _count: { select: { items: true } },
+        items: { select: { receivedAt: true } }, // how many pieces are already in (receivedAt set)
       },
       orderBy: { createdAt: 'desc' },
       skip: (page - 1) * limit,
@@ -951,8 +1060,9 @@ export async function getTransfer(ctx: TenantContext, id: string) {
       items: {
         include: {
           tag: {
-            select: { tagNumber: true, name: true, metalKarat: true,
-              grossWeight: true, sellingPrice: true, status: true, huid: true },
+            select: { tagNumber: true, name: true, metalType: true, metalKarat: true,
+              grossWeight: true, stoneWeight: true, netWeight: true, sellingPrice: true, status: true, huid: true,
+              category: { select: { name: true } } },
           },
         },
       },
@@ -1038,24 +1148,52 @@ export async function approveTransfer(id: string, ctx: TenantContext, userId: st
   });
 }
 
-export async function receiveTransfer(id: string, ctx: TenantContext, userId: string) {
+/**
+ * The receiving branch takes in the pieces it has verified — only those. `tagIds` are the verified
+ * pieces (each must be an item of this transfer not already received); every other piece stays
+ * TRANSFERRED, in transit, and the transfer is PARTIALLY_RECEIVED until the last one is taken in.
+ * Omitting `tagIds` receives every piece still outstanding (the pre-verification behaviour).
+ */
+export async function receiveTransfer(id: string, ctx: TenantContext, userId: string, tagIds?: string[]) {
   const t = await tenantQuery(ctx.companyId, (_tx) => _tx.branchTransfer.findUnique({ where: { id }, include: { items: true } }));
   if (!t || t.companyId !== ctx.companyId) throw new AppError('Transfer not found', 404);
   await assertBranchAccessible(t.toBranchId, ctx, 'Destination branch');
-  if (t.status !== 'DISPATCHED') throw new AppError('Only DISPATCHED transfers can be received', 400);
+  if (t.status !== 'DISPATCHED' && t.status !== 'PARTIALLY_RECEIVED') {
+    throw new AppError('Only DISPATCHED or PARTIALLY_RECEIVED transfers can be received', 400);
+  }
 
-  return tenantTransaction(ctx.companyId, async (tx) => {
-    for (const item of t.items) {
-      await tx.jewelryTag.update({
-        where: { id: item.tagId },
-        data: { status: 'IN_STOCK', branchId: t.toBranchId },
-      });
+  const outstanding = t.items.filter((i) => !i.receivedAt);
+  const wanted = tagIds ? [...new Set(tagIds)] : outstanding.map((i) => i.tagId);
+  if (wanted.length === 0) throw new AppError('Verify at least one item to receive', 400);
+  const outstandingIds = new Set(outstanding.map((i) => i.tagId));
+  const notPending = wanted.filter((tagId) => !outstandingIds.has(tagId));
+  if (notPending.length) {
+    throw new AppError('Some items are not awaiting receipt on this transfer (wrong transfer, or already received)', 400);
+  }
+
+  const now = new Date();
+  const result = await tenantTransaction(ctx.companyId, async (tx) => {
+    // Guarded flip: only a piece still TRANSFERRED comes in, so nothing that has since moved is dragged back.
+    const flipped = await tx.jewelryTag.updateMany({
+      where: { id: { in: wanted }, companyId: ctx.companyId, status: 'TRANSFERRED' },
+      data: { status: 'IN_STOCK', branchId: t.toBranchId },
+    });
+    if (flipped.count !== wanted.length) {
+      throw new AppError('Some items are no longer in transit and cannot be received', 409);
     }
+    await tx.branchTransferItem.updateMany({
+      where: { transferId: id, companyId: ctx.companyId, tagId: { in: wanted }, receivedAt: null },
+      data: { receivedAt: now },
+    });
+    const complete = wanted.length === outstanding.length;
     return tx.branchTransfer.update({
       where: { id },
-      data: { status: 'RECEIVED', receivedAt: new Date() },
+      data: complete ? { status: 'RECEIVED', receivedAt: now } : { status: 'PARTIALLY_RECEIVED' },
     });
   });
+  await createAuditEntry('branch_transfers', id, userId, 'RECEIVE', undefined,
+    { received: wanted.length, outstanding: outstanding.length - wanted.length }, ctx.companyId);
+  return result;
 }
 
 export async function cancelTransfer(id: string, ctx: TenantContext, userId: string) {

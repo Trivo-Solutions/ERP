@@ -2,16 +2,19 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Box, Card, Table, TableHead, TableBody, TableRow, TableCell, Typography, Chip, Button,
-  Grid, MenuItem, TextField, Drawer, Stack, Divider, IconButton, CircularProgress, Checkbox,
+  Grid, MenuItem, TextField, Drawer, Stack, Divider, IconButton, CircularProgress, Checkbox, Tooltip,
 } from '@mui/material';
-import { Add, Close, Payment as PaymentIcon, Print, Undo } from '@mui/icons-material';
+import { Add, Close, Edit as EditIcon, Payment as PaymentIcon, Print, Undo } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm, Controller } from 'react-hook-form';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost } from '../../api/client';
-import { PageHeader } from '../../components/common/PageHeader';
+import { PageHeader, PageActions } from '../../components/common/PageHeader';
 import { StatusChip } from '../../components/common/StatusChip';
+import { DataTable } from '../../components/common/DataTable';
+import { DateField } from '../../components/fields/DateField';
 import { printInvoice } from '../../utils/printInvoice';
+import { useAuthStore } from '../../store/auth.store';
 
 function fmt(n: number) {
   return '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
@@ -138,7 +141,7 @@ function ReturnItemsForm({ invoiceId, items, alreadyReturnedIds }: {
   );
 }
 
-function InvoiceDrawer({ invoiceId, onClose }: { invoiceId: string; onClose: () => void }) {
+function InvoiceDrawer({ invoiceId, onClose, onEdit }: { invoiceId: string; onClose: () => void; onEdit?: () => void }) {
   const { data, isLoading } = useQuery({
     queryKey: ['invoice-detail', invoiceId],
     queryFn: () => apiGet<any>(`/sales/invoices/${invoiceId}`),
@@ -160,6 +163,11 @@ function InvoiceDrawer({ invoiceId, onClose }: { invoiceId: string; onClose: () 
         <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
           <Typography variant="h6" fontWeight={700}>Sales Invoice</Typography>
           <Stack direction="row" spacing={0.5} alignItems="center">
+            {invoice && onEdit && (
+              <Button size="small" startIcon={<EditIcon />} onClick={onEdit}>
+                Edit
+              </Button>
+            )}
             {invoice && (
               <Button size="small" startIcon={<Print />} onClick={() => printInvoice(invoice)}>
                 Print
@@ -332,50 +340,135 @@ function InvoiceDrawer({ invoiceId, onClose }: { invoiceId: string; onClose: () 
 export function SalesInvoices() {
   const navigate = useNavigate();
   const [selectedInvoiceId, setSelectedInvoiceId] = useState('');
+  // Editing an issued invoice is its own permission (SUPER_ADMIN, or a role that was granted it) — the server enforces it too.
+  const canEdit = useAuthStore((s) => s.hasPermission('invoice:edit'));
+  const editInvoice = (id: string) => navigate(`/sales/invoices/${id}/edit`);
+  // Invoice-date range (both ends inclusive), sent to the server. Empty = the latest 50; a range lifts that cap.
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const rangeBad = !!from && !!to && from > to;
 
-  const { data, isLoading } = useQuery({ queryKey: ['sales-invoices'], queryFn: () => apiGet<any[]>('/sales/invoices') });
+  const { data, isLoading } = useQuery({
+    queryKey: ['sales-invoices', from, to],
+    queryFn: () => apiGet<any[]>('/sales/invoices', { ...(from && { from }), ...(to && { to }) }),
+    enabled: !rangeBad,
+  });
+  const money = (n: number) => Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2 });
+  const isoDay = (d: string) => new Date(d).toISOString().slice(0, 10);
+  const wt = (n: unknown) => Number(n ?? 0).toFixed(3);
 
   return (
     <Box>
-      <PageHeader title="Sales Invoices"
-        actions={[{ label: 'New Sale', icon: <Add />, onClick: () => navigate('/sales/invoices/new') }]} />
-      <Card>
-        <Box sx={{ overflowX: 'auto' }}>
-        <Table size="small">
-          <TableHead>
-            <TableRow>
-              <TableCell>Invoice #</TableCell><TableCell>Client</TableCell><TableCell>Date</TableCell>
-              <TableCell>Type</TableCell><TableCell>Currency</TableCell>
-              <TableCell align="right">Total</TableCell><TableCell align="right">Paid</TableCell>
-              <TableCell align="right">Balance</TableCell><TableCell>Status</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {isLoading ? <TableRow><TableCell colSpan={9} align="center" sx={{ py: 4 }}>Loading...</TableCell></TableRow>
-              : (data ?? []).map((inv: any) => (
-                <TableRow key={inv.id} hover sx={{ cursor: 'pointer' }} onClick={() => setSelectedInvoiceId(inv.id)}>
-                  <TableCell sx={{ fontFamily: 'monospace', fontWeight: 700, color: '#44C47A', fontSize: 12 }}>{inv.invoiceNumber}</TableCell>
-                  <TableCell sx={{ fontWeight: 600 }}>{inv.client?.name}</TableCell>
-                  <TableCell sx={{ fontSize: 12 }}>{new Date(inv.invoiceDate).toLocaleDateString('en-IN')}</TableCell>
-                  <TableCell><Chip label={inv.invoiceType} size="small" /></TableCell>
-                  <TableCell><Chip label={inv.currency} size="small" color={inv.currency !== 'INR' ? 'info' : 'default'} /></TableCell>
-                  <TableCell align="right" sx={{ fontFamily: 'monospace', fontWeight: 700 }}>{inv.currency === 'INR' ? '₹' : '$'}{Number(inv.totalAmount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</TableCell>
-                  <TableCell align="right" sx={{ fontFamily: 'monospace', color: 'success.main' }}>{Number(inv.paidAmount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</TableCell>
-                  <TableCell align="right" sx={{ fontFamily: 'monospace', color: Number(inv.balanceDue) > 0 ? 'error.main' : 'success.main', fontWeight: 700 }}>
-                    {Number(inv.balanceDue).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                  </TableCell>
-                  <TableCell><StatusChip status={inv.status} /></TableCell>
-                </TableRow>
-              ))}
-            {!isLoading && (data ?? []).length === 0 && (
-              <TableRow><TableCell colSpan={9} align="center" sx={{ py: 4 }}>No sales invoices yet</TableCell></TableRow>
-            )}
-          </TableBody>
-        </Table>
-        </Box>
-      </Card>
+      <PageHeader title="Sales Invoices" />
 
-      {selectedInvoiceId && <InvoiceDrawer invoiceId={selectedInvoiceId} onClose={() => setSelectedInvoiceId('')} />}
+      <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mb: 1.5 }}>
+        <DateField size="small" fullWidth={false} label="From" value={from} sx={{ width: 160 }}
+          onChange={(e) => setFrom(e.target.value)} />
+        <DateField size="small" fullWidth={false} label="To" value={to} sx={{ width: 160 }}
+          error={rangeBad} helperText={rangeBad ? 'Must not be before From' : undefined}
+          onChange={(e) => setTo(e.target.value)} />
+        {(from || to) && <Button size="small" onClick={() => { setFrom(''); setTo(''); }}>Clear dates</Button>}
+        {!from && !to && <Typography variant="caption" color="text.secondary">Showing the latest 50 — pick dates to see older invoices</Typography>}
+        {/* On the filter row (right-aligned) rather than in the header, where a lone button cost a whole line. */}
+        <Box sx={{ ml: 'auto' }}>
+          <PageActions actions={[{ label: 'New Sale', icon: <Add />, onClick: () => navigate('/sales/invoices/new') }]} />
+        </Box>
+      </Stack>
+
+      <DataTable
+        tableId="sales-invoices"
+        rows={rangeBad ? [] : data ?? []}
+        isLoading={isLoading && !rangeBad}
+        getRowId={(inv: any) => inv.id}
+        onRowClick={(inv: any) => setSelectedInvoiceId(inv.id)}
+        emptyLabel="No sales invoices found"
+        columns={[
+          { key: 'invoiceNumber', label: 'Invoice #', width: 150, render: (inv: any) => (
+              <Typography sx={{ fontFamily: 'monospace', fontWeight: 700, color: '#44C47A', fontSize: 12 }}>{inv.invoiceNumber}</Typography>) },
+          { key: 'client', label: 'Client', width: 200, filterValue: (inv: any) => inv.client?.name ?? '',
+            render: (inv: any) => <Typography fontWeight={600} noWrap>{inv.client?.name}</Typography> },
+          { key: 'invoiceDate', label: 'Date', width: 110, filterValue: (inv: any) => isoDay(inv.invoiceDate),
+            render: (inv: any) => <Typography sx={{ fontSize: 12 }}>{new Date(inv.invoiceDate).toLocaleDateString('en-IN')}</Typography> },
+          { key: 'invoiceType', label: 'Type', width: 110, render: (inv: any) => <Chip label={inv.invoiceType} size="small" /> },
+          { key: 'currency', label: 'Currency', width: 100,
+            render: (inv: any) => <Chip label={inv.currency} size="small" color={inv.currency !== 'INR' ? 'info' : 'default'} /> },
+          { key: 'totalAmount', label: 'Total', align: 'right', width: 130, filterValue: (inv: any) => money(inv.totalAmount),
+            render: (inv: any) => <Typography sx={{ fontFamily: 'monospace', fontWeight: 700 }}>{inv.currency === 'INR' ? '₹' : '$'}{money(inv.totalAmount)}</Typography> },
+          { key: 'paidAmount', label: 'Paid', align: 'right', width: 120, filterValue: (inv: any) => money(inv.paidAmount),
+            render: (inv: any) => <Typography sx={{ fontFamily: 'monospace', color: 'success.main' }}>{money(inv.paidAmount)}</Typography> },
+          { key: 'balanceDue', label: 'Balance', align: 'right', width: 120, filterValue: (inv: any) => money(inv.balanceDue),
+            render: (inv: any) => (
+              <Typography sx={{ fontFamily: 'monospace', fontWeight: 700, color: Number(inv.balanceDue) > 0 ? 'error.main' : 'success.main' }}>
+                {money(inv.balanceDue)}
+              </Typography>) },
+          { key: 'status', label: 'Status', width: 130, render: (inv: any) => <StatusChip status={inv.status} /> },
+
+          // ── Optional columns — hidden until chosen from the Columns menu (button under the table, or right-click a header) ──
+          { key: 'salesExecutive', label: 'Sales Executive', width: 160, defaultHidden: true,
+            filterValue: (inv: any) => inv.salesPerson?.name ?? '—', render: (inv: any) => <Typography noWrap>{inv.salesPerson?.name ?? '—'}</Typography> },
+          { key: 'branch', label: 'Branch', width: 140, defaultHidden: true,
+            filterValue: (inv: any) => inv.branch?.name ?? '—', render: (inv: any) => <Typography noWrap>{inv.branch?.name ?? '—'}</Typography> },
+          { key: 'clientCode', label: 'Client Code', width: 120, defaultHidden: true,
+            filterValue: (inv: any) => inv.client?.clientCode ?? '', render: (inv: any) => <Typography sx={{ fontFamily: 'monospace', fontSize: 12 }}>{inv.client?.clientCode}</Typography> },
+          { key: 'items', label: 'Lines', align: 'right', width: 80, defaultHidden: true,
+            filterValue: (inv: any) => String(inv._count?.items ?? 0), render: (inv: any) => inv._count?.items ?? 0 },
+          { key: 'qty', label: 'Qty', align: 'right', width: 80, defaultHidden: true,
+            filterValue: (inv: any) => String(inv.totals?.quantity ?? 0), render: (inv: any) => inv.totals?.quantity ?? 0 },
+          { key: 'grossWt', label: 'Gross Wt (g)', align: 'right', width: 120, defaultHidden: true,
+            filterValue: (inv: any) => wt(inv.totals?.grossWeight), render: (inv: any) => <Typography sx={{ fontFamily: 'monospace' }}>{wt(inv.totals?.grossWeight)}</Typography> },
+          { key: 'netWt', label: 'Net Wt (g)', align: 'right', width: 120, defaultHidden: true,
+            filterValue: (inv: any) => wt(inv.totals?.netWeight), render: (inv: any) => <Typography sx={{ fontFamily: 'monospace' }}>{wt(inv.totals?.netWeight)}</Typography> },
+          { key: 'stoneWt', label: 'Stone Wt (g)', align: 'right', width: 120, defaultHidden: true,
+            filterValue: (inv: any) => wt(inv.totals?.stoneWeight), render: (inv: any) => <Typography sx={{ fontFamily: 'monospace' }}>{wt(inv.totals?.stoneWeight)}</Typography> },
+          { key: 'subtotal', label: 'Subtotal', align: 'right', width: 120, defaultHidden: true,
+            filterValue: (inv: any) => money(inv.subtotal), render: (inv: any) => <Typography sx={{ fontFamily: 'monospace' }}>{money(inv.subtotal)}</Typography> },
+          { key: 'discount', label: 'Discount', align: 'right', width: 110, defaultHidden: true,
+            filterValue: (inv: any) => money(inv.discountAmount), render: (inv: any) => <Typography sx={{ fontFamily: 'monospace' }}>{money(inv.discountAmount)}</Typography> },
+          { key: 'otherCharges', label: 'Other Charges', align: 'right', width: 130, defaultHidden: true,
+            filterValue: (inv: any) => money(inv.otherCharges), render: (inv: any) => <Typography sx={{ fontFamily: 'monospace' }}>{money(inv.otherCharges)}</Typography> },
+          { key: 'taxable', label: 'Taxable', align: 'right', width: 120, defaultHidden: true,
+            filterValue: (inv: any) => money(inv.taxDetails?.taxableAmount ?? 0), render: (inv: any) => <Typography sx={{ fontFamily: 'monospace' }}>{money(inv.taxDetails?.taxableAmount ?? 0)}</Typography> },
+          { key: 'cgst', label: 'CGST', align: 'right', width: 100, defaultHidden: true,
+            filterValue: (inv: any) => money(inv.taxDetails?.cgst ?? 0), render: (inv: any) => <Typography sx={{ fontFamily: 'monospace' }}>{money(inv.taxDetails?.cgst ?? 0)}</Typography> },
+          { key: 'sgst', label: 'SGST', align: 'right', width: 100, defaultHidden: true,
+            filterValue: (inv: any) => money(inv.taxDetails?.sgst ?? 0), render: (inv: any) => <Typography sx={{ fontFamily: 'monospace' }}>{money(inv.taxDetails?.sgst ?? 0)}</Typography> },
+          { key: 'igst', label: 'IGST', align: 'right', width: 100, defaultHidden: true,
+            filterValue: (inv: any) => money(inv.taxDetails?.igst ?? 0), render: (inv: any) => <Typography sx={{ fontFamily: 'monospace' }}>{money(inv.taxDetails?.igst ?? 0)}</Typography> },
+          { key: 'gstTotal', label: 'Total GST', align: 'right', width: 110, defaultHidden: true,
+            filterValue: (inv: any) => money(inv.taxAmount), render: (inv: any) => <Typography sx={{ fontFamily: 'monospace' }}>{money(inv.taxAmount)}</Typography> },
+          { key: 'roundOff', label: 'Round Off', align: 'right', width: 100, defaultHidden: true,
+            filterValue: (inv: any) => money(inv.roundOff), render: (inv: any) => <Typography sx={{ fontFamily: 'monospace' }}>{money(inv.roundOff)}</Typography> },
+          { key: 'placeOfSupply', label: 'Place of Supply', width: 130, defaultHidden: true,
+            filterValue: (inv: any) => inv.taxDetails?.placeOfSupply || '—', render: (inv: any) => inv.taxDetails?.placeOfSupply || '—' },
+          { key: 'paymentModes', label: 'Paid By', width: 160, defaultHidden: true,
+            filterValue: (inv: any) => (inv.paymentModes ?? []).join(', ') || '—',
+            render: (inv: any) => <Typography noWrap fontSize={12}>{(inv.paymentModes ?? []).join(', ') || '—'}</Typography> },
+          { key: 'terms', label: 'Terms', width: 110, defaultHidden: true,
+            filterValue: (inv: any) => inv.terms ?? '—', render: (inv: any) => inv.terms ?? '—' },
+          { key: 'dueDate', label: 'Due Date', width: 110, defaultHidden: true,
+            filterValue: (inv: any) => (inv.dueDate ? isoDay(inv.dueDate) : '—'),
+            render: (inv: any) => <Typography sx={{ fontSize: 12 }}>{inv.dueDate ? new Date(inv.dueDate).toLocaleDateString('en-IN') : '—'}</Typography> },
+          { key: 'notes', label: 'Notes', width: 200, defaultHidden: true,
+            filterValue: (inv: any) => inv.notes ?? '', render: (inv: any) => <Typography noWrap fontSize={12} title={inv.notes ?? ''}>{inv.notes || '—'}</Typography> },
+          { key: 'createdAt', label: 'Created', width: 150, defaultHidden: true,
+            filterValue: (inv: any) => isoDay(inv.createdAt),
+            render: (inv: any) => <Typography sx={{ fontSize: 12 }}>{new Date(inv.createdAt).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' })}</Typography> },
+          ...(canEdit ? [{
+            key: 'actions', label: 'Actions', width: 80, hideable: false, filterable: false, align: 'center' as const,
+            render: (inv: any) => (
+              <Tooltip title="Edit invoice">
+                <IconButton size="small" aria-label={`Edit invoice ${inv.invoiceNumber}`}
+                  onClick={(e) => { e.stopPropagation(); editInvoice(inv.id); }}>
+                  <EditIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            ),
+          }] : []),
+        ]}
+      />
+
+      {selectedInvoiceId && <InvoiceDrawer invoiceId={selectedInvoiceId} onClose={() => setSelectedInvoiceId('')}
+        onEdit={canEdit ? () => editInvoice(selectedInvoiceId) : undefined} />}
     </Box>
   );
 }
