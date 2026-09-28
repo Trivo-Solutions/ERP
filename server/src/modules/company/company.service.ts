@@ -39,3 +39,23 @@ export async function revokeBranchAccess(ctx: TenantContext, companyUserId: stri
   }
   return result;
 }
+
+// This company's active branches — the picker list for the invite/edit-member UI. Gated on
+// user:manage (not tag:view/branch:manage like the other /branches listings elsewhere) so a
+// user administrator doesn't need an unrelated permission just to grant branch access.
+export async function listBranches(companyId: string) {
+  return tenantQuery(companyId, (tx) => tx.branch.findMany({
+    where: { companyId, isActive: true },
+    orderBy: { name: 'asc' },
+  }));
+}
+
+// The specific branches a member currently holds (meaningless/empty while allBranches is true —
+// resolveBranchAccess in auth.service.ts is what actually expands allBranches at login time).
+export async function listBranchAccess(ctx: TenantContext, companyUserId: string) {
+  await assertOwnedByCompany('companyUser', companyUserId, ctx.companyId, 'User');
+  const grants = await tenantQuery(ctx.companyId, (tx) =>
+    tx.userBranchAccess.findMany({ where: { companyId: ctx.companyId, companyUserId }, select: { branchId: true } })
+  );
+  return grants.map((g) => g.branchId);
+}

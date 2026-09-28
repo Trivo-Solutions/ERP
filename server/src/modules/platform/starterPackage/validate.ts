@@ -73,7 +73,9 @@ export function collectStarterPackageErrors(pkg: StarterPackageDefinition): stri
   checkItems('roles', pkg.roles, 'roles', errors, ['name']);
   for (const r of pkg.roles ?? []) {
     for (const perm of r.permissions ?? []) {
-      if (!/^(\*|[A-Za-z]+:[A-Za-z]+)$/.test(perm)) errors.push(`roles.${r.name}: malformed permission '${perm}'`);
+      // J4: action segment may now contain underscore-joined words (report:financial_view,
+      // po:approve_high_value) — still exactly one `resource:action` colon, letters only otherwise.
+      if (!/^(\*|[A-Za-z]+:[A-Za-z]+(_[A-Za-z]+)*)$/.test(perm)) errors.push(`roles.${r.name}: malformed permission '${perm}'`);
     }
   }
   checkItems('chartOfAccounts', pkg.chartOfAccounts, 'chartOfAccounts', errors, ['code']);

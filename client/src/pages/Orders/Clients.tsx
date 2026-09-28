@@ -12,11 +12,13 @@ import { SelectField } from '../../components/fields/SelectField';
 import { DateField } from '../../components/fields/DateField';
 import { CurrencyField } from '../../components/fields/CurrencyField';
 import { ClientKycDialog } from '../../components/common/ClientKycDialog';
+import { useAuthStore } from '../../store/auth.store';
 
 export function Clients() {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
   const navigate = useNavigate();
+  const hasPermission = useAuthStore((s) => s.hasPermission);
   const [createOpen, setCreateOpen] = useState(false);
   const [paymentClient, setPaymentClient] = useState<{ id: string; name: string } | null>(null);
   const [kycClient, setKycClient] = useState<any>(null);
@@ -44,7 +46,7 @@ export function Clients() {
   return (
     <Box>
       <PageHeader title="Client Master"
-        actions={[{ label: 'Add Client', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
+        actions={hasPermission('client:create') ? [{ label: 'Add Client', icon: <Add />, onClick: () => setCreateOpen(true) }] : []} />
       <DataTable
         tableId="orders-clients"
         rows={data ?? []}
@@ -81,21 +83,27 @@ export function Clients() {
             key: 'actions', label: 'Actions', align: 'right', hideable: false, filterable: false,
             render: (c: any) => (
               <>
-                <Tooltip title="PAN / Form 60">
-                  <IconButton size="small" onClick={() => setKycClient(c)}>
-                    <Badge fontSize="small" />
-                  </IconButton>
-                </Tooltip>
-                <Tooltip title="Record on-account payment">
-                  <IconButton size="small" onClick={() => setPaymentClient({ id: c.id, name: c.name })}>
-                    <Payments fontSize="small" />
-                  </IconButton>
-                </Tooltip>
-                <Tooltip title="Statement / ledger">
-                  <IconButton size="small" onClick={() => navigate(`/finance/client-ledger/${c.id}`)}>
-                    <Receipt fontSize="small" />
-                  </IconButton>
-                </Tooltip>
+                {hasPermission('client:edit') && (
+                  <Tooltip title="PAN / Form 60">
+                    <IconButton size="small" onClick={() => setKycClient(c)}>
+                      <Badge fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
+                {hasPermission('payment:create') && (
+                  <Tooltip title="Record on-account payment">
+                    <IconButton size="small" onClick={() => setPaymentClient({ id: c.id, name: c.name })}>
+                      <Payments fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
+                {hasPermission('report:financial_view') && (
+                  <Tooltip title="Statement / ledger">
+                    <IconButton size="small" onClick={() => navigate(`/finance/client-ledger/${c.id}`)}>
+                      <Receipt fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
               </>
             ),
           },

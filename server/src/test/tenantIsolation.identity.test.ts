@@ -353,6 +353,27 @@ describe('Phase 2: identity & membership isolation — Vasavi vs Shree Silver Pa
       expect(r.body.data.user.branchAccess.branchIds).toEqual([A.branch.id]);
       await apiA.del(`/company/users/${vasOnly.membership.id}/branch-access/${A.branch.id}`);
     });
+
+    it('GET /company/branches lists only the caller\'s own company\'s branches', async () => {
+      const r = await apiA.get('/company/branches');
+      expect(r.status).toBe(200);
+      const ids: string[] = r.body.data.map((b: any) => b.id);
+      expect(ids).toContain(A.branch.id);
+      expect(ids).toContain(branchA2.id);
+      expect(ids).not.toContain(B.branch.id);
+    });
+
+    it('GET /company/users/:id/branch-access reflects this company\'s own grants; a cross-company id is a 404', async () => {
+      await apiA.post(`/company/users/${vasOnly.membership.id}/branch-access`, { branchId: branchA2.id });
+      const mine = await apiA.get(`/company/users/${vasOnly.membership.id}/branch-access`);
+      expect(mine.status).toBe(200);
+      expect(mine.body.data).toEqual(expect.arrayContaining([branchA2.id]));
+
+      const cross = await apiB.get(`/company/users/${vasOnly.membership.id}/branch-access`);
+      expect(cross.status).toBe(404);
+
+      await apiA.del(`/company/users/${vasOnly.membership.id}/branch-access/${branchA2.id}`);
+    });
   });
 
   // ─── 7. Audit ──────────────────────────────────────────────────────────────

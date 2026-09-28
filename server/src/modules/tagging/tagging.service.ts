@@ -438,6 +438,11 @@ export async function createTag(ctx: TenantContext, data: {
   await assertOwnedIfPresent('subCategory', data.subCategoryId, ctx.companyId, 'Sub-category');
   await assertOwnedIfPresent('collection', data.collectionId, ctx.companyId, 'Collection');
   await assertOwnedIfPresent('client', data.manufacturerId, ctx.companyId, 'Manufacturer');
+  // Layer 2: jobCardId/designId are plain (non-composite) FKs left over from the manufacturing
+  // era — unlike every other optional id above, nothing previously checked these, so a forged
+  // Company-B id would have passed straight through (Postgres FK checks bypass RLS).
+  await assertOwnedIfPresent('jobCard', data.jobCardId, ctx.companyId, 'Job card');
+  await assertOwnedIfPresent('design', data.designId, ctx.companyId, 'Design');
   await assertAllOwned('materialCode', (data.materials ?? []).map((m) => m.materialCodeId), ctx.companyId, 'Material code');
   await assertAllOwned('stoneGrade', (data.materials ?? []).map((m) => m.stoneGradeId), ctx.companyId, 'Stone grade');
   // (presence was enforced above; this also rejects a non-string id — an object would otherwise reach Prisma as a filter)

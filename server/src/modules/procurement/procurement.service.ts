@@ -617,7 +617,11 @@ export async function submitPOForApproval(id: string, ctx: TenantContext, userId
   return updated;
 }
 
-export async function approvePO(id: string, ctx: TenantContext, userId: string, userRole: string, comments?: string) {
+// J4-D2: the ₹5,00,000+ threshold is now gated by the po:approve_high_value permission, not a
+// hardcoded role name — any role (including a custom delegated one) can be granted it through the
+// Role Editor. The router already requires po:approve for every caller of this function, so
+// po:approve_high_value alone is never sufficient on its own — it only ever adds to po:approve.
+export async function approvePO(id: string, ctx: TenantContext, userId: string, canApproveHighValue: boolean, comments?: string) {
   await assertOwnedByCompany('purchaseOrder', id, ctx.companyId, 'Purchase Order');
   const po = await tenantQuery(ctx.companyId, (_tx) => _tx.purchaseOrder.findUniqueOrThrow({ where: { id } }));
   if (po.status !== 'PENDING_APPROVAL') throw new AppError('Only PENDING_APPROVAL purchase orders can be approved', 400);
@@ -625,14 +629,11 @@ export async function approvePO(id: string, ctx: TenantContext, userId: string, 
   // The approval limit is on the value of the goods ordered, as it always was — not on the input GST
   // now added into totalAmount, which would silently push borderline orders over the limit.
   const amount = Number(po.totalAmount) - Number(po.taxAmount);
-  if (amount > PO_APPROVAL_THRESHOLD && userRole !== 'SUPER_ADMIN') {
+  if (amount > PO_APPROVAL_THRESHOLD && !canApproveHighValue) {
     throw new AppError(
-      `Purchase orders exceeding ₹${PO_APPROVAL_THRESHOLD.toLocaleString('en-IN')} require SUPER_ADMIN approval`,
+      `Purchase orders exceeding ₹${PO_APPROVAL_THRESHOLD.toLocaleString('en-IN')} require the po:approve_high_value permission`,
       403
     );
-  }
-  if (!['PRODUCTION_MANAGER', 'SUPER_ADMIN'].includes(userRole)) {
-    throw new AppError('You do not have permission to approve purchase orders', 403);
   }
 
   const updated = await tenantQuery(ctx.companyId, (_tx) => _tx.purchaseOrder.update({

@@ -7,6 +7,7 @@ import { prisma } from '../../config/database';
 import * as svc from './procurement.service';
 import { tenantQuery } from '../../shared/tenantContext';
 import { parseDate, parseOptionalDate } from '../../shared/parseDate';
+import { hasPermission } from '../../middleware/rbac';
 
 export const procurementRouter = Router();
 procurementRouter.use(authenticate, resolveTenantContext);
@@ -98,7 +99,8 @@ procurementRouter.patch('/orders/:id/status', requirePermission('po:approve'), a
 });
 
 // GRN
-procurementRouter.get('/grn', requirePermission('grn:create'), async (req: Request, res: Response) => {
+// J4-D5: view is now its own permission — grn:create still gates POST /grn below.
+procurementRouter.get('/grn', requirePermission('grn:view'), async (req: Request, res: Response) => {
   const grns = await tenantQuery(req.tenant!.companyId, (_tx) => _tx.goodsReceiptNote.findMany({
     where: { companyId: req.tenant!.companyId },
     include: {
@@ -149,7 +151,8 @@ procurementRouter.post('/orders/:id/submit', requirePermission('po:create'), asy
 });
 
 procurementRouter.post('/orders/:id/approve', requirePermission('po:approve'), async (req: Request, res: Response) => {
-  const po = await svc.approvePO(req.params.id, req.tenant!, req.user!.userId, req.user!.roleName, req.body.comments);
+  const canApproveHighValue = hasPermission(req.user!.permissions, 'po:approve_high_value');
+  const po = await svc.approvePO(req.params.id, req.tenant!, req.user!.userId, canApproveHighValue, req.body.comments);
   res.json({ success: true, data: po });
 });
 

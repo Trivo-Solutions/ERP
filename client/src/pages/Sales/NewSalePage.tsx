@@ -180,6 +180,10 @@ export function NewSalePage() {
   const navigate = useNavigate();
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
+  // Quick-adding a client from inside the sale screen is a genuinely separate capability
+  // (client:create) from billing itself (invoice:create/invoice:edit, already enforced by this
+  // page's route guard — see pageRoutes.tsx).
+  const canCreateClient = useAuthStore((s) => s.hasPermission('client:create'));
   const [activeTab, setActiveTab] = useState(0);
   const [tagSearch, setTagSearch] = useState('');
   const [lines, setLines] = useState<LineItem[]>([]);
@@ -841,9 +845,11 @@ export function NewSalePage() {
                                 ))}
                               </TextField>
                             )} />
-                          <IconButton title="New Client" onClick={() => setQuickAddOpen(true)} sx={{ mt: 1 }}>
-                            <PersonAdd />
-                          </IconButton>
+                          {canCreateClient && (
+                            <IconButton title="New Client" onClick={() => setQuickAddOpen(true)} sx={{ mt: 1 }}>
+                              <PersonAdd />
+                            </IconButton>
+                          )}
                         </Stack>
                         {selectedClient && (
                           <Chip

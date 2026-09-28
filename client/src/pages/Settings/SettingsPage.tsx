@@ -1,12 +1,13 @@
-import { Box, Grid, Card, CardContent, Typography, Table, TableHead, TableBody, TableRow, TableCell, Chip, Tab, Tabs, Button } from '@mui/material';
+import { Box, Card, Table, TableHead, TableBody, TableRow, TableCell, Chip, Tab, Tabs } from '@mui/material';
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { apiGet } from '../../api/client';
 import { PageHeader } from '../../components/common/PageHeader';
 
+// Roles & Permissions moved out to its own dedicated page (Management > Roles & Permissions,
+// /settings/roles + /settings/roles/:id/edit) — see RolesListPage.tsx / RoleEditorPage.tsx.
 export function SettingsPage() {
   const [tab, setTab] = useState(0);
-  const { data: roles } = useQuery({ queryKey: ['roles'], queryFn: () => apiGet<any[]>('/settings/roles') });
   const { data: tolerances } = useQuery({ queryKey: ['tolerances'], queryFn: () => apiGet<any[]>('/settings/process-tolerances') });
   const { data: categories } = useQuery({ queryKey: ['design-categories'], queryFn: () => apiGet<any[]>('/settings/design-categories') });
   const { data: auditLogs } = useQuery({ queryKey: ['audit-logs'], queryFn: () => apiGet<any[]>('/settings/audit-logs') });
@@ -16,34 +17,12 @@ export function SettingsPage() {
       <PageHeader title="System Settings" />
 
       <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 2 }}>
-        <Tab label="Roles & Permissions" />
         <Tab label="Process Tolerances" />
         <Tab label="Design Categories" />
         <Tab label="Audit Log" />
       </Tabs>
 
       {tab === 0 && (
-        <Card>
-          <Table size="small">
-            <TableHead><TableRow><TableCell>Role Name</TableCell><TableCell>Display Name</TableCell><TableCell>Users</TableCell><TableCell>Permissions</TableCell></TableRow></TableHead>
-            <TableBody>
-              {(roles ?? []).map((role: any) => (
-                <TableRow key={role.id} hover>
-                  <TableCell sx={{ fontFamily: 'monospace', fontWeight: 700 }}>{role.name}</TableCell>
-                  <TableCell>{role.displayName}</TableCell>
-                  <TableCell align="center">{role._count?.users ?? 0}</TableCell>
-                  <TableCell>
-                    {role.permissions?.slice(0, 5).map((p: string) => <Chip key={p} label={p} size="small" sx={{ mr: 0.5, mb: 0.5, fontSize: 10 }} />)}
-                    {role.permissions?.length > 5 && <Chip label={`+${role.permissions.length - 5} more`} size="small" variant="outlined" />}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Card>
-      )}
-
-      {tab === 1 && (
         <Card>
           <Table size="small">
             <TableHead><TableRow><TableCell>Process</TableCell><TableCell align="right">Max Loss %</TableCell><TableCell align="right">Deduction Rate (₹/g)</TableCell><TableCell align="right">Alert Threshold %</TableCell></TableRow></TableHead>
@@ -62,7 +41,7 @@ export function SettingsPage() {
         </Card>
       )}
 
-      {tab === 2 && (
+      {tab === 1 && (
         <Card>
           <Table size="small">
             <TableHead><TableRow><TableCell>Code</TableCell><TableCell>Category Name</TableCell></TableRow></TableHead>
@@ -78,7 +57,7 @@ export function SettingsPage() {
         </Card>
       )}
 
-      {tab === 3 && (
+      {tab === 2 && (
         <Card>
           <Table size="small">
             <TableHead><TableRow><TableCell>Timestamp</TableCell><TableCell>User</TableCell><TableCell>Table</TableCell><TableCell>Record ID</TableCell><TableCell>Action</TableCell></TableRow></TableHead>

@@ -10,10 +10,16 @@ import { useSnackbar } from 'notistack';
 import { apiGet, apiPost, apiPatch } from '../../api/client';
 import { PageHeader } from '../../components/common/PageHeader';
 import { StatusChip } from '../../components/common/StatusChip';
+import { useAuthStore } from '../../store/auth.store';
 
 export function RepairJobs() {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const canCreate = hasPermission('repair:create');
+  const canEditCost = hasPermission('repair:edit');
+  const canManage = hasPermission('repair:manage'); // deliver / status transitions
+  const canBill = hasPermission('invoice:create');
   const [createOpen, setCreateOpen] = useState(false);
   const [costRepair, setCostRepair] = useState<{ id: string; repairCost: number | null } | null>(null);
   const [tagSearch, setTagSearch] = useState('');
@@ -56,7 +62,7 @@ export function RepairJobs() {
   return (
     <Box>
       <PageHeader title="Repair Jobs"
-        actions={[{ label: 'New Repair', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
+        actions={canCreate ? [{ label: 'New Repair', icon: <Add />, onClick: () => setCreateOpen(true) }] : []} />
       <Card>
         <Box sx={{ overflowX: 'auto' }}>
         <Table size="small">
@@ -78,32 +84,42 @@ export function RepairJobs() {
                   <TableCell>{r.client ? `${r.client.clientCode} — ${r.client.name}` : (r.clientName ?? '—')}</TableCell>
                   <TableCell sx={{ fontFamily: 'monospace', fontSize: 11 }}>{r.tag?.tagNumber ?? '—'}</TableCell>
                   <TableCell align="right" sx={{ fontFamily: 'monospace' }}>
-                    <Tooltip title="Set / edit repair cost">
-                      <span style={{ cursor: 'pointer' }} onClick={() => { setCostRepair({ id: r.id, repairCost: r.repairCost }); costForm.reset({ repairCost: Number(r.repairCost ?? 0) }); }}>
-                        {r.repairCost != null ? `₹${Number(r.repairCost).toLocaleString('en-IN')}` : 'Set cost'}
-                      </span>
-                    </Tooltip>
+                    {canEditCost ? (
+                      <Tooltip title="Set / edit repair cost">
+                        <span style={{ cursor: 'pointer' }} onClick={() => { setCostRepair({ id: r.id, repairCost: r.repairCost }); costForm.reset({ repairCost: Number(r.repairCost ?? 0) }); }}>
+                          {r.repairCost != null ? `₹${Number(r.repairCost).toLocaleString('en-IN')}` : 'Set cost'}
+                        </span>
+                      </Tooltip>
+                    ) : (
+                      r.repairCost != null ? `₹${Number(r.repairCost).toLocaleString('en-IN')}` : '—'
+                    )}
                   </TableCell>
                   <TableCell><StatusChip status={r.status} /></TableCell>
                   <TableCell align="right">
-                    {r.status !== 'DELIVERED' && (
+                    {r.status !== 'DELIVERED' && canManage && (
                       <Tooltip title="Mark delivered">
                         <IconButton size="small" onClick={() => deliverMutation.mutate(r.id)}>
                           <LocalShipping fontSize="small" />
                         </IconButton>
                       </Tooltip>
                     )}
-                    {r.invoice ? (
+                    {r.invoice && r.invoice.status !== 'VOID' ? (
                       <Chip label={r.invoice.invoiceNumber} size="small" color="success" variant="outlined" />
-                    ) : (
-                      <Tooltip title={r.clientId ? 'Bill customer' : 'Needs a client to bill'}>
+                    ) : canBill ? (
+                      <Tooltip title={
+                        r.invoice ? `Previous invoice ${r.invoice.invoiceNumber} was voided — bill again`
+                          : (r.clientId ? 'Bill customer' : 'Needs a client to bill')
+                      }>
                         <span>
+                          {r.invoice && (
+                            <Chip label={`${r.invoice.invoiceNumber} (voided)`} size="small" color="default" variant="outlined" sx={{ mr: 0.5 }} />
+                          )}
                           <IconButton size="small" disabled={!r.clientId || !r.repairCost} onClick={() => billMutation.mutate(r.id)}>
                             <Receipt fontSize="small" />
                           </IconButton>
                         </span>
                       </Tooltip>
-                    )}
+                    ) : null}
                   </TableCell>
                 </TableRow>
               ))}

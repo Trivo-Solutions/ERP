@@ -46,19 +46,37 @@ export const STARTER_PACKAGE_V1: StarterPackageDefinition = {
       name: 'PRODUCTION_MANAGER', displayName: 'Production Manager',
       permissions: [
         'design:view', 'bom:manage', 'cost:estimate',
-        'po:view', 'grn:create', 'stock:view', 'stone:manage', 'stone:split',
+        // J4-D2/D5: po:approve was missing here even though approvePO's own hardcoded role-name
+        // check already assumed PRODUCTION_MANAGER could approve — without it the router's
+        // requirePermission('po:approve') gate blocked this role from ever reaching approvePO at
+        // all, so the role-name check was already dead weight. Now permission-driven end to end:
+        // po:approve (ordinary) + po:approve_high_value (>₹5,00,000, preserving today's intended
+        // business capability). grn:view is the new read-only GRN-list permission (D5) alongside
+        // the existing grn:create.
+        'po:view', 'po:approve', 'po:approve_high_value',
+        'grn:view', 'grn:create', 'stock:view', 'stone:manage', 'stone:split',
         'order:view', 'order:create', 'order:approve', 'reservation:manage',
         'job:view', 'job:create', 'job:update', 'wip:update', 'qc:inspect', 'qc:approve',
         'karigar:view', 'karigar:issue', 'karigar:return',
-        'hallmark:manage', 'repair:manage', 'invoice:create', 'report:view', 'masters:view',
+        'hallmark:manage', 'repair:view', 'repair:create', 'repair:edit', 'repair:manage',
+        'invoice:create', 'report:view', 'masters:view',
+        // client:*/payment:*/return:* preserve exactly what order:*/invoice:create already granted
+        // here before those actions got their own permission strings (Phase J2) — see permissionCatalog.ts.
+        'client:view', 'client:create', 'client:edit', 'payment:create', 'return:create',
       ],
     },
     {
       name: 'ACCOUNTANT', displayName: 'Accountant',
       permissions: [
         'finance:view', 'journal:create', 'journal:post',
-        'report:view', 'tax:manage', 'invoice:create',
+        // J4-D1: sensitive financial-detail reports (client ledger, dealer aging, day book, GST
+        // summary, supplier ledger, trial balance, P&L, balance sheet) now need report:financial_view
+        // in addition to report:view — the Accountant is the one starter role that keeps them.
+        // J4-D6: payment:view — this role already saw payment history via sales:view; explicitly
+        // re-granted now that it's independently delegable.
+        'report:view', 'report:financial_view', 'tax:manage', 'invoice:create',
         'sales:view', 'stock:view', 'order:view', 'masters:view',
+        'client:view', 'payment:create', 'payment:view', 'return:create',
       ],
     },
     {
@@ -66,9 +84,12 @@ export const STARTER_PACKAGE_V1: StarterPackageDefinition = {
       permissions: [
         'sales:view', 'sales:create', 'memo:manage', 'invoice:create',
         'export:doc', 'order:view', 'order:create', 'report:view', 'masters:view',
+        // J4-D6: payment:view — preserves this role's existing payment-history access (previously
+        // via sales:view) now that it's a separate permission.
+        'client:view', 'client:create', 'client:edit', 'payment:create', 'payment:view', 'return:create',
         'estimation:view', 'estimation:manage', 'estimateTemplate:view',
-        'tag:view', 'tag:create', 'branch:manage', 'branch:transfer', 'branch:approve',
-        'stock:adjust', 'user:manage', 'role:manage', 'system:config', 'audit:view',
+        'tag:view', 'tag:create', 'branch:create', 'branch:edit', 'branch:transfer', 'branch:approve',
+        'stock:adjust', 'user:manage', 'role:view', 'role:create', 'role:edit', 'role:delete', 'system:config', 'audit:view',
       ],
     },
     { name: 'FLOOR_WORKER', displayName: 'Floor Worker', permissions: ['job:view', 'wip:update', 'karigar:view'] },
@@ -76,9 +97,11 @@ export const STARTER_PACKAGE_V1: StarterPackageDefinition = {
       name: 'STORE_MANAGER', displayName: 'Store / Inventory Manager',
       permissions: [
         'stock:view', 'stock:adjust', 'stone:manage', 'stone:split',
-        'consumable:manage', 'po:view', 'grn:create', 'grn:verify', 'report:view', 'masters:view',
-        'tagTemplate:manage', 'estimation:view', 'estimation:manage',
-        'estimateTemplate:view', 'estimateTemplate:manage',
+        // J4-D5: grn:view alongside the existing grn:create — preserves this role's GRN-list access
+        // now that GET /procurement/grn no longer rides grn:create.
+        'consumable:manage', 'po:view', 'grn:view', 'grn:create', 'grn:verify', 'report:view', 'masters:view',
+        'tagTemplate:view', 'tagTemplate:create', 'tagTemplate:edit', 'estimation:view', 'estimation:manage',
+        'estimateTemplate:view', 'estimateTemplate:create', 'estimateTemplate:edit',
       ],
     },
   ],

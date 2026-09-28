@@ -90,8 +90,11 @@ import { PurchaseGstSummary } from './pages/Reports/PurchaseGstSummary';
 
 // Settings & Hardware
 import { SettingsPage } from './pages/Settings/SettingsPage';
+import { CompanyUsersPage } from './pages/Settings/CompanyUsersPage';
+import { RoleEditorPage } from './pages/Settings/RoleEditorPage';
 import { HardwarePage } from './pages/Hardware/HardwarePage';
 import { useTabActive } from './components/Layout/TabActiveContext';
+import { RequirePermission } from './components/auth/RequirePermission';
 
 // A location no route matches falls back to the dashboard — but only from the tab on screen, so a
 // stale background tab (restored after a reload) can't hijack the router.
@@ -112,11 +115,11 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="designs/rates" element={<MetalRates />} />
 
       {/* Procurement */}
-      <Route path="procurement/requisitions" element={<PurchaseRequisitions />} />
-      <Route path="procurement/orders" element={<PurchaseOrders />} />
-      <Route path="procurement/grn" element={<GrnVerification />} />
-      <Route path="procurement/returns" element={<PurchaseReturns />} />
-      <Route path="procurement/suppliers" element={<Suppliers />} />
+      <Route path="procurement/requisitions" element={<RequirePermission permission="po:view"><PurchaseRequisitions /></RequirePermission>} />
+      <Route path="procurement/orders" element={<RequirePermission permission="po:view"><PurchaseOrders /></RequirePermission>} />
+      <Route path="procurement/grn" element={<RequirePermission permission="grn:view"><GrnVerification /></RequirePermission>} />
+      <Route path="procurement/returns" element={<RequirePermission permission="po:view"><PurchaseReturns /></RequirePermission>} />
+      <Route path="procurement/suppliers" element={<RequirePermission permission="po:view"><Suppliers /></RequirePermission>} />
 
       {/* Inventory */}
       <Route path="inventory/metals" element={<MetalVault />} />
@@ -125,7 +128,7 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
 
       {/* Orders */}
       <Route path="orders" element={<SalesOrders />} />
-      <Route path="orders/clients" element={<Clients />} />
+      <Route path="orders/clients" element={<RequirePermission permission="client:view"><Clients /></RequirePermission>} />
       <Route path="orders/reservations" element={<Reservations />} />
 
       {/* Manufacturing */}
@@ -140,11 +143,11 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="outsourcing/invoices" element={<SubcontractorInvoices />} />
 
       {/* Quality */}
-      <Route path="quality/hallmarking" element={<HallmarkingPage />} />
-      <Route path="quality/repairs" element={<RepairJobs />} />
+      <Route path="quality/hallmarking" element={<RequirePermission permission="hallmark:manage"><HallmarkingPage /></RequirePermission>} />
+      <Route path="quality/repairs" element={<RequirePermission permission="repair:view"><RepairJobs /></RequirePermission>} />
 
       {/* Masters */}
-      <Route path="masters" element={<MastersPage />} />
+      <Route path="masters" element={<RequirePermission permission="masters:view"><MastersPage /></RequirePermission>} />
 
       {/* Tagging */}
       <Route path="tagging/tags"         element={<TagsPage />} />
@@ -165,40 +168,43 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="estimation/templates" element={<EstimateTemplateDesignerPage />} />
 
       {/* Sales */}
-      <Route path="sales/memos" element={<MemoOutPage />} />
-      <Route path="sales/invoices" element={<SalesInvoices />} />
-      <Route path="sales/invoices/new" element={<NewSalePage />} />
-      <Route path="sales/invoices/:id/edit" element={<NewSalePage />} />
-      <Route path="sales/exchanges" element={<OldGoldExchange />} />
+      <Route path="sales/memos" element={<RequirePermission permission="memo:manage"><MemoOutPage /></RequirePermission>} />
+      <Route path="sales/invoices" element={<RequirePermission permission="sales:view"><SalesInvoices /></RequirePermission>} />
+      <Route path="sales/invoices/new" element={<RequirePermission permission="invoice:create"><NewSalePage /></RequirePermission>} />
+      <Route path="sales/invoices/:id/edit" element={<RequirePermission permission="invoice:edit"><NewSalePage /></RequirePermission>} />
+      <Route path="sales/exchanges" element={<RequirePermission permission="sales:view"><OldGoldExchange /></RequirePermission>} />
 
       {/* Finance */}
       <Route path="finance/journals" element={<JournalEntries />} />
       <Route path="finance/accounts" element={<ChartOfAccounts />} />
-      <Route path="finance/trial-balance" element={<TrialBalance />} />
-      <Route path="finance/pnl" element={<PnLStatement />} />
+      {/* J4-D1: these five now need report:financial_view (sensitive financial detail) — see navItems.tsx. */}
+      <Route path="finance/trial-balance" element={<RequirePermission permission="report:financial_view"><TrialBalance /></RequirePermission>} />
+      <Route path="finance/pnl" element={<RequirePermission permission="report:financial_view"><PnLStatement /></RequirePermission>} />
       <Route path="finance/cost-centers" element={<CostCenters />} />
-      <Route path="finance/dealer-aging" element={<DealerAging />} />
-      <Route path="finance/client-ledger" element={<ClientLedger />} />
-      <Route path="finance/client-ledger/:clientId" element={<ClientLedger />} />
-      <Route path="finance/supplier-ledger" element={<SupplierLedger />} />
-      <Route path="finance/supplier-ledger/:supplierId" element={<SupplierLedger />} />
+      <Route path="finance/dealer-aging" element={<RequirePermission permission="report:financial_view"><DealerAging /></RequirePermission>} />
+      <Route path="finance/client-ledger" element={<RequirePermission permission="report:financial_view"><ClientLedger /></RequirePermission>} />
+      <Route path="finance/client-ledger/:clientId" element={<RequirePermission permission="report:financial_view"><ClientLedger /></RequirePermission>} />
+      <Route path="finance/supplier-ledger" element={<RequirePermission permission="report:financial_view"><SupplierLedger /></RequirePermission>} />
+      <Route path="finance/supplier-ledger/:supplierId" element={<RequirePermission permission="report:financial_view"><SupplierLedger /></RequirePermission>} />
 
       {/* Reports */}
       <Route path="reports/wip" element={<WipSummary />} />
       <Route path="reports/stock" element={<StockSummary />} />
       <Route path="reports/karigar" element={<KarigarBalances />} />
-      <Route path="reports/aging" element={<AgingReceivables />} />
+      <Route path="reports/aging" element={<RequirePermission permission="report:financial_view"><AgingReceivables /></RequirePermission>} />
       <Route path="reports/sales-register" element={<SalesRegister />} />
       <Route path="reports/stock-book" element={<StockBook />} />
       <Route path="reports/stock-on-hand" element={<StockOnHand />} />
       <Route path="reports/dead-stock" element={<DeadStock />} />
-      <Route path="reports/day-book" element={<DayBook />} />
-      <Route path="reports/gst-summary" element={<GstSummary />} />
-      <Route path="reports/purchase-gst-summary" element={<PurchaseGstSummary />} />
+      <Route path="reports/day-book" element={<RequirePermission permission="report:financial_view"><DayBook /></RequirePermission>} />
+      <Route path="reports/gst-summary" element={<RequirePermission permission="report:financial_view"><GstSummary /></RequirePermission>} />
+      <Route path="reports/purchase-gst-summary" element={<RequirePermission permission="report:financial_view"><PurchaseGstSummary /></RequirePermission>} />
 
       {/* Hardware & Settings */}
-      <Route path="hardware" element={<HardwarePage />} />
-      <Route path="settings" element={<SettingsPage />} />
+      <Route path="hardware" element={<RequirePermission permission="hardware:manage"><HardwarePage /></RequirePermission>} />
+      <Route path="settings/users" element={<RequirePermission permission="user:manage"><CompanyUsersPage /></RequirePermission>} />
+      <Route path="settings/roles" element={<RequirePermission permission="role:view"><RoleEditorPage /></RequirePermission>} />
+      <Route path="settings" element={<RequirePermission permission="system:config"><SettingsPage /></RequirePermission>} />
       <Route path="*" element={<UnknownPage />} />
     </Routes>
   );

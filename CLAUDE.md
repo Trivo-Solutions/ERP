@@ -126,22 +126,189 @@ dealer pricing.
 
 ## 6. Hard rules for the agent
 
-- Reuse and extend. Everything in section 1 stays. Build only the two links in section 3 and the fixes in section 4.
-- When adding tag-aware selling, **copy the `convertMemoToInvoice` pattern** — same status flips, same
-  linkage. Consistency with the working memo path matters more than cleverness.
-- Every stock change goes **through a service that flips `JewelryTag.status` and is transactional**
-  (validate -> flip -> link, all-or-nothing). A half-finished sale must be impossible.
-- Each change behind its **own Prisma migration**, with a **test** proving the status transition + linkage
-  (and, for sales, the journal entry). Stop after each step for review.
-- Keep `costPrice` on the tag immutable by sales; selling writes price to the invoice line, never back to
-  the tag's cost.
-- **Do NOT rebuild, re-scaffold, or start a fresh project.** This is a working codebase.
-- **Do NOT delete or modify the manufacturing modules** in section 2, and do not wire new sell-side code into
-  `JobCard`, `SalesOrder`, `Design`, `BOM`, `Karigar`, or outsourcing.
-- **Do NOT use `SalesOrder` for retail/wholesale selling** — it's a production order.
-- Never `DELETE` a tag, invoice, memo, or their history — status-change + new records only.
-- Never hardcode a GST rate once section 4.3 is done.
+- Reuse and extend. Do not rebuild, re-scaffold, or start a fresh project.
+- Preserve all existing working functionality described in this document.
+- Do not modify or wire new sell-side functionality into the dormant manufacturing modules in §2.
+- Do not use `SalesOrder` for retail/wholesale selling.
+- Every stock change must go through a transactional service.
+- Every schema change gets its own Prisma migration and appropriate tests.
+- Keep `costPrice` on `JewelryTag` immutable by ordinary sales pricing operations unless an explicitly authorized administrative operation is intentionally changing it.
+- Never allow cross-company access or modification. Super Admin authority is always limited to their own company.
+- All request-supplied foreign IDs must be verified against the caller's company.
+- Preserve the existing RLS, tenant wrappers, composite-FK protections, and company isolation rules.
+- Never hardcode a GST rate once the HSN/GST master is available.
 - Do not add manufacturing, CAD/BOM, export, courier, or loyalty features unless explicitly asked.
+
+### 6.1 Universal Edit / Delete / Restore Policy
+
+The ERP is a customer-operated business system. The provider must provide the customer with the capability to correct, edit, modify, delete, restore, or otherwise administer their operational data through properly authorized users.
+
+**The system must NOT impose a blanket provider-level rule that operational records can never be deleted.**
+
+The customer's `SUPER_ADMIN` is the highest authority inside that company and must be able to administer that company's operational data.
+
+The Super Admin may:
+
+- create records;
+- edit records;
+- modify records;
+- delete records where technically possible;
+- restore records where restoration is supported;
+- amend posted records;
+- correct master data;
+- correct inventory records;
+- correct transactional records;
+- assign and revoke granular permissions;
+- authorize other users to perform these operations.
+
+A Super Admin must never be able to cross the company's tenant boundary. Company isolation, RLS and database-level tenant protections remain absolute.
+
+### 6.2 Delegated Administrative Permissions
+
+Super Admin must be able to assign granular permissions to other users/roles.
+
+Deletion and modification must therefore be permission-driven rather than hardcoded to a particular application role.
+
+Where appropriate, permissions should follow the existing RBAC convention, for example:
+
+- `client:create` / `client:view` / `client:edit` / `client:delete`
+- `supplier:create` / `supplier:view` / `supplier:edit` / `supplier:delete`
+- `inventory:create` / `inventory:view` / `inventory:edit` / `inventory:delete`
+- `invoice:create` / `invoice:view` / `invoice:edit` / `invoice:delete`
+- `payment:create` / `payment:edit` / `payment:delete`
+- `purchase:create` / `purchase:edit` / `purchase:delete`
+- `memo:create` / `memo:edit` / `memo:delete`
+- `return:create` / `return:edit` / `return:delete`
+- `master:create` / `master:edit` / `master:delete`
+
+The exact permission names should reuse existing RBAC naming conventions rather than introducing duplicate permission systems.
+
+If an existing permission already represents the required authority, extend/use it rather than creating another permission unnecessarily.
+
+### 6.3 Deletion Is an ERP Capability, Not a Provider Policy
+
+The ERP provider supplies the technical capability and safeguards.
+
+The customer organization's Super Admin is responsible for deciding:
+
+- which employees may edit records;
+- which employees may delete records;
+- which employees may perform administrative corrections;
+- which employees may restore records;
+- which employees may amend financial/inventory records.
+
+The application must enforce the configured authorization, but it must not assume that the provider should prohibit a customer's authorized administrator from modifying their own company's data.
+
+### 6.4 Safe Deletion Behaviour
+
+"Delete" does not necessarily mean a raw SQL `DELETE`.
+
+The implementation must select the technically correct operation for each entity:
+
+1. **Hard delete** where the record is genuinely removable and has no integrity-critical dependants.
+2. **Soft delete / inactive state** where retaining the record is useful for operational continuity.
+3. **Status transition / retirement** where the entity has a lifecycle.
+4. **Amendment / reversal / compensating transaction** where directly deleting the record would make financial or inventory history mathematically inconsistent.
+5. **Administrative force-delete** where explicitly required and technically safe, with elevated permission and mandatory audit information.
+
+The objective is **not to prohibit deletion**. The objective is to ensure that an authorized administrator's requested deletion does not accidentally corrupt unrelated inventory, accounting, tax, tenant, or security data.
+
+### 6.5 No Uncontrolled Cascading Deletes
+
+Do not introduce broad Prisma `onDelete: Cascade` relationships merely to make deletion easier.
+
+Before implementing deletion of an entity:
+
+- identify dependent records;
+- identify financial consequences;
+- identify inventory consequences;
+- identify references from other modules;
+- determine whether those dependants should also be removed, reassigned, reversed, or retained;
+- use an explicit transaction;
+- test the complete operation.
+
+Existing dangerous cascades must be identified during the deletion audit. A delete operation must never accidentally remove unrelated company data.
+
+### 6.6 Audit Trail Is Immutable
+
+**Audit records are the exception to the universal edit/delete capability.**
+
+Application users, including `SUPER_ADMIN`, must NOT be able to:
+
+- edit audit records;
+- delete audit records;
+- truncate audit records;
+- disable audit creation for an individual operation;
+- rewrite the recorded actor, timestamp, or original before/after values.
+
+The audit trail is an integrity and accountability mechanism for the ERP.
+
+Every applicable administrative modification must create an audit entry containing, where applicable: `companyId`; acting user; acting membership/employee; timestamp; entity/model; record ID; action (`CREATE`, `EDIT`, `DELETE`, `RESTORE`, `AMEND`, `FORCE_DELETE`, etc.); before-state; after-state; reason/comment for sensitive administrative actions; relevant request/context information.
+
+Audit records must remain company-isolated. `PlatformAuditLog` remains reserved for platform/operator events and is governed by the existing platform isolation rules.
+
+### 6.7 Administrative Override
+
+For exceptional cases, provide an explicit administrative override mechanism rather than creating hidden bypasses.
+
+A `SUPER_ADMIN` or specifically delegated administrator may perform an override when the appropriate permission exists. Sensitive override operations should: require explicit confirmation; require a reason where appropriate; be performed transactionally; generate an immutable audit entry; identify the operation as an administrative override; remain restricted to the user's own company.
+
+Do not create a generic endpoint such as `DELETE /anything/:id` that bypasses model-specific validation. The framework must remain entity-aware and permission-aware.
+
+### 6.8 Financial and Inventory Records
+
+Financial and inventory records are **not provider-forbidden from modification**. They are subject to the same administrative authority model, but the implementation must preserve accounting and inventory integrity. For example:
+
+- editing an issued invoice may create an adjustment journal;
+- deleting a payment may require reversal of its journal;
+- deleting a sale may require restoration of affected inventory;
+- deleting a purchase may require reversing inventory and payable entries;
+- deleting a return may require reversing the return's inventory/accounting effects.
+
+The exact behaviour must be implemented per entity and tested. Do not silently delete financial side effects merely because the primary record was deleted.
+
+### 6.9 Restore
+
+Where deletion is implemented through soft deletion or an equivalent reversible mechanism, authorized users should have a `Restore` capability. Restore must: check permission; check company ownership; check current dependencies/state; execute transactionally; restore only what can safely be restored; create an immutable audit entry.
+
+If a record cannot safely be restored, the API must return a clear reason rather than silently creating inconsistent data.
+
+### 6.10 Frontend Requirement
+
+Every applicable entity page must expose the appropriate actions (`Edit`, `Delete`, `Restore`, `Amend`, `Deactivate/Activate`) according to the user's permissions and the entity's lifecycle. The frontend must never rely on hiding a button as the security mechanism.
+
+The server must independently enforce: authentication; company membership; company ownership; RBAC permission; entity-specific dependency rules; transaction integrity.
+
+Delete actions must have a clear confirmation UI. Sensitive administrative deletes/overrides should request a reason.
+
+### 6.11 Delete/Modification Framework Must Be Reusable
+
+Do not implement dozens of unrelated one-off deletion mechanisms. Create a common server-side pattern that can be reused by modules while allowing entity-specific rules:
+
+`authenticate → company context → permission → ownership → entity-specific validation → dependency check → transaction → delete/edit/restore/reverse → audit → response`
+
+The common framework must not bypass model-specific business rules.
+
+### 6.12 Testing Requirements
+
+Every new edit/delete/restore capability must test at minimum:
+
+1. authorized Super Admin succeeds;
+2. delegated authorized user succeeds;
+3. unauthorized user receives `403`;
+4. cross-company record cannot be modified;
+5. cross-company record cannot be deleted;
+6. invalid/nonexistent record is handled safely;
+7. dependent records are handled correctly;
+8. transaction rolls back on failure;
+9. audit entry is created;
+10. audit entry contains the correct actor/company/action;
+11. audit entry cannot be modified/deleted through normal application APIs;
+12. RLS prevents tenant escape;
+13. frontend action visibility follows permissions;
+14. direct API access is still denied when the permission is absent.
+
+Run the normal test suite and, before release, run `npm run test:rls` and `npm run audit:tenant`.
 
 ---
 
@@ -392,6 +559,271 @@ status, and setup instructions. See `UI_DESIGN_GUIDE.md` before building or rewo
 frontend screen — keyboard-first field conventions, compact grid-based forms, table overflow
 handling, and the `getValues()`-vs-`watch()` pitfall, all with reference implementations to copy.
 
+### Phase J — Universal Edit / Delete / Restore / Administrative Control
+
+The next major objective is to make the ERP fully administrable by the customer's authorized administrators.
+This is a **framework requirement across the entire application**, not a single-module feature.
+
+The objective is:
+
+- `SUPER_ADMIN` → full administrative control within own company
+- `DELEGATED USER` → only the explicitly assigned edit/delete/restore permissions
+- `NORMAL USER` → existing operational permissions only
+- `AUDIT TRAIL` → immutable and protected
+
+The implementation must begin with a complete repository audit before changing code.
+
+**Phase J1 — Delete/Edit Inventory Audit.** Inspect the entire Prisma schema, all server routes/services/
+controllers, RBAC permissions, audit system, tenant wrappers, RLS policies and all frontend pages. Create a
+complete matrix containing at least:
+
+| Module | Entity | UI Page | API | Current Edit | Current Delete | Dependencies | Financial Impact | Inventory Impact | Recommended Operation | Permission | Audit Event |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+
+Classify every applicable entity as: Hard Delete / Soft Delete / Deactivate-Activate / Status-Retire / Amend /
+Reverse / Administrative Override / Protected System Record. Do not assume that an entity is protected merely
+because it is financial or historical — the customer's authorized administrator must retain a supported method
+to correct or remove operational data; the implementation determines whether that method is deletion,
+amendment, reversal or another safe operation.
+
+**Phase J2 — RBAC.** Extend the existing RBAC system with granular edit/delete/restore/override permissions
+where required. `SUPER_ADMIN` must have the complete set of company-level administrative permissions. Do not
+create a second authorization system.
+
+**Phase J3 — Server Framework.** Implement reusable authorization and entity-specific deletion/modification
+patterns. Every operation must enforce: `authentication → company → permission → ownership → dependency rules
+→ transaction → audit`.
+
+**Phase J4 — Frontend.** Add appropriate Edit / Delete / Restore / Amend / Activate-Deactivate actions
+throughout the application. Buttons are permission-aware, but the server remains authoritative.
+
+**Phase J5 — Audit Integrity.** Ensure all administrative modifications generate immutable audit records.
+Verify that application users cannot modify or delete audit history.
+
+**Phase J6 — Tests.** Test successful authorized operations, unauthorized operations, cross-company attacks,
+dependency handling, transaction rollback, audit creation, restore and RLS. Run `npm run test:rls` and
+`npm run audit:tenant` before considering Phase J complete.
+
+**Do not implement Phase J as one giant uncontrolled change.** Audit the repository first, produce the
+classification matrix, then implement module-by-module and stop for review after each logical group.
+
+**Progress (2026-09-28).** **J1 is done** — the full classification matrix is `PHASE_J1_AUDIT.md`. Alongside
+it, a **repo-wide company-isolation sweep** (a separate, prerequisite request, not itself part of J1–J6) is
+done — see `COMPANY_ISOLATION_AUDIT.md`: no cross-company leak found anywhere (queries, reports/exports/
+search, WebSocket/Redis/object storage, RLS config all independently re-verified against source), but it
+found and fixed 4 real ownership-check gaps (`JournalLine.accountId` — CRITICAL, `JewelryTag.jobCardId`/
+`designId`, `HallmarkingItem.jobCardId`, `RepairJob.originalJobCardId` — all plain FKs nothing had ever
+checked), each with a regression test, plus a new "Company-isolation contract" checklist appended just above
+§12.
+
+**J2 is started — first slice done (Sales & Client group), stopped for review before touching another group
+or J3.** Per the audit matrix, `client:*`/`payment:*`/`return:*` didn't exist — client CRUD rode `order:view`/
+`order:create` (the unrelated production-order permission family), and payment/return creation rode
+`invoice:create`. Added `client:view`/`client:create`/`client:edit`, `payment:create`, `return:create` to
+`permissionCatalog.ts` and re-gated the actual existing endpoints (`orders.router.ts`'s `/clients` routes,
+`sales.router.ts`'s payment and return-creation routes) — no new capability was built (that's J3), this is
+purely correcting which permission string an already-working endpoint checks. `PRODUCTION_MANAGER`/
+`ACCOUNTANT`/`SALES_MANAGER` in `starterPackage/v1.ts` got the new strings added alongside (never instead of)
+their existing `order:*`/`invoice:create` grants, so no one's effective access changes — same precedent as
+the earlier documented `masters:view` fix. **Caveat, same class as that precedent**: Starter Package v1 is
+immutable per its own header comment — this only reaches a company provisioned from now on. An
+already-provisioned company (e.g. the local dev SEA company) needs its `PRODUCTION_MANAGER`/`ACCOUNTANT`/
+`SALES_MANAGER` roles' permissions updated directly (Role Editor UI, or a one-off script) for its existing
+users to keep working once these endpoints ship — this was **not** done to any live database in this pass.
+`npm run test:rls` (745/746) and the full suite (741/746, both runs 0 failed) were re-run clean after every
+change in both the isolation sweep and this J2 slice.
+
+**J3 — administrative mutations (Client lifecycle, Invoice Void, Payment reversal) is done, per the
+finalized human decisions in `PHASE_J3_DECISIONS.md`.** Full writeup, schema, and test inventory in
+`PHASE_J3_IMPLEMENTATION.md`. Summary of the decisions and behavior a future change must not
+silently break:
+
+1. **Client deactivate/reactivate is its own permission (`client:deactivate`), separate from
+   `client:edit`.** `isActive` was removed from `updateClient`'s writable-field whitelist
+   (`CLIENT_WRITABLE_KEYS`, `orders.service.ts`) — ordinary edit can no longer silently toggle it.
+   New `setClientActive()` (own audit action `DEACTIVATE`/`REACTIVATE`, rejects a redundant
+   toggle) is the only path. It now has real teeth: `createInvoice`, `createMemoOut`, and
+   `recordClientPayment` all reject an inactive client via a shared `assertClientActive()` guard
+   — deliberately **not** added to `amendInvoice`/`createSalesReturn`/`convertMemoToInvoice`, which
+   act on a transaction that already exists (a memo predates any later deactivation; a return/amend
+   corrects something already on the books), not one that's starting fresh.
+2. **Client permanent deletion (`client:delete`, new `deleteClient()`) requires zero rows across all
+   eight of `Client`'s dependent relations** (sales, memos, returns, exchanges, payments, repairs,
+   manufactured tags, dormant `SalesOrder`) — checked in code as defense in depth on top of the FK
+   layer (every one of those relations is the Postgres default/RESTRICT, never CASCADE), which
+   already guarantees this at the database level. Never cascades; a client with any history can only
+   be deactivated, never erased.
+3. **Invoice Void (`invoice:void`, new `voidInvoice()`) is a whole-invoice reversal — never a hard
+   delete.** Reuses `createSalesReturn`'s own proven per-line mechanics (tag flip, ledger reversal,
+   client credit) applied to every line and the header at once; sets `status = 'VOID'` (free-text,
+   no enum) plus `voidedAt`/`voidedById`/`voidReason`. Strict eligibility: zero `InvoicePayment`
+   rows, zero `SalesReturn` rows, not already `VOID`, and refuses if `TaxInvoice.irn` is already
+   set (this system has no GST e-invoice IRN-cancellation integration — that stays a manual,
+   outside-the-system step, same posture as the I3 gap). `amendInvoice`, `recordPayment`, and
+   `createSalesReturn` all now refuse to act on a `VOID` invoice.
+4. **Payment reversal (`payment:reverse`, new `reverseInvoicePayment()`) flags the original row
+   (`reversedAt`/`reversedById`/`reversalReason`) — it is never edited or deleted.** Every place that
+   sums `InvoicePayment` as a real receipt (`getClientLedger`, `getDayBook` in
+   `finance.service.ts`) now also filters `reversedAt: null`. Three cases, by mode:
+   - **cash/bank/UPI/card/...**: a real receipt — reopens the invoice, credits `currentBalance`
+     back, posts the exact inverse journal.
+   - **STORE_CREDIT**: this "payment" never moved `currentBalance` or posted a journal in the first
+     place — the credit was already netted into `currentBalance` when the `SalesReturn`/
+     `OldGoldExchange` that funded it was booked, *before* the invoice's own debit. Reversing it only
+     reopens the invoice; there is no separate credit-source movement to undo, and no
+     individually-redeemable "unit" of credit to double-spend, since `currentBalance` is one pooled
+     running balance, not a ledger of discrete credit lots. **This is why Decision 4 (below) could
+     stay closed** — no `SalesReturn` "un-return" capability was needed to satisfy Decision 2's
+     "reverse the underlying credit-source movement" requirement for this mode; there is no
+     source-specific movement STORE_CREDIT ever made.
+   - **OLD_GOLD**: unlike `STORE_CREDIT`, this mode *does* create its own real, separate movement at
+     payment-application time (`bookOldGoldExchange`, called from inside `createInvoice`'s payments
+     loop): it credits `currentBalance`, posts its own journal, and adds real weight to the Metal
+     Vault. Reversing the payment **without** reversing that exchange would let the business collect
+     cash for an invoice it already extracted equivalent-value metal for — so both now reverse
+     together, atomically, in the same transaction: the exchange is marked
+     `reversedAt`/`reversedById`/`reversalReason` (same additive-columns shape as `InvoicePayment`),
+     its journal is reversed, `currentBalance` is credited back, and its `MetalStock` row is zeroed
+     out (`availableWt: 0, isActive: false`). **Refused (409), not silently skipped, if the metal has
+     since been reserved/consumed by anything else** — checked via `MetalStock.availableWt` vs
+     `netWeight`. This codebase's only present-day consumer of Metal Vault stock is the
+     dormant-but-not-disabled production auto-reservation path (`orders.service.ts:
+     autoReserveMaterials`, off a `SalesOrder`/BOM) — if that already spent this exchange's metal,
+     there is nothing left to give back, and the reversal correctly refuses rather than fabricating
+     stock back into existence.
+5. **`SalesReturn` remains append-only — no "un-return" capability was built.** A mistakenly-returned
+   item is corrected by selling it again through the normal `createInvoice` path; nets out correctly
+   with no new risk surface. If the business later needs a true reversal of a `SalesReturn` itself
+   (as opposed to reversing a *payment* that happened to be settled by credit a return generated),
+   that is still a from-scratch design question, not something this phase's `payment:reverse`
+   capability provides — it only reverses the payment/exchange pair, never the return itself.
+6. **All four new permissions ship SUPER_ADMIN-only** (`client:deactivate`, `client:delete`,
+   `invoice:void`, `payment:reverse`) — added to `permissionCatalog.ts` but **not** granted to any
+   starter role and **not** back-filled onto any already-provisioned company, per Decision 6/7. A
+   company's own `SUPER_ADMIN` delegates them through the Role Editor when ready (same
+   "log out and back in for a cached JWT to pick it up" caveat as every prior permission-catalog
+   addition).
+7. **`GET /sales/clients/:clientId/credit` is now `client:view`**, not `invoice:create` (Decision 7)
+   — it only ever read `Client.currentBalance`.
+
+Tests: `sales.service.test.ts` (`voidInvoice (J3.3)`, `reverseInvoicePayment (J3.2)`, `inactive client
+is rejected...`), `orders.service.test.ts` (new file — `setClientActive`, `deleteClient`,
+`updateClient` regression), `http.j3Administrative.test.ts` (new file — the one thing the
+service-level suites don't cover: `requirePermission(...)` actually gating each new route over real
+HTTP, granted vs. missing). Full local suite, server/client `tsc`, and `npm run audit:tenant` all
+re-run clean; `npm run test:rls` re-run against the real role-split cluster after applying this
+phase's migration there too (see `PHASE_J3_IMPLEMENTATION.md` for the exact numbers).
+
+**J3.5 — hardening pass (2026-09-28), fixing all six findings from the J3 Final Safety Audit.** Full
+writeup, root causes, and per-finding tests in `PHASE_J3.5_HARDENING.md`. In one line each: (1) a
+voided invoice no longer counts as a live receivable/sale in `getDealerAging`/`getClientLedger`/
+`getDayBook`/`getGstSummary`/`/reports/aging-receivables`/`getSalesRegister` — all six needed the
+identical `status: { not: 'VOID' }` (or equivalent) exclusion, since none of them existed to know
+about `'VOID'` when it shipped; (2) `billRepairJob()` now checks the *linked invoice's* status, not
+just whether `invoiceId` is set, so voiding a repair bill no longer permanently locks that repair job
+out of being billed again (it reassigns `invoiceId` to the new invoice and audits the supersession as
+`'REBILL'`); (3) `reverseInvoicePayment()`'s three read-then-write mutations (`SalesInvoice.paidAmount
+`/`balanceDue`, the `OldGoldExchange` reversed-flag guard, `MetalStock` zeroing) are now a `SELECT ...
+FOR UPDATE` lock and two count-checked conditional `updateMany`s respectively, closing real lost-update
+windows — one of which was verified to actually reproduce the bug when the fix was temporarily
+reverted, then confirmed fixed again; (4) `assertCashLimit` (Sec 269ST) now excludes reversed cash
+payments from the daily ceiling; (5) the `OldGoldExchange` and `MetalStock` reversal audit entries now
+carry real before/after content instead of a bare reason string / nothing at all; (6) `deleteClient`
+gracefully translates a raced FK conflict into a 409 via the existing `isBlockedByForeignKey` helper
+instead of a raw 500. Two durable rules learned and worth restating for future work: **a new terminal
+status value on any entity must be checked against every existing report/aggregate that filters by
+status, not just the ones a bug report happened to name**; and **a conditional write that follows a
+state check must itself be count-checked or lock-protected at write time — checking once and writing
+blindly later is the same bug every time.** (Noted, not fixed: `addMetalStock` audits from inside
+whatever transaction it's given, which can record a `CREATE` for a mutation that later rolls back if
+nested in a larger failing transaction — pre-existing, unrelated to any of the six findings.) 13 new
+regression tests; full suite, `test:rls`, both `tsc`s, and `audit:tenant` all re-run clean.
+
+**Phase J4 — RBAC / Authorization implementation is done**, per the six locked decisions in
+`PHASE_J4_DECISIONS.md`. Full writeup in `PHASE_J4_IMPLEMENTATION.md`. Summary:
+
+1. **Four new permission strings** (`server/src/shared/permissionCatalog.ts`):
+   `report:financial_view` (D1), `po:approve_high_value` (D2), `grn:view` (D5), `payment:view` (D6).
+   Their action segments contain an underscore, which the starter-package validator's permission
+   regex (`starterPackage/validate.ts`) didn't allow — the regex was widened
+   (`[A-Za-z]+(_[A-Za-z]+)*`) to admit multi-word actions; still exactly one `resource:action` colon.
+2. **D1 — Reporting split.** `report:view` now covers only operational reports; a new
+   `report:financial_view` gates trial balance, P&L, balance sheet, dealer aging, client ledger,
+   day book, GST summary (sales + purchase), supplier ledger, and `/reports/aging-receivables` (an
+   equivalent older report, re-gated for consistency — not explicitly named in D1 but the same
+   sensitivity class). Only `ACCOUNTANT` (+ `SUPER_ADMIN` via `*`) gets it by default.
+3. **D2 — High-value PO approval.** `procurement.service.ts: approvePO()` no longer takes a
+   `userRole` string or hardcodes `SUPER_ADMIN`/`PRODUCTION_MANAGER` — it takes a
+   `canApproveHighValue: boolean` the router derives from the caller's permissions. The old
+   base role-list check (`!['PRODUCTION_MANAGER','SUPER_ADMIN'].includes(userRole)`) is gone
+   too: normal approval is `po:approve` alone (as the router already required), matching the
+   intended end-state logic in the execution spec. This also surfaced that `PRODUCTION_MANAGER`
+   had never actually held `po:approve` in the starter package — despite the old code assuming it
+   could approve — so `po:approve` was added alongside the new `po:approve_high_value`, restoring
+   the business capability the hardcoded check implied but the permission system never granted.
+   `PurchaseOrders.tsx`'s `POApprovalDrawer` mirrors this (`hasPermission('po:approve_high_value')`,
+   not `user?.role === 'SUPER_ADMIN'`).
+4. **D5 — GRN view.** `GET /procurement/grn` now requires `grn:view` (was `grn:create`);
+   `PRODUCTION_MANAGER`/`STORE_MANAGER` both get it alongside their existing `grn:create`.
+5. **D6 — Payment view.** `GET /sales/clients/:clientId/payments` now requires `payment:view`
+   (was `sales:view`); `ACCOUNTANT`/`SALES_MANAGER` both get it.
+6. **D3 — J3 admin permissions.** No target roles decided yet, per the decision sheet — the five
+   (`client:deactivate`, `client:delete`, `invoice:void`, `invoice:edit`, `payment:reverse`) remain
+   SUPER_ADMIN-only. No frontend UI exists for Void or Payment Reversal at all (J3 shipped
+   backend-only) — nothing to gate yet; building that UI is separate, future-scoped work.
+7. **Existing-company backfill is written but not run.** `server/scripts/backfillJ4Permissions.ts`
+   (dry-run by default, `--apply` to write) additively grants the role-specific strings above by
+   role name, across every company, never overwriting an existing custom grant — same posture as
+   the documented-but-undeployed `masters:view`/J2 `client:*` backfills. Not run against the local
+   dev SEA company in this pass.
+8. **Frontend authorization foundation** (`client/src/components/auth/`): `PermissionGate` (inline
+   conditional rendering — exact/`resource:*`/`*`, the identical algorithm `auth.store.ts` and the
+   backend's `requirePermission` already use) and `RequirePermission` (route-level guard — renders
+   an "Access Restricted" panel instead of the page). Wired into `pageRoutes.tsx` for every route
+   in Masters, Clients (`orders/clients`), Sales, Procurement, Quality/Repairs, Settings, Hardware,
+   and Finance/Reports (the last two needed it too, as a direct consequence of the D1 report split —
+   without it, a `report:view`-only user would still see now-`report:financial_view`-gated pages in
+   the sidebar and land on a page whose data calls 403). Every other module's routes (Product
+   Design, Inventory, Orders(production)/Manufacturing, Outsourcing) are unchanged — out of the
+   decided rollout scope.
+9. **Module button/action gating**, mirroring each route's own backend permission (no new frontend
+   authorization algorithm): `MastersPage.tsx`'s shared `FormPanel` now gates every tab's Add/Update
+   (`masters:create`/`masters:edit`) and Delete (`masters:delete`) in one place, with an explicit
+   override for the one tab that isn't really a master (Manufacturers/Clients, which edits real
+   `Client` rows via `client:create`/`client:edit`) — plus the isActive-toggle chips in
+   `GenericMasterSection`/`CategoriesTab`/`StoneTypesTab`/the Clients tab. `Clients.tsx`,
+   `SalesInvoices.tsx`, `NewSalePage.tsx` (a dead `useAuthStore` import finally used), `OldGoldExchange.tsx`,
+   `PurchaseOrders.tsx`, `Suppliers.tsx`, `PurchaseRequisitions.tsx`, `GrnVerification.tsx`,
+   `PurchaseReturns.tsx`, `RepairJobs.tsx`, `JournalEntries.tsx` (the specifically-named Post/New
+   Journal buttons), and `RoleEditorPage.tsx` (Save/Delete) all gained the create/edit/delete/
+   approve/payment/return-action checks their own mutation's backend permission requires.
+   `Suppliers.tsx`'s "Statement" link was also caught and fixed mid-pass — it still checked the
+   old `report:view` after D1 moved `supplier-ledger` to `report:financial_view`.
+10. **Slice 7 cleanup:** `navItems.tsx`'s "Roles & Permissions" now gates on `role:view` (was the
+    retired `role:manage`); its "GRN Verification"/"Repair Jobs" entries now match D5's `grn:view`
+    and the loosened `repair:view` (view-only page access, distinct from the `repair:manage`
+    workflow actions already gated inside the page). `rbac.ts`'s dead `PERMISSIONS` object
+    (confirmed zero usages) was removed and replaced with an exported `hasPermission(perms, p)`
+    helper `requirePermission` and the procurement router's approval-permission check both now
+    share. `API.md`'s stale `role:manage` doc and every re-gated route's permission column were
+    corrected. `qc:approve`/`sales:create`/`tax:manage` are confirmed dead (granted to a starter
+    role, enforced by zero routes) but deliberately left untouched — removing them from the catalog
+    could make an already-provisioned company's custom role permanently unsaveable in the Role
+    Editor if it happens to hold one, without a prior data migration to strip it first; this is
+    recorded as deferred cleanup, not fixed here.
+11. **No Prisma migration** — `Role.permissions` is a plain `String[]` column (no enum, no schema
+    change needed for a new permission string); the backfill above is a data-only script.
+    Verified: full suite (805/810, 5 pre-existing skips), `npm run test:rls` against the real
+    role-split cluster (809/810, 1 pre-existing skip), `npm run audit:tenant` (0 violations), both
+    `tsc`s, and both production builds (client `vite build`, server `tsc -p tsconfig.build.json`)
+    all clean.
+
+**Not done / deferred:** `GET /settings/design-categories` still has no permission gate at all — a
+real, pre-existing gap independently confirmed by the J4 audit, but not named in the owner's six
+locked decisions or execution slices, so left untouched rather than expanding scope. D3's target
+roles for the five J3 admin permissions are an explicit future decision. The backfill script is
+unexecuted against any live database. See `PHASE_J4_IMPLEMENTATION.md` for the full matrix.
+
 ---
 
 ## 8. Known follow-ups / control gaps
@@ -575,6 +1007,58 @@ wrappers. The schema guard, `audit:tenant` and the RLS suite will fail until you
 `prisma/rls-coverage-report.md` is a stale generated snapshot (predates system_configs and the nine
 masters; its header also contains an unrendered `${entries.length}`) — regenerate before relying on it.
 
+### Administrative authority remains tenant-scoped
+
+`SUPER_ADMIN` means **Super Admin of the current company**, not a global database administrator. A Super
+Admin may have unrestricted operational modification/deletion authority over their own company's records, but:
+
+- cannot access another company's records;
+- cannot modify another company's records;
+- cannot delete another company's records;
+- cannot bypass RLS;
+- cannot use administrative override to cross a tenant boundary.
+
+The existing RLS, `tenantQuery`, `tenantTransaction`, ownership checks and composite foreign keys remain
+mandatory for administrative operations. The only application-level exception to ordinary operational
+modification is the immutable audit system and explicitly protected platform/security records.
+
+### Company-isolation contract — mandatory for every future feature
+
+A repo-wide isolation sweep (2026-09-28, see `COMPANY_ISOLATION_AUDIT.md` for the full report) confirmed the
+architecture described above actually holds in the live code — not just in this document — across queries,
+routes, reports/exports/search, WebSocket/Redis/object storage, and RLS config, and closed 4 real
+cross-company ownership gaps it found (`JournalLine.accountId`, `JewelryTag.jobCardId`/`designId`,
+`HallmarkingItem.jobCardId`, `RepairJob.originalJobCardId` — all were plain, unchecked FKs; all now go through
+`assertOwnedByCompany`/`assertOwnedIfPresent`, with regression tests). Nothing here is new policy — it's the
+existing rule, made explicit as a sequence so it isn't skipped under time pressure:
+
+1. Identify the owning Company (direct `companyId`, or a strictly company-owned parent).
+2. If a request will supply a foreign id on this feature (a client, tag, branch, invoice, account, ...),
+   plan the `assertOwnedByCompany`/`assertOwnedIfPresent`/`assertAllOwned` call for it **before** writing the
+   create/update logic — not as an afterthought. Postgres FK checks bypass RLS; a plain FK never stops a
+   forged cross-company id on its own.
+3. Add `@@unique([id, companyId])` + a composite FK if the new column is a high-risk reference another
+   table will point at (CLAUDE.md §11 item 6).
+4. Every query goes through `tenantQuery`/`tenantBatch`/`tenantTransaction` — never a bare `prisma.<model>.*`
+   call on a company-owned model. `npm run audit:tenant` catches this **for the plain-`prisma`, `CallExpression`
+   form only** — see the known blind spots below before trusting a clean run as proof.
+5. A report/aggregate/export/search endpoint must derive its company scope from `req.tenant`/`ctx.companyId`
+   only, never from a client-supplied field — and if it's meant to respect branch restrictions
+   (`ctx.branchAccess`), thread that through explicitly; company-scoping alone is not the same guarantee.
+6. Add a cross-company regression test for any new foreign-id-accepting endpoint (forged id → 404, nothing
+   persisted) alongside the ordinary create/edit tests — this is the cheapest point to catch the class of bug
+   the 4 fixes above all were.
+7. Only then expose the API/frontend.
+
+**Known guardrail limitations** (found during the sweep, not yet closed — treat as a manual-review checklist
+item until closed): `tools/tenantAudit.ts` cannot see raw SQL written as a tagged template
+(`` prisma.$queryRaw`...` ``, the actual convention this codebase uses — it only catches the
+`$queryRawUnsafe`-style plain-call form) and does not recognize `platformPrisma` (the BYPASSRLS client) at
+all, so a stray direct `platformPrisma.<companyModel>.<op>()` call outside `runAsPlatform()` would currently
+pass with zero warning. Neither `audit:tenant` nor `test:rls` runs in CI — there is no CI workflow in this
+repo at all; both are manual pre-release steps (CLAUDE.md §12). Any new raw SQL against a company-owned table,
+or any new use of `platformPrisma`, needs a manual company-scoping review until these are closed.
+
 ---
 
 ## 12. Production readiness (Phase 6) — what was verified, and what is still open
@@ -650,3 +1134,7 @@ above grow linearly — paginate before a company passes ~20k customers / ~50k i
 - Registration is operator-only by design; a public sign-up would need e-mail verification + abuse controls first.
 - No PITR (nightly logical backup only); no monitoring/alerting stack; no load test beyond one machine / 30 users.
 - A person in several companies has one password (global `User`); stolen-JWT window = access-token lifetime (8 h default).
+- **Administrative data-control verification (Phase J):** before release, verify that a company `SUPER_ADMIN`
+  can perform the supported edit/delete/restore/override operations for every classified operational entity,
+  delegated permissions work correctly, unauthorized users receive `403`, cross-company operations fail, and
+  every administrative action produces an immutable audit record.

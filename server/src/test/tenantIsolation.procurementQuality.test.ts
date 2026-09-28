@@ -150,7 +150,7 @@ describe('Phase 2b: procurement & quality tenant isolation', () => {
       const po = await makePO(companyA);
       await expect(submitPOForApproval(po.id, companyB.ctx, companyB.user.id)).rejects.toThrow('Purchase Order not found');
       const submitted = await submitPOForApproval(po.id, companyA.ctx, companyA.user.id);
-      await expect(approvePO(submitted.id, companyB.ctx, companyB.user.id, 'SUPER_ADMIN')).rejects.toThrow('Purchase Order not found');
+      await expect(approvePO(submitted.id, companyB.ctx, companyB.user.id, true)).rejects.toThrow('Purchase Order not found');
     });
   });
 
@@ -241,6 +241,38 @@ describe('Phase 2b: procurement & quality tenant isolation', () => {
         receiveHallmarkingBatch(batch.id, [{ id: batch.items[0].id, huid: 'HUID123' }], companyB.ctx)
       ).rejects.toThrow('Hallmarking batch not found');
     });
+
+    // jobCardId is a plain, non-composite FK that createHallmarkingBatch never ownership-checked
+    // (unlike tagId, tested above) — found and fixed during the repo-wide company-isolation audit.
+    it('createHallmarkingBatch rejects a Company B jobCardId (cross-company forgery)', async () => {
+      const designCategoryB = await prisma.designCategory.create({
+        data: { companyId: companyB.company.id, code: `P2BHMJC-${suffix}`, name: 'HM Job Card Design Cat B' },
+      });
+      const designB = await prisma.design.create({
+        data: {
+          companyId: companyB.company.id, designCode: `P2BHMJCDES-${suffix}`, name: 'HM Job Card Design B',
+          categoryId: designCategoryB.id, metalKarat: '22K',
+          grossWeightMin: 1, grossWeightMax: 2, netWeightMin: 1, netWeightMax: 2,
+        },
+      });
+      const jobCardB = await prisma.jobCard.create({
+        data: { companyId: companyB.company.id, jobNumber: `P2BHMJC-${suffix}`, designId: designB.id, issuedWeight: 5, barcodeData: `P2BHMJCBC-${suffix}` },
+      });
+
+      await expect(
+        createHallmarkingBatch(
+          { centerName: 'BIS Center', sentDate: new Date(), items: [{ jobCardId: jobCardB.id, karat: '22K', netWeight: 5 }] },
+          companyA.ctx, companyA.user.id,
+        )
+      ).rejects.toThrow('Job card not found');
+
+      const leaked = await prisma.hallmarkingBatch.findFirst({ where: { companyId: companyA.company.id, items: { some: { jobCardId: jobCardB.id } } } });
+      expect(leaked).toBeNull();
+
+      await prisma.jobCard.delete({ where: { id: jobCardB.id } });
+      await prisma.design.delete({ where: { id: designB.id } });
+      await prisma.designCategory.delete({ where: { id: designCategoryB.id } });
+    });
   });
 
   describe('repair jobs', () => {
@@ -255,6 +287,39 @@ describe('Phase 2b: procurement & quality tenant isolation', () => {
         )
       ).rejects.toThrow('Client not found');
       await prisma.client.deleteMany({ where: { id: clientB.id } });
+    });
+
+    // originalJobCardId is a plain, non-composite FK that createRepairJob never
+    // ownership-checked (unlike clientId/tagId, tested elsewhere) — found and fixed during the
+    // repo-wide company-isolation audit.
+    it('createRepairJob rejects a Company B originalJobCardId (cross-company forgery)', async () => {
+      const designCategoryB = await prisma.designCategory.create({
+        data: { companyId: companyB.company.id, code: `P2BREPJC-${suffix}`, name: 'Repair Job Card Design Cat B' },
+      });
+      const designB = await prisma.design.create({
+        data: {
+          companyId: companyB.company.id, designCode: `P2BREPJCDES-${suffix}`, name: 'Repair Job Card Design B',
+          categoryId: designCategoryB.id, metalKarat: '22K',
+          grossWeightMin: 1, grossWeightMax: 2, netWeightMin: 1, netWeightMax: 2,
+        },
+      });
+      const jobCardB = await prisma.jobCard.create({
+        data: { companyId: companyB.company.id, jobNumber: `P2BREPJC-${suffix}`, designId: designB.id, issuedWeight: 5, barcodeData: `P2BREPJCBC-${suffix}` },
+      });
+
+      await expect(
+        createRepairJob(
+          { originalJobCardId: jobCardB.id, repairType: 'CUSTOMER_REPAIR', returnReason: 'Forged job card' },
+          companyA.ctx, companyA.user.id,
+        )
+      ).rejects.toThrow('Job card not found');
+
+      const leaked = await prisma.repairJob.findFirst({ where: { companyId: companyA.company.id, originalJobCardId: jobCardB.id } });
+      expect(leaked).toBeNull();
+
+      await prisma.jobCard.delete({ where: { id: jobCardB.id } });
+      await prisma.design.delete({ where: { id: designB.id } });
+      await prisma.designCategory.delete({ where: { id: designCategoryB.id } });
     });
 
     it('Company B cannot read, update, deliver, or bill a Company A repair job (IDOR)', async () => {

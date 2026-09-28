@@ -17,6 +17,7 @@ import { PageHeader } from '../../components/common/PageHeader';
 import { useTabActive } from '../../components/Layout/TabActiveContext';
 import { stoneGradeCode, stoneGradeLabel } from '../../utils/stoneGrade';
 import { DataTable } from '../../components/common/DataTable';
+import { useAuthStore } from '../../store/auth.store';
 
 function fmtPrice(n: number) {
   return '₹' + Number(n).toLocaleString('en-IN', { maximumFractionDigits: 4 });
@@ -56,8 +57,11 @@ function useMasterDelete() {
 
 // ─── Inline add/edit form panel ───────────────────────────────────────────────
 
+const MASTERS_PERMISSIONS = { create: 'masters:create', edit: 'masters:edit', delete: 'masters:delete' };
+
 function FormPanel({
   title, children, isEdit, saving, disabled, onAdd, onUpdate, onClear, onDelete, oneRow,
+  permissions = MASTERS_PERMISSIONS,
 }: {
   title: string; children: React.ReactNode; isEdit: boolean; saving?: boolean; disabled?: boolean;
   onAdd: () => void; onUpdate: () => void; onClear: () => void; onDelete?: () => void;
@@ -66,7 +70,16 @@ function FormPanel({
   // space the whole point of this panel is to reclaim. Not the default: a form with more fields
   // than comfortably fit one row still wants the grid's wrap-as-needed behavior.
   oneRow?: boolean;
+  // Almost every tab in this file is a genuine master (masters:create/edit/delete). The one
+  // exception is the Manufacturers/Clients tab, which edits the same Client rows as Orders >
+  // Clients and so must ride client:create/client:edit instead — it passes its own override.
+  permissions?: { create: string; edit: string; delete: string };
 }) {
+  // Gating here once covers every "Add"/"Update"/"Delete" button in the whole page, rather than
+  // duplicating a permission check in every one of this file's ~10 tab components individually.
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const canWrite = hasPermission(isEdit ? permissions.edit : permissions.create);
+  const canDelete = hasPermission(permissions.delete);
   return (
     <Card variant="outlined" sx={{ p: 2 }}>
       <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1.5 }}>{title}</Typography>
@@ -80,11 +93,13 @@ function FormPanel({
         {children}
       </Box>
       <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
-        <Button variant="contained" size="small" disabled={disabled || saving} onClick={isEdit ? onUpdate : onAdd}>
-          {isEdit ? 'Update' : 'Add'}
-        </Button>
+        {canWrite && (
+          <Button variant="contained" size="small" disabled={disabled || saving} onClick={isEdit ? onUpdate : onAdd}>
+            {isEdit ? 'Update' : 'Add'}
+          </Button>
+        )}
         {isEdit && <Button size="small" onClick={onClear}>Cancel</Button>}
-        {isEdit && onDelete && (
+        {isEdit && onDelete && canDelete && (
           <Button size="small" color="error" startIcon={<DeleteIcon fontSize="small" />} onClick={onDelete}>Delete</Button>
         )}
       </Stack>
@@ -190,6 +205,7 @@ function GenericMasterSection({
   const qc = useQueryClient();
   const [selected, setSelected] = useState<any>(null);
   const deleteMaster = useMasterDelete();
+  const canEdit = useAuthStore((s) => s.hasPermission('masters:edit'));
 
   const { data, isLoading } = useQuery({ queryKey: [queryKey], queryFn: () => apiGet<any>(apiPath, listParams) });
   const rows: any[] = (data as any)?.data ?? data ?? [];
@@ -210,6 +226,7 @@ function GenericMasterSection({
   });
 
   const toggleActive = (row: any) => {
+    if (!canEdit) return;
     apiPatch(`${apiPath}/${row.id}`, { isActive: !row.isActive })
       .then(() => {
         qc.invalidateQueries({ queryKey: [queryKey] });
@@ -270,7 +287,7 @@ function GenericMasterSection({
               filterValue: (r: any) => (r.isActive ? 'Active' : 'Inactive'),
               render: (r: any) => (
                 <Chip label={r.isActive ? 'Active' : 'Inactive'} size="small" color={r.isActive ? 'success' : 'default'}
-                  sx={{ cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); toggleActive(r); }} />
+                  sx={{ cursor: canEdit ? 'pointer' : 'default' }} onClick={canEdit ? (e) => { e.stopPropagation(); toggleActive(r); } : undefined} />
               ),
             },
           ]}
@@ -291,6 +308,7 @@ function CategoriesTab() {
   const [selectedCat, setSelectedCat] = useState<any>(null);
   const [selectedSub, setSelectedSub] = useState<any>(null);
   const deleteMaster = useMasterDelete();
+  const canEdit = useAuthStore((s) => s.hasPermission('masters:edit'));
 
   const { data: catData, isLoading: catLoading } = useQuery({
     queryKey: ['master-categories'],
@@ -331,6 +349,7 @@ function CategoriesTab() {
   });
 
   const toggleActive = (path: string, qk: string, id: string, val: boolean) => {
+    if (!canEdit) return;
     apiPatch(`${path}/${id}`, { isActive: !val })
       .then(() => qc.invalidateQueries({ queryKey: [qk] }))
       .catch((e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' }));
@@ -402,8 +421,8 @@ function CategoriesTab() {
                 filterValue: (r: any) => (r.isActive ? 'Active' : 'Inactive'),
                 render: (r: any) => (
                   <Chip label={r.isActive ? 'Active' : 'Inactive'} size="small" color={r.isActive ? 'success' : 'default'}
-                    sx={{ cursor: 'pointer' }}
-                    onClick={(e) => { e.stopPropagation(); toggleActive('/masters/subcategories', 'master-subcategories', r.id, r.isActive); }} />
+                    sx={{ cursor: canEdit ? 'pointer' : 'default' }}
+                    onClick={canEdit ? (e) => { e.stopPropagation(); toggleActive('/masters/subcategories', 'master-subcategories', r.id, r.isActive); } : undefined} />
                 ),
               },
             ]}
@@ -430,6 +449,7 @@ function StoneTypesTab() {
   const [selectedType, setSelectedType] = useState<any>(null);
   const [selectedGrade, setSelectedGrade] = useState<any>(null);
   const deleteMaster = useMasterDelete();
+  const canEdit = useAuthStore((s) => s.hasPermission('masters:edit'));
 
   const { data: typeData, isLoading: typeLoading } = useQuery({
     queryKey: ['master-stone-types'], queryFn: () => apiGet<any>('/masters/stone-types'),
@@ -485,11 +505,13 @@ function StoneTypesTab() {
   });
 
   const toggleTypeActive = (row: any) => {
+    if (!canEdit) return;
     apiPatch(`/masters/stone-types/${row.id}`, { isActive: !row.isActive })
       .then(() => qc.invalidateQueries({ queryKey: ['master-stone-types'] }))
       .catch((e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' }));
   };
   const toggleGradeActive = (row: any) => {
+    if (!canEdit) return;
     apiPatch(`/masters/stone-grades/${row.id}`, { isActive: !row.isActive })
       .then(() => qc.invalidateQueries({ queryKey: ['master-stone-grades'] }))
       .catch((e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' }));
@@ -550,7 +572,7 @@ function StoneTypesTab() {
                 filterValue: (r: any) => (r.isActive ? 'Active' : 'Inactive'),
                 render: (r: any) => (
                   <Chip label={r.isActive ? 'Active' : 'Inactive'} size="small" color={r.isActive ? 'success' : 'default'}
-                    sx={{ cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); toggleTypeActive(r); }} />
+                    sx={{ cursor: canEdit ? 'pointer' : 'default' }} onClick={canEdit ? (e) => { e.stopPropagation(); toggleTypeActive(r); } : undefined} />
                 ),
               },
             ]}
@@ -621,7 +643,7 @@ function StoneTypesTab() {
                 filterValue: (r: any) => (r.isActive ? 'Active' : 'Inactive'),
                 render: (r: any) => (
                   <Chip label={r.isActive ? 'Active' : 'Inactive'} size="small" color={r.isActive ? 'success' : 'default'}
-                    sx={{ cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); toggleGradeActive(r); }} />
+                    sx={{ cursor: canEdit ? 'pointer' : 'default' }} onClick={canEdit ? (e) => { e.stopPropagation(); toggleGradeActive(r); } : undefined} />
                 ),
               },
             ]}
@@ -1202,6 +1224,7 @@ function ClientsTab() {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
   const [selected, setSelected] = useState<any>(null);
+  const canEditClient = useAuthStore((s) => s.hasPermission('client:edit'));
 
   const { data, isLoading } = useQuery({ queryKey: ['clients'], queryFn: () => apiGet<any[]>('/orders/clients') });
   const rows: any[] = (data as any)?.data ?? data ?? [];
@@ -1227,6 +1250,7 @@ function ClientsTab() {
   });
 
   const toggleActive = (row: any) => {
+    if (!canEditClient) return;
     apiPatch(`/orders/clients/${row.id}`, { isActive: !row.isActive })
       .then(() => qc.invalidateQueries({ queryKey: ['clients'] }))
       .catch((e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' }));
@@ -1253,7 +1277,10 @@ function ClientsTab() {
         <Grid item xs={12} md={4}>
           <FormPanel title={selected ? `Edit — ${selected.clientCode}` : 'New Client'} isEdit={!!selected} saving={mutation.isPending}
             onAdd={handleSubmit((d) => mutation.mutate(d))} onUpdate={handleSubmit((d) => mutation.mutate(d))}
-            onClear={() => { setSelected(null); reset(defaultVals); }}>
+            onClear={() => { setSelected(null); reset(defaultVals); }}
+            // This tab edits real Client rows via /orders/clients, gated server-side by
+            // client:create/client:edit, not masters:create/masters:edit.
+            permissions={{ create: 'client:create', edit: 'client:edit', delete: 'client:delete' }}>
             <Controller name="name" control={control} rules={{ required: true }} render={({ field, fieldState }) => (
               <TextField {...field} fullWidth size="small" label="Name *" error={!!fieldState.error} />
             )} />
@@ -1303,7 +1330,7 @@ function ClientsTab() {
                 filterValue: (r: any) => (r.isActive ? 'Active' : 'Inactive'),
                 render: (r: any) => (
                   <Chip label={r.isActive ? 'Active' : 'Inactive'} size="small" color={r.isActive ? 'success' : 'default'}
-                    sx={{ cursor: 'pointer' }} onClick={(e) => { e.stopPropagation(); toggleActive(r); }} />
+                    sx={{ cursor: canEditClient ? 'pointer' : 'default' }} onClick={canEditClient ? (e) => { e.stopPropagation(); toggleActive(r); } : undefined} />
                 ),
               },
             ]}

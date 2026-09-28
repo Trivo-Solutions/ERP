@@ -52,8 +52,9 @@ export async function createMemoOut(data: {
   // carries its own companyId+branchId (Phase 2) rather than needing either derived from a tag
   // afterward.
   await assertBranchAccessible(data.branchId, ctx);
-  const client = await tenantQuery(ctx.companyId, (_tx) => _tx.client.findUnique({ where: { id: data.clientId }, select: { companyId: true } }));
+  const client = await tenantQuery(ctx.companyId, (_tx) => _tx.client.findUnique({ where: { id: data.clientId }, select: { companyId: true, name: true, isActive: true } }));
   if (!client || client.companyId !== ctx.companyId) throw new AppError('Client not found', 404);
+  assertClientActive(client);
 
   // Validate any linked tags are both IN_STOCK and actually owned by this company — a
   // Company-B tagId must be indistinguishable from a nonexistent one, exactly like
@@ -152,6 +153,18 @@ export async function checkMemoAlerts(companyId: string) {
 // racing sale is a policy nudge to catch, not data corruption like double-selling one physical tag.
 // No creditLimit set (the common case — a lightweight walk-in retail Client) means unlimited,
 // same as before this check existed.
+// J3 Decision 3 (A1): isActive now has real teeth — an inactive client cannot be used to START a
+// new sale, memo, or payment. Existing historical transactions are untouched (this is a forward-
+// looking gate, not a retroactive one). Checked at every entry point that begins a NEW transaction
+// for a client — deliberately not in amendInvoice/createSalesReturn/convertMemoToInvoice, which act
+// on a transaction that already exists (a memo predates any later deactivation, and a return/amend
+// corrects something already on the books).
+function assertClientActive(client: { name: string; isActive: boolean }) {
+  if (!client.isActive) {
+    throw new AppError(`${client.name} is deactivated and cannot be used for a new transaction`, 409);
+  }
+}
+
 function checkCreditLimit(
   client: { name: string; creditLimit: unknown; currentBalance: unknown },
   additionalAmount: number,
@@ -281,6 +294,7 @@ export async function createInvoice(data: {
     if (!client || client.companyId !== ctx.companyId) {
       throw new AppError('Client not found', 404);
     }
+    assertClientActive(client);
     checkCreditLimit(client, totalAmount);
     // Credit the customer already holds, read BEFORE this invoice's own debit below. Negative currentBalance =
     // money we owe them (from a return, or an earlier exchange). No row lock is needed to spend it safely: the
@@ -744,6 +758,9 @@ export async function amendInvoice(invoiceId: string, data: {
         returns: { include: { items: { select: { invoiceItemId: true } } } },
       },
     });
+    // J3 Decision 5: a voided invoice is closed — no further amend, payment, or return against it.
+    if (inv.status === 'VOID') throw new AppError('This invoice has been voided and cannot be amended', 409);
+
     const newClientId = data.clientId ?? inv.clientId;
     const clientChanged = newClientId !== inv.clientId;
     if (clientChanged && (inv.payments.length > 0 || inv.returns.length > 0)) {
@@ -889,6 +906,111 @@ export async function amendInvoice(invoiceId: string, data: {
   return updated;
 }
 
+// J3 Decision 5 (A1 eligibility / B2 GST guard): a whole-invoice reversal, never a hard delete.
+// PHASE_J3_DESIGN_AUDIT.md §6 found a raw hard delete unsafe even in its narrowest theoretically-
+// reachable case — it would Cascade-wipe InvoiceItem with no recovery, and orphan the
+// JournalEntry/JournalLine rows postAutoJournalEntry created alongside the invoice, permanently
+// unbalancing the ledger. Void instead reuses exactly createSalesReturn's own proven mechanics (tag
+// flip, ledger reversal, client credit), applied to every line and the whole header at once, and
+// marks the row VOID rather than removing it — an invoice number that simply vanishes looks worse
+// under a GST audit than one explicitly marked void, and GST-return continuity is preserved.
+//
+// Eligibility (strict, matching amendInvoice's own "customer locked once paid/returned" rule):
+// zero InvoicePayment rows, zero SalesReturn rows, not already VOID. Also refuses if
+// TaxInvoice.irn is already set — this system has no GST e-invoice IRN-cancellation integration
+// (explicitly out of scope, same posture as the already-documented I3 GST-credit-note gap), so a
+// Void must never leave this database saying VOID while the tax authority's own record of a live
+// e-invoice still stands; that invoice's only remaining correction path is a return for what's on
+// it, or a manual, outside-the-system IRN cancellation followed by an administrative decision.
+export async function voidInvoice(invoiceId: string, ctx: TenantContext, userId: string, reason: string) {
+  if (!reason || !reason.trim()) throw new AppError('A reason is required to void an invoice', 400);
+  await assertOwnedByCompany('salesInvoice', invoiceId, ctx.companyId, 'Invoice');
+
+  const { before, after } = await tenantTransaction(ctx.companyId, async (tx) => {
+    // Serialise, then read fresh — same lock amendInvoice takes on the same row, for the same
+    // reason: payments/returns as they are right now, not as they were when the screen was opened.
+    await tx.$queryRaw`SELECT "id" FROM "sales_invoices" WHERE "id" = ${invoiceId} FOR UPDATE`;
+    const invoice = await tx.salesInvoice.findUniqueOrThrow({
+      where: { id: invoiceId },
+      include: { items: true, taxDetails: true, payments: { select: { id: true } }, returns: { select: { id: true } } },
+    });
+    if (invoice.status === 'VOID') throw new AppError('This invoice has already been voided', 409);
+    if (invoice.payments.length > 0) {
+      throw new AppError('This invoice already has a payment recorded — void is only for an untouched invoice; reverse the payment first, or use a return for what remains', 409);
+    }
+    if (invoice.returns.length > 0) {
+      throw new AppError('This invoice already has a return recorded against it — void is only for an untouched invoice', 409);
+    }
+    if (invoice.taxDetails?.irn) {
+      throw new AppError('An e-invoice (IRN) has already been generated for this invoice — it cannot be voided in-app; cancel the IRN with the GST portal first', 409);
+    }
+
+    const before = {
+      status: invoice.status, totalAmount: invoice.totalAmount,
+      items: invoice.items.map((i) => ({ id: i.id, tagId: i.tagId, productCode: i.productCode, totalPrice: i.totalPrice })),
+    };
+
+    // Stock: every tagged line goes back on the shelf — count-checked exactly like createInvoice's
+    // own flip, and createSalesReturn's inverse of it.
+    const tagIds = invoice.items.filter((i) => i.tagId).map((i) => i.tagId!);
+    let cogsAmount = 0;
+    if (tagIds.length > 0) {
+      const tags = await tx.jewelryTag.findMany({ where: { id: { in: tagIds }, companyId: ctx.companyId } });
+      const notSold = tags.filter((t) => t.status !== 'SOLD');
+      if (notSold.length > 0) throw new AppError(`Tag(s) not currently SOLD, cannot void: ${notSold.map((t) => t.tagNumber).join(', ')}`, 409);
+      const flipped = await tx.jewelryTag.updateMany({ where: { id: { in: tagIds }, status: 'SOLD', companyId: ctx.companyId }, data: { status: 'IN_STOCK' } });
+      if (flipped.count !== tagIds.length) throw new AppError('One or more tags changed status just now — retry the void', 409);
+      cogsAmount = tags.reduce((s, t) => s + Number(t.costPrice), 0);
+
+      // A piece taken off the bill entirely is no longer billed by whatever estimate quoted it —
+      // exact mirror of amendInvoice's own removed-line handling.
+      await tx.tagEstimate.updateMany({ where: { companyId: ctx.companyId, invoiceId, tagId: { in: tagIds } }, data: { status: 'SENT', invoiceId: null } });
+    }
+
+    // F1: exact inverse of createInvoice's own compound entry. taxableAmount is derived from the
+    // persisted header (totalAmount = taxableAmount + taxAmount + roundOff, per SalesInvoice.roundOff's
+    // own doc comment) rather than re-read from TaxInvoice, so this works for a non-INR invoice too
+    // (which has no TaxInvoice row at all).
+    const totalAmount = Number(invoice.totalAmount);
+    const taxAmount = Number(invoice.taxAmount);
+    const roundOffExact = Number(invoice.roundOff);
+    const taxableAmount = round2(totalAmount - taxAmount - roundOffExact);
+    const cgstAmt = Number(invoice.taxDetails?.cgst ?? 0);
+    const sgstAmt = Number(invoice.taxDetails?.sgst ?? 0);
+    const igstAmt = Number(invoice.taxDetails?.igst ?? 0);
+
+    await postAutoJournalEntry(tx, ctx.companyId, {
+      date: new Date(), description: `Void of Sales Invoice ${invoice.invoiceNumber}`,
+      referenceType: 'SalesInvoiceVoid', referenceId: invoice.id, userId,
+      lines: [
+        { accountCode: LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE, credit: totalAmount },
+        { accountCode: LEDGER_ACCOUNT.SALES_REVENUE, debit: taxableAmount },
+        { accountCode: LEDGER_ACCOUNT.CGST_PAYABLE, debit: cgstAmt },
+        { accountCode: LEDGER_ACCOUNT.SGST_PAYABLE, debit: sgstAmt },
+        { accountCode: LEDGER_ACCOUNT.IGST_PAYABLE, debit: igstAmt },
+        { accountCode: LEDGER_ACCOUNT.ROUND_OFF, debit: roundOffExact > 0 ? roundOffExact : 0, credit: roundOffExact < 0 ? -roundOffExact : 0 },
+        { accountCode: LEDGER_ACCOUNT.COST_OF_GOODS, credit: cogsAmount },
+        { accountCode: LEDGER_ACCOUNT.INVENTORY, debit: cogsAmount },
+      ],
+    });
+
+    await tx.client.update({ where: { id: invoice.clientId }, data: { currentBalance: { decrement: totalAmount } } });
+
+    const updated = await tx.salesInvoice.update({
+      where: { id: invoiceId },
+      data: { status: 'VOID', voidedAt: new Date(), voidedById: userId, voidReason: reason },
+    });
+
+    return {
+      before,
+      after: { status: updated.status, voidedAt: updated.voidedAt, voidReason: updated.voidReason },
+    };
+  });
+
+  await createAuditEntry('sales_invoices', invoiceId, userId, 'VOID', before, { ...after, reason }, ctx.companyId);
+  return { id: invoiceId, status: 'VOID' as const };
+}
+
 // Shared by recordPayment (the standalone "record a payment later" endpoint) and createInvoice's
 // optional inline payment (bill-and-collect in one screen). Both must apply a payment to an
 // invoice + client balance identically — duplicating this math in two places is exactly how the
@@ -965,8 +1087,200 @@ export async function recordPayment(data: PaymentInput & { invoiceId: string }, 
   await assertOwnedByCompany('salesInvoice', data.invoiceId, ctx.companyId, 'Invoice');
   return tenantTransaction(ctx.companyId, async (tx) => {
     const invoice = await tx.salesInvoice.findUniqueOrThrow({ where: { id: data.invoiceId } });
+    // J3 Decision 5: a voided invoice is closed — it can never receive a new payment.
+    if (invoice.status === 'VOID') throw new AppError('This invoice has been voided and cannot receive a payment', 409);
     return applyPayment(tx, ctx.companyId, invoice, data, userId);
   });
+}
+
+// J3 Decision 1 (Option A — flag the original row, never edit/delete it) / Decision 2 (build the
+// OLD_GOLD/STORE_CREDIT reversal properly rather than just blocking it): reverses a receipt. The
+// InvoicePayment row is never edited or deleted — reversedAt/reversedById/reversalReason are set on
+// it so every place that sums InvoicePayment as a receipt (getClientLedger, getDayBook —
+// finance.service.ts) can filter it out by adding `reversedAt: null`, while amount/mode/date stay
+// exactly as originally recorded.
+//
+// Three cases, by mode:
+//  - cash/bank/UPI/card/... (anything not a CREDIT_SETTLEMENT_MODE): a real receipt. Reopen the
+//    invoice (if invoice-scoped), credit client.currentBalance back, post the exact inverse journal.
+//  - STORE_CREDIT: this "payment" never moved currentBalance or posted a journal in the first place
+//    — the credit was already netted into currentBalance when the SalesReturn/OldGoldExchange that
+//    funded it was booked, BEFORE this invoice's own debit (see createInvoice's payments loop).
+//    Reversing it only needs to reopen the invoice: there is no separate credit-source movement to
+//    undo, and no individually-redeemable "unit" of credit to double-spend — currentBalance is one
+//    pooled running balance, not a ledger of discrete credit lots. (SalesReturn itself stays
+//    append-only per Decision 4 — this does not touch it.)
+//  - OLD_GOLD: unlike STORE_CREDIT, this mode DOES create its own real, separate movement at
+//    payment-application time (bookOldGoldExchange, called from inside createInvoice's payments
+//    loop): it credits currentBalance, posts its own journal, and adds real weight to the Metal
+//    Vault. Reversing the payment WITHOUT reversing that exchange would let the business collect
+//    cash for an invoice it has already extracted equivalent-value metal for — so both are reversed
+//    together, atomically, exactly as Decision 2 requires. Refused (409, not silently skipped) if
+//    the metal has since been reserved/consumed by anything else — checked via
+//    MetalStock.availableWt vs netWeight. This codebase's only present-day consumer of Metal Vault
+//    stock is the dormant-but-not-disabled production auto-reservation path
+//    (orders.service.ts:autoReserveMaterials, off a SalesOrder/BOM) — if that already spent this
+//    exchange's metal, there is nothing left to give back, and the reversal correctly refuses
+//    rather than fabricating stock back into existence.
+export async function reverseInvoicePayment(paymentId: string, ctx: TenantContext, userId: string, reason: string) {
+  if (!reason || !reason.trim()) throw new AppError('A reason is required to reverse a payment', 400);
+  await assertOwnedByCompany('invoicePayment', paymentId, ctx.companyId, 'Payment');
+
+  const result = await tenantTransaction(ctx.companyId, async (tx) => {
+    // Claim the reversal atomically FIRST, before anything else is touched — a concurrent duplicate
+    // reversal of the same payment loses the race here, same count-checked pattern as every other
+    // status flip in this codebase (createInvoice's tag flip, createSalesReturn's tag flip).
+    const claimed = await tx.invoicePayment.updateMany({
+      where: { id: paymentId, companyId: ctx.companyId, reversedAt: null },
+      data: { reversedAt: new Date(), reversedById: userId, reversalReason: reason },
+    });
+    if (claimed.count !== 1) throw new AppError('This payment has already been reversed', 409);
+
+    const payment = await tx.invoicePayment.findUniqueOrThrow({ where: { id: paymentId } });
+    const mode = normalizeMode(payment.mode);
+    const amount = Number(payment.amount);
+
+    let invoiceBefore: Record<string, unknown> | null = null;
+    let invoiceAfter: Record<string, unknown> | null = null;
+    if (payment.invoiceId) {
+      // J3.5 Finding 3: SELECT ... FOR UPDATE, same lock amendInvoice/voidInvoice already take on
+      // this exact row — closes the lost-update race where two concurrent reversals (or a reversal
+      // racing an amend/void) on the SAME invoice each compute paidAmount/balanceDue from a stale
+      // read and the second write silently discards the first's effect. Postgres serialises here:
+      // the second transaction blocks until the first commits, then re-reads the now-current row.
+      await tx.$queryRaw`SELECT "id" FROM "sales_invoices" WHERE "id" = ${payment.invoiceId} FOR UPDATE`;
+      const invoice = await tx.salesInvoice.findUniqueOrThrow({ where: { id: payment.invoiceId } });
+      invoiceBefore = { paidAmount: Number(invoice.paidAmount), balanceDue: Number(invoice.balanceDue), status: invoice.status };
+      const newPaid = round2(Number(invoice.paidAmount) - amount);
+      const newBalance = round2(Number(invoice.totalAmount) - newPaid);
+      // Unlike applyPayment (monotonically increasing paid), a reversal can bring paid back to
+      // zero — which must read as DRAFT again, not linger at whatever status the last payment set.
+      const status = newPaid > 0.005 ? (newBalance <= 0.005 ? 'PAID' : 'PARTIALLY_PAID') : 'DRAFT';
+      const updatedInvoice = await tx.salesInvoice.update({
+        where: { id: payment.invoiceId },
+        data: { paidAmount: newPaid, balanceDue: newBalance, status },
+      });
+      invoiceAfter = { paidAmount: Number(updatedInvoice.paidAmount), balanceDue: Number(updatedInvoice.balanceDue), status: updatedInvoice.status };
+    }
+
+    let exchangeReversal: { id: string; exchangeNumber: string } | null = null;
+    let exchangeSnapshot: Record<string, unknown> | null = null;
+    let metalStockAudit: { id: string; before: Record<string, unknown>; after: Record<string, unknown> } | null = null;
+
+    if (!CREDIT_SETTLEMENT_MODES.includes(mode)) {
+      // Real cash/bank/UPI/card receipt — exact inverse of applyPayment's non-credit branch.
+      await postAutoJournalEntry(tx, ctx.companyId, {
+        date: new Date(), description: `Reversal of payment ${payment.paymentNumber}`,
+        referenceType: 'InvoicePaymentReversal', referenceId: payment.id, userId,
+        lines: [
+          { accountCode: LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE, debit: amount },
+          { accountCode: cashOrBankAccount(payment.mode), credit: amount },
+        ],
+      });
+      await tx.client.update({ where: { id: payment.clientId }, data: { currentBalance: { increment: amount } } });
+    } else if (mode === PAYMENT_MODE_OLD_GOLD) {
+      // bookOldGoldExchange stamps the payment's referenceNo with the exchange's own number, which
+      // is unique per company (@@unique([companyId, exchangeNumber])) — this match is exact, not a
+      // heuristic, and InvoicePayment has no edit path that could have altered referenceNo since.
+      const exchange = await tx.oldGoldExchange.findFirst({
+        where: { companyId: ctx.companyId, exchangeNumber: payment.referenceNo ?? '__none__' },
+        include: { metalStock: true },
+      });
+      if (!exchange) {
+        throw new AppError('Cannot reverse: the old-gold exchange this payment settled could not be found', 500);
+      }
+      // J3.5 Finding 5: a real before-snapshot, not just a reason string — the other J3 reversal
+      // audit entries (invoice void, payment reverse) all carry a full before/after; this one now
+      // matches that contract rather than being reconstructable only by cross-referencing other rows.
+      exchangeSnapshot = {
+        exchangeNumber: exchange.exchangeNumber, clientId: exchange.clientId, karat: exchange.karat,
+        grossWeight: Number(exchange.grossWeight), stoneWeight: Number(exchange.stoneWeight),
+        netWeight: Number(exchange.netWeight), ratePerGram: Number(exchange.ratePerGram),
+        valuedAmount: Number(exchange.valuedAmount), metalStockId: exchange.metalStockId,
+      };
+      const stockBefore = exchange.metalStock
+        ? { availableWt: Number(exchange.metalStock.availableWt), isActive: exchange.metalStock.isActive }
+        : null;
+      if (stockBefore && (!stockBefore.isActive || stockBefore.availableWt !== Number(exchange.metalStock!.netWeight))) {
+        const consumed = round2(Number(exchange.metalStock!.netWeight) - stockBefore.availableWt);
+        throw new AppError(
+          `Cannot reverse: ${consumed}g of this exchange's metal has already been reserved or adjusted out of the Metal Vault`,
+          409,
+        );
+      }
+
+      // J3.5 Finding 3: claim the exchange atomically, exactly like the payment's own claim above —
+      // this closes the structural gap where the exchange's own "already reversed" guard was a plain
+      // check-then-act (findFirst + if), not self-defending against a concurrent second reversal
+      // reaching this same exchange.
+      const exchangeClaimed = await tx.oldGoldExchange.updateMany({
+        where: { id: exchange.id, companyId: ctx.companyId, reversedAt: null },
+        data: { reversedAt: new Date(), reversedById: userId, reversalReason: `Payment ${payment.paymentNumber} reversed: ${reason}` },
+      });
+      if (exchangeClaimed.count !== 1) throw new AppError('This old-gold exchange has already been reversed', 409);
+
+      const valuedAmount = Number(exchange.valuedAmount);
+      await postAutoJournalEntry(tx, ctx.companyId, {
+        date: new Date(), description: `Reversal of Old Gold Exchange ${exchange.exchangeNumber}`,
+        referenceType: 'OldGoldExchangeReversal', referenceId: exchange.id, userId,
+        lines: [
+          { accountCode: LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE, debit: valuedAmount },
+          { accountCode: LEDGER_ACCOUNT.INVENTORY, credit: valuedAmount },
+        ],
+      });
+      await tx.client.update({ where: { id: payment.clientId }, data: { currentBalance: { increment: valuedAmount } } });
+
+      if (exchange.metalStockId && stockBefore) {
+        // J3.5 Finding 3: count-checked, re-verifying the EXACT pre-state just checked above, not a
+        // blind write — if any concurrent operation (e.g. orders.service.ts:autoReserveMaterials
+        // reserving this same MetalStock row for a production order) changed availableWt/isActive
+        // between the check and here, this affects 0 rows and the whole reversal rolls back rather
+        // than silently clobbering that other, legitimate movement.
+        const stockClaimed = await tx.metalStock.updateMany({
+          where: { id: exchange.metalStockId, availableWt: stockBefore.availableWt, isActive: true },
+          data: { availableWt: 0, isActive: false },
+        });
+        if (stockClaimed.count !== 1) {
+          throw new AppError('This exchange\'s metal was reserved or adjusted by another operation just now — retry the reversal', 409);
+        }
+        // Audited AFTER the transaction commits (see below) — createAuditEntry writes via its own
+        // connection, so calling it from inside an open transaction can record an entry for a
+        // mutation that later rolls back; captured here, written once the transaction is durable.
+        metalStockAudit = { id: exchange.metalStockId, before: stockBefore, after: { availableWt: 0, isActive: false } };
+      }
+      exchangeReversal = { id: exchange.id, exchangeNumber: exchange.exchangeNumber };
+    }
+    // STORE_CREDIT: nothing further — see the function comment above. Reopening the invoice (done
+    // above, for every mode) is the whole of it for this mode; no currentBalance/journal/exchange
+    // movement was ever made for a STORE_CREDIT-mode payment to begin with.
+
+    return { payment, invoiceBefore, invoiceAfter, exchangeReversal, exchangeSnapshot, metalStockAudit };
+  });
+
+  // Every createAuditEntry call below runs AFTER the transaction has committed — it writes via its
+  // own connection (see middleware/audit.ts), so writing it from inside an still-open transaction
+  // could record an entry for a mutation that then rolls back. Same reasoning for all three calls.
+  await createAuditEntry(
+    'invoice_payments', paymentId, userId, 'REVERSE',
+    { amount: Number(result.payment.amount), mode: result.payment.mode, invoice: result.invoiceBefore },
+    { reversedAt: new Date().toISOString(), reason, invoice: result.invoiceAfter, exchangeReversed: result.exchangeReversal },
+    ctx.companyId,
+  );
+  if (result.exchangeReversal) {
+    await createAuditEntry(
+      'old_gold_exchanges', result.exchangeReversal.id, userId, 'REVERSE',
+      result.exchangeSnapshot ?? undefined,
+      { reversedAt: new Date().toISOString(), reason: `Payment ${result.payment.paymentNumber} reversed: ${reason}` },
+      ctx.companyId,
+    );
+  }
+  if (result.metalStockAudit) {
+    await createAuditEntry(
+      'metal_stocks', result.metalStockAudit.id, userId, 'REVERSE',
+      result.metalStockAudit.before, result.metalStockAudit.after, ctx.companyId,
+    );
+  }
+  return result;
 }
 
 // F2: a standalone/on-account payment — an advance, or a payment against a client's general
@@ -976,7 +1290,9 @@ export async function recordPayment(data: PaymentInput & { invoiceId: string }, 
 export async function recordClientPayment(data: PaymentInput & { clientId: string }, ctx: TenantContext, userId: string) {
   if (data.amount <= 0) throw new AppError('Payment amount must be positive', 400);
   assertReceiptMode(data.mode);
-  await assertOwnedByCompany('client', data.clientId, ctx.companyId, 'Client');
+  const client = await tenantQuery(ctx.companyId, (tx) => tx.client.findUnique({ where: { id: data.clientId }, select: { companyId: true, name: true, isActive: true } }));
+  if (!client || client.companyId !== ctx.companyId) throw new AppError('Client not found', 404);
+  assertClientActive(client);
 
   return tenantTransaction(ctx.companyId, async (tx) => {
     await assertCashLimit(tx, ctx.companyId, data.clientId, data); // Sec 269ST — an advance is a receipt too
@@ -1044,6 +1360,8 @@ export async function createSalesReturn(data: {
     include: { items: true, taxDetails: true },
   }));
   if (!invoice || invoice.companyId !== ctx.companyId) throw new AppError('Invoice not found', 404);
+  // J3 Decision 5: a voided invoice is closed — nothing is left owed or owned on it to return.
+  if (invoice.status === 'VOID') throw new AppError('This invoice has been voided and cannot be returned against', 409);
 
   // F1: whether the original sale charged GST at all (INR only — see createInvoice's own
   // currency === 'INR' gate) and, if so, same-state (CGST+SGST) vs inter-state (IGST) — read off
@@ -1547,6 +1865,10 @@ export async function getSalesRegister(ctx: TenantContext, filters: {
     where: {
       companyId: ctx.companyId,
       invoiceDate: { gte: filters.from, lte: filters.to },
+      // J3.5 Finding 1: a voided invoice was never a completed sale — exclude it from the register
+      // entirely (not just its totals), the same way a DRAFT/PARTIALLY_PAID/PAID one that's still a
+      // real sale is correctly included regardless of payment status.
+      status: { not: 'VOID' },
       ...(filters.salesPersonId && { salesPersonId: filters.salesPersonId }),
       ...(branchFilter && { branchId: branchFilter }),
     },

@@ -8,6 +8,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost } from '../../api/client';
 import { PageHeader } from '../../components/common/PageHeader';
+import { useAuthStore } from '../../store/auth.store';
 
 function fmt(n: number) {
   return '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
@@ -23,6 +24,9 @@ const EMPTY = { clientId: '', description: '', karat: '', grossWeight: '', stone
 export function OldGoldExchange() {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
+  // POST /sales/exchanges requires invoice:create, a stricter permission than this page's own
+  // sales:view route guard (see pageRoutes.tsx / navItems.tsx).
+  const canRecord = useAuthStore((s) => s.hasPermission('invoice:create'));
   const [form, setForm] = useState(EMPTY);
 
   const set = (field: keyof typeof EMPTY, value: string) => setForm((p) => ({ ...p, [field]: value }));
@@ -134,10 +138,12 @@ export function OldGoldExchange() {
             </Grid>
           </Grid>
 
-          <Button variant="contained" startIcon={<Savings />} sx={{ mt: 2 }}
-            disabled={!canSubmit || mutation.isPending} onClick={() => mutation.mutate()}>
-            Record Exchange &amp; Credit Client
-          </Button>
+          {canRecord && (
+            <Button variant="contained" startIcon={<Savings />} sx={{ mt: 2 }}
+              disabled={!canSubmit || mutation.isPending} onClick={() => mutation.mutate()}>
+              Record Exchange &amp; Credit Client
+            </Button>
+          )}
         </CardContent>
       </Card>
 

@@ -498,6 +498,10 @@ export function GrnVerification() {
   const [tagTarget, setTagTarget] = useState<{ grn: any; item: any } | null>(null);
   const { hasPermission } = usePermissions();
   const canTag = hasPermission('tag:create');
+  // J4-D5: GET /procurement/grn (this page's list) now needs grn:view; creating/verifying a GRN
+  // keep their own separate permissions.
+  const canCreateGrn = hasPermission('grn:create');
+  const canVerifyGrn = hasPermission('grn:verify');
   const navigate = useNavigate();
 
   useScaleReading(scaleDevice, (w) => setScaleWeight(w));
@@ -520,7 +524,7 @@ export function GrnVerification() {
     <Box>
       <PageHeader
         title="GRN Verification"
-        actions={[{ label: 'Create GRN', onClick: () => setCreateOpen(true) }]}
+        actions={canCreateGrn ? [{ label: 'Create GRN', onClick: () => setCreateOpen(true) }] : []}
       />
 
       {scaleWeight !== null && (
@@ -572,7 +576,7 @@ export function GrnVerification() {
                   </Stack>
                 </TableCell>
                 <TableCell align="right">
-                  {grn.status === 'VERIFIED' && (
+                  {grn.status === 'VERIFIED' && canVerifyGrn && (
                     <Button size="small" variant="contained" color="success" startIcon={<CheckCircle />}
                       disabled={verifyMutation.isPending}
                       onClick={() => verifyMutation.mutate(grn.id)}>

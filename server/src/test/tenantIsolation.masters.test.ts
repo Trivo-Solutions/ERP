@@ -26,7 +26,7 @@ import { createDesign } from '../modules/product-design/design.service';
 // caught by one substring check, not just by comparing known ids.
 // ═══════════════════════════════════════════════════════════════════════════
 
-const PERMS = ['masters:view', 'masters:manage', 'system:config', 'tag:create', 'tag:view', 'invoice:create'];
+const PERMS = ['masters:view', 'masters:create', 'masters:edit', 'masters:delete', 'system:config', 'tag:create', 'tag:view', 'invoice:create'];
 
 const NINE_MASTER_TABLES = [
   'design_categories', 'karat_master', 'product_categories', 'sub_categories', 'collections',
@@ -427,6 +427,57 @@ describe('Phase 1: company-owned masters — Vasavi vs Shree Silver Palace', () 
       expect(affected).toBe(0);
       expect((await prisma.productCategory.findUniqueOrThrow({ where: { id: A.cat } })).name).toBe('Vasavi Necklaces');
     });
+  });
+});
+
+// masters:manage used to gate every write in one lump; it is now split into masters:create/
+// masters:edit/masters:delete (each requirePermission(...) call in masters.router.ts checks its
+// own verb) so a role can be handed exactly one of the three. Proven here independently of the
+// Vasavi/Shree cross-company suite above, which grants all of them together.
+describe('masters write permissions are independently enforced (create/edit/delete are not one bundle)', () => {
+  const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  let creatorOnly: TestTenant; let editorOnly: TestTenant; let deleterOnly: TestTenant;
+  let existingId: string;
+
+  beforeAll(async () => {
+    creatorOnly = await createTestTenant(`MCC${suffix}`, ['masters:view', 'masters:create']);
+    editorOnly = await createTestTenant(`MCE${suffix}`, ['masters:view', 'masters:edit']);
+    deleterOnly = await createTestTenant(`MCD${suffix}`, ['masters:view', 'masters:delete']);
+    // A row for the edit/delete-only tenants to act on — created directly (bypassing the app's own
+    // create permission, since these tenants deliberately don't have it).
+    const row = await prisma.stockType.create({ data: { companyId: editorOnly.company.id, code: 'X', name: 'Existing' } });
+    existingId = row.id;
+  });
+
+  afterAll(async () => {
+    for (const t of [creatorOnly, editorOnly, deleterOnly]) if (t) await cleanupTestTenant(t);
+  });
+
+  it('masters:create alone can POST, but not PATCH or DELETE', async () => {
+    const api = client(creatorOnly);
+    const created = await api.post('/masters/stock-types', { code: 'C', name: 'Created' });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    expect((await api.patch(`/masters/stock-types/${created.body.data.id}`, { name: 'x' })).status).toBe(403);
+    expect((await api.del(`/masters/stock-types/${created.body.data.id}`)).status).toBe(403);
+  });
+
+  it('masters:edit alone can PATCH, but not POST or DELETE', async () => {
+    const api = client(editorOnly);
+    expect((await api.post('/masters/stock-types', { code: 'Y', name: 'Nope' })).status).toBe(403);
+    const patched = await api.patch(`/masters/stock-types/${existingId}`, { name: 'Renamed' });
+    expect(patched.status, JSON.stringify(patched.body)).toBe(200);
+    expect(patched.body.data.name).toBe('Renamed');
+    expect((await api.del(`/masters/stock-types/${existingId}`)).status).toBe(403);
+  });
+
+  it('masters:delete alone can DELETE, but not POST or PATCH', async () => {
+    const row = await prisma.stockType.create({ data: { companyId: deleterOnly.company.id, code: 'Z', name: 'ToDelete' } });
+    const api = client(deleterOnly);
+    expect((await api.post('/masters/stock-types', { code: 'W', name: 'Nope' })).status).toBe(403);
+    expect((await api.patch(`/masters/stock-types/${row.id}`, { name: 'x' })).status).toBe(403);
+    const deleted = await api.del(`/masters/stock-types/${row.id}`);
+    expect(deleted.status, JSON.stringify(deleted.body)).toBe(200);
+    expect(await prisma.stockType.findUnique({ where: { id: row.id } })).toBeNull();
   });
 });
 

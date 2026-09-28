@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { platformPrisma as prisma } from '../../config/database'; // tests act as the platform/admin role for fixtures and verification; the code under test uses the runtime client
 import { AppError } from '../../middleware/error';
-import { createInvoice as _createInvoice, getTaxContext, createMemoOut, convertMemoToInvoice, recordPayment, createSalesReturn, createOldGoldExchange, recordClientPayment, listClientPayments, getSalesRegister, getClientCredit, amendInvoice } from './sales.service';
-import { getClientLedger, getDayBook } from '../finance/finance.service';
+import { createInvoice as _createInvoice, getTaxContext, createMemoOut, convertMemoToInvoice, recordPayment, createSalesReturn, createOldGoldExchange, recordClientPayment, listClientPayments, getSalesRegister, getClientCredit, amendInvoice, voidInvoice, reverseInvoicePayment } from './sales.service';
+import { getClientLedger, getDayBook, getDealerAging } from '../finance/finance.service';
 import { LEDGER_ACCOUNT } from '../../shared/ledgerAccounts';
 import { DEFAULT_HSN_CODE } from '../../shared/constants';
 import { cleanupJournalEntries, getJournalEntry, lineAmount } from '../../test/ledger';
@@ -2261,6 +2261,52 @@ describe('amendInvoice (edit an issued invoice)', () => {
   });
 });
 
+// J3 Decision 3 (A1): isActive now has real teeth — an inactive client cannot start a NEW sale,
+// memo, or payment. Historical transactions are untouched by this (forward-looking gate only).
+describe('inactive client is rejected for a new sale/memo/payment (J3 Decision 3)', () => {
+  const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  let tenant: TestTenant;
+  let userId: string;
+  let branchId: string;
+  let clientId: string;
+
+  beforeAll(async () => {
+    tenant = await createTestTenant(`IA${suffix}`, ['invoice:create']);
+    userId = tenant.user.id;
+    branchId = tenant.branch.id;
+    const c = await prisma.client.create({
+      data: { companyId: tenant.company.id, clientCode: `TSTCL-IA-${suffix}`, name: 'Inactive Client', panNumber: 'ABCDE1234F', type: 'RETAIL', isActive: false },
+    });
+    clientId = c.id;
+  });
+
+  afterAll(async () => {
+    await prisma.client.deleteMany({ where: { id: clientId } });
+    await cleanupTestTenant(tenant);
+    await prisma.$disconnect();
+  });
+
+  it('createInvoice rejects an inactive client', async () => {
+    await expect(_createInvoice({
+      branchId, clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+      items: [{ productCode: 'MISC', description: 'Chain', quantity: 1, grossWeight: 1, netGoldWeight: 1, rateType: 'FIXED', goldRate: 100 }],
+    }, tenant.ctx, userId)).rejects.toThrow(/deactivated/);
+  });
+
+  it('createMemoOut rejects an inactive client', async () => {
+    await expect(createMemoOut({
+      clientId, branchId, sentDate: new Date(), returnDeadline: new Date(),
+      items: [{ productCode: 'MISC', description: 'Chain', pieces: 1, grossWeight: 1, netGoldWeight: 1, estimatedValue: 100 }],
+    }, tenant.ctx, userId)).rejects.toThrow(/deactivated/);
+  });
+
+  it('recordClientPayment rejects an inactive client', async () => {
+    await expect(recordClientPayment(
+      { clientId, paymentDate: new Date(), amount: 100, mode: 'CASH' }, tenant.ctx, userId,
+    )).rejects.toThrow(/deactivated/);
+  });
+});
+
 // F2: a standalone payment — an advance, or a payment against a client's general outstanding
 // balance — with no invoice to apply against yet. Reuses PMT- numbering and the same Cash/Bank vs
 // Accounts Receivable ledger entry applyPayment posts (F1); the only difference is there's no
@@ -2433,5 +2479,521 @@ describe('getSalesRegister (H1)', () => {
     const result = await getSalesRegister(tenant.ctx, { from: d('2026-02-01'), to: d('2026-02-28'), salesPersonId: salesPersonAId });
     expect(result.rows).toHaveLength(1);
     expect(result.rows[0].totalAmount).toBeCloseTo(10000);
+  });
+
+  // J3.5 Finding 1: a voided invoice was never a completed sale — excluded from the register
+  // entirely (rows and totals), not just zeroed out of the total while still listed.
+  it('excludes a VOID invoice from both rows and totals', async () => {
+    const voided = await prisma.salesInvoice.create({
+      data: {
+        companyId: tenant.company.id, branchId: tenant.branch.id,
+        invoiceNumber: `TSTINV-REG-${suffix}-void`, clientId, invoiceDate: d('2026-02-15'), invoiceType: 'RETAIL',
+        salesPersonId: salesPersonAId, subtotal: 88888, totalAmount: 88888, balanceDue: 88888, status: 'VOID',
+      },
+    });
+    invoiceIds.push(voided.id);
+
+    const result = await getSalesRegister(tenant.ctx, { from: d('2026-02-01'), to: d('2026-02-28') });
+    expect(result.rows).toHaveLength(2); // unchanged — still just the two active invoices
+    expect(result.totals.totalAmount).toBeCloseTo(60000);
+    expect(result.rows.some((r) => r.id === voided.id)).toBe(false);
+  });
+});
+
+// J3 Decision 5: a whole-invoice reversal — never a hard delete. Strict eligibility (zero payments,
+// zero returns, not already void, no already-generated IRN); reuses createSalesReturn's own proven
+// per-line reversal mechanics applied to the whole header at once.
+describe('voidInvoice (J3.3)', () => {
+  const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+  let tenant: TestTenant;
+  let userId: string;
+  let branchId: string;
+  const clientIds: string[] = [];
+  const invoiceIds: string[] = [];
+  const tagIds: string[] = [];
+
+  async function makeClient(label: string) {
+    const c = await prisma.client.create({
+      data: { companyId: tenant.company.id, clientCode: `TSTCL-VD-${label}-${suffix}`, name: `Client ${label}`, panNumber: 'ABCDE1234F', type: 'RETAIL' },
+    });
+    clientIds.push(c.id);
+    return c.id;
+  }
+  async function makeTag(name: string, costPrice = 4000) {
+    const tag = await prisma.jewelryTag.create({
+      data: {
+        tagNumber: `TSTTAG-VD-${suffix}-${tagIds.length}`, companyId: tenant.company.id, branchId, name,
+        metalType: 'GOLD', metalKarat: '22K', grossWeight: 1, netWeight: 1, stoneWeight: 0,
+        costPrice, sellingPrice: 5150, createdById: userId,
+      },
+    });
+    tagIds.push(tag.id);
+    return tag;
+  }
+  // 1 g x ₹5,000 + 3% GST = ₹5,150.
+  const item = (over: Partial<Parameters<typeof _createInvoice>[0]['items'][number]> = {}) => ({
+    productCode: 'MISC', description: 'Chain', quantity: 1, grossWeight: 1, netGoldWeight: 1,
+    rateType: 'PER_GRAM', goldRate: 5000, makingCharge: 0, ...over,
+  });
+  const sell = async (clientId: string, over: Partial<Parameters<typeof _createInvoice>[0]> = {}) => {
+    const inv = await _createInvoice({ branchId, clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [item()], ...over }, tenant.ctx, userId);
+    invoiceIds.push(inv.id);
+    return inv;
+  };
+  const balanceOf = async (clientId: string) => Number((await prisma.client.findUniqueOrThrow({ where: { id: clientId } })).currentBalance);
+  const statusOf = async (id: string) => (await prisma.jewelryTag.findUniqueOrThrow({ where: { id } })).status;
+  const entriesOf = (referenceId: string) => prisma.journalEntry.findMany({
+    where: { referenceId }, include: { lines: { include: { account: { select: { code: true } } } } },
+  });
+
+  beforeAll(async () => {
+    tenant = await createTestTenant(`VD${suffix}`, ['invoice:create']);
+    userId = tenant.user.id;
+    branchId = tenant.branch.id;
+  });
+
+  afterAll(async () => {
+    const returnIds = (await prisma.salesReturn.findMany({ where: { clientId: { in: clientIds } }, select: { id: true } })).map((r) => r.id);
+    const payIds = (await prisma.invoicePayment.findMany({ where: { clientId: { in: clientIds } }, select: { id: true } })).map((p) => p.id);
+    await cleanupJournalEntries([...invoiceIds, ...returnIds, ...payIds]);
+    await prisma.salesReturn.deleteMany({ where: { clientId: { in: clientIds } } });
+    await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
+    await prisma.invoicePayment.deleteMany({ where: { clientId: { in: clientIds } } });
+    await prisma.salesInvoice.deleteMany({ where: { id: { in: invoiceIds } } });
+    await prisma.jewelryTag.deleteMany({ where: { id: { in: tagIds } } });
+    await prisma.client.deleteMany({ where: { id: { in: clientIds } } });
+    await cleanupTestTenant(tenant);
+    await prisma.$disconnect();
+  });
+
+  it('reverses stock, ledger and customer balance, and marks the invoice VOID with an audit trail', async () => {
+    const clientId = await makeClient('happy');
+    const tag = await makeTag('Voided piece');
+    const inv = await sell(clientId, { items: [item({ tagId: tag.id })] });
+    expect(await statusOf(tag.id)).toBe('SOLD');
+    expect(await balanceOf(clientId)).toBeCloseTo(5150);
+
+    const result = await voidInvoice(inv.id, tenant.ctx, userId, 'Wrong customer picked at counter');
+    expect(result).toEqual({ id: inv.id, status: 'VOID' });
+
+    expect(await statusOf(tag.id)).toBe('IN_STOCK');
+    expect(await balanceOf(clientId)).toBeCloseTo(0);
+    const updated = await prisma.salesInvoice.findUniqueOrThrow({ where: { id: inv.id } });
+    expect(updated.status).toBe('VOID');
+    expect(updated.voidedAt).not.toBeNull();
+    expect(updated.voidedById).toBe(userId);
+    expect(updated.voidReason).toBe('Wrong customer picked at counter');
+
+    const entries = await entriesOf(inv.id);
+    const voidEntry = entries.find((e) => e.referenceType === 'SalesInvoiceVoid')!;
+    expect(voidEntry).toBeDefined();
+    const dr = voidEntry.lines.reduce((s, l) => s + Number(l.debit), 0);
+    const cr = voidEntry.lines.reduce((s, l) => s + Number(l.credit), 0);
+    expect(dr).toBeCloseTo(cr);
+    const ar = voidEntry.lines.find((l) => l.account.code === LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE)!;
+    expect(Number(ar.credit)).toBe(5150);
+
+    const audit = await prisma.auditLog.findFirst({ where: { recordId: inv.id, action: 'VOID' } });
+    expect(audit).not.toBeNull();
+    expect((audit!.oldValues as any).status).toBe('DRAFT');
+    expect((audit!.newValues as any).status).toBe('VOID');
+    expect((audit!.newValues as any).reason).toBe('Wrong customer picked at counter');
+  });
+
+  it('rejects voiding an invoice that already has a payment', async () => {
+    const clientId = await makeClient('haspay');
+    const inv = await sell(clientId, { payments: [{ paymentDate: new Date(), amount: 5150, mode: 'UPI' }] });
+    await expect(voidInvoice(inv.id, tenant.ctx, userId, 'test')).rejects.toThrow(/payment/i);
+  });
+
+  it('rejects voiding an invoice that already has a return', async () => {
+    const clientId = await makeClient('hasreturn');
+    const tag = await makeTag('Returned first');
+    const inv = await sell(clientId, { items: [item({ tagId: tag.id })] });
+    await createSalesReturn({ invoiceId: inv.id, items: [{ invoiceItemId: inv.items[0].id }] }, tenant.ctx, userId);
+    await expect(voidInvoice(inv.id, tenant.ctx, userId, 'test')).rejects.toThrow(/return/i);
+  });
+
+  it('rejects voiding an already-voided invoice', async () => {
+    const clientId = await makeClient('doublevoid');
+    const inv = await sell(clientId);
+    await voidInvoice(inv.id, tenant.ctx, userId, 'first void');
+    await expect(voidInvoice(inv.id, tenant.ctx, userId, 'second void')).rejects.toThrow(/already been voided/);
+  });
+
+  it('rejects voiding an invoice with an already-generated e-invoice IRN', async () => {
+    const clientId = await makeClient('irn');
+    const inv = await sell(clientId);
+    await prisma.taxInvoice.update({ where: { invoiceId: inv.id }, data: { irn: 'IRN-TEST-1234' } });
+    await expect(voidInvoice(inv.id, tenant.ctx, userId, 'test')).rejects.toThrow(/e-invoice/i);
+  });
+
+  it('blocks amend, payment and return against an already-voided invoice', async () => {
+    const clientId = await makeClient('lockdown');
+    const inv = await sell(clientId);
+    await voidInvoice(inv.id, tenant.ctx, userId, 'test');
+
+    await expect(amendInvoice(inv.id, { items: [{ ...item(), id: undefined }] } as any, tenant.ctx, userId)).rejects.toThrow(/voided/);
+    await expect(recordPayment({ invoiceId: inv.id, paymentDate: new Date(), amount: 100, mode: 'CASH' }, tenant.ctx, userId)).rejects.toThrow(/voided/);
+    await expect(createSalesReturn({ invoiceId: inv.id, items: [{ invoiceItemId: inv.items[0].id }] }, tenant.ctx, userId)).rejects.toThrow(/voided/);
+  });
+
+  it('rejects a cross-company invoice id (404, indistinguishable from nonexistent)', async () => {
+    const other = await createTestTenant(`VDOTHER${suffix}`, ['invoice:create']);
+    try {
+      const otherClient = await prisma.client.create({
+        data: { companyId: other.company.id, clientCode: `TSTCL-VDX-${suffix}`, name: 'Other co client', panNumber: 'ABCDE1234F', type: 'RETAIL' },
+      });
+      const foreignInv = await _createInvoice({
+        branchId: other.branch.id, clientId: otherClient.id, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [item()],
+      }, other.ctx, other.user.id);
+
+      await expect(voidInvoice(foreignInv.id, tenant.ctx, userId, 'test')).rejects.toThrow(/not found/i);
+
+      await cleanupJournalEntries([foreignInv.id]);
+      await prisma.taxInvoice.deleteMany({ where: { invoiceId: foreignInv.id } });
+      await prisma.salesInvoice.deleteMany({ where: { id: foreignInv.id } });
+      await prisma.client.deleteMany({ where: { id: otherClient.id } });
+    } finally {
+      await cleanupTestTenant(other);
+    }
+  });
+
+  // J3.5 Finding 1, end-to-end: the real voidInvoice() flow (not a direct row edit) must stop the
+  // voided invoice from counting as a live receivable / sale / ledger debit in every report that
+  // reads SalesInvoice, while leaving a DIFFERENT active invoice for the SAME client unaffected.
+  it('removes a voided invoice from dealer aging, the client ledger and the sales register — but leaves a different active invoice for the same client untouched', async () => {
+    const clientId = await makeClient('reporting');
+    const untouched = await sell(clientId); // stays active — the control case
+    const target = await sell(clientId);    // will be voided
+
+    const agingBefore = await getDealerAging(tenant.ctx.companyId);
+    const rowBefore = agingBefore.rows.find((r) => r.clientId === clientId)!;
+    expect(rowBefore.total).toBeCloseTo(5150 * 2);
+
+    const ledgerBefore = await getClientLedger(tenant.ctx, clientId);
+    expect(ledgerBefore.closingBalance).toBeCloseTo(5150 * 2);
+    expect(ledgerBefore.closingBalance).toBeCloseTo(ledgerBefore.client.currentBalance);
+
+    await voidInvoice(target.id, tenant.ctx, userId, 'billed the wrong customer');
+
+    // Dealer aging: only the untouched invoice's 5150 remains.
+    const agingAfter = await getDealerAging(tenant.ctx.companyId);
+    const rowAfter = agingAfter.rows.find((r) => r.clientId === clientId)!;
+    expect(rowAfter.total).toBeCloseTo(5150);
+
+    // Client ledger: still reconciles to currentBalance, and the voided invoice isn't listed.
+    const ledgerAfter = await getClientLedger(tenant.ctx, clientId);
+    expect(ledgerAfter.rows.some((r) => r.refNumber === target.invoiceNumber)).toBe(false);
+    expect(ledgerAfter.rows.some((r) => r.refNumber === untouched.invoiceNumber)).toBe(true); // control case unaffected
+    expect(ledgerAfter.closingBalance).toBeCloseTo(5150);
+    expect(ledgerAfter.closingBalance).toBeCloseTo(ledgerAfter.client.currentBalance);
+
+    // Sales register: same date range, voided invoice gone, untouched invoice still counted.
+    const today = new Date();
+    const register = await getSalesRegister(tenant.ctx, { from: new Date(today.getFullYear(), today.getMonth(), 1), to: today });
+    expect(register.rows.some((r) => r.id === target.id)).toBe(false);
+    expect(register.rows.some((r) => r.id === untouched.id)).toBe(true);
+  });
+});
+
+// J3 Decision 1 (flag the original row) / Decision 2 (build the full OLD_GOLD/STORE_CREDIT
+// reversal chain, not just block it).
+describe('reverseInvoicePayment (J3.2)', () => {
+  const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const karat = '22K';
+
+  let tenant: TestTenant;
+  let userId: string;
+  let branchId: string;
+  const clientIds: string[] = [];
+  const invoiceIds: string[] = [];
+  const tagIds: string[] = [];
+  const rateIds: string[] = [];
+
+  async function makeClient(label: string) {
+    const c = await prisma.client.create({
+      data: { companyId: tenant.company.id, clientCode: `TSTCL-RV-${label}-${suffix}`, name: `Client ${label}`, panNumber: 'ABCDE1234F', type: 'RETAIL' },
+    });
+    clientIds.push(c.id);
+    return c.id;
+  }
+  async function makeTag(name: string) {
+    const tag = await prisma.jewelryTag.create({
+      data: {
+        tagNumber: `TSTTAG-RV-${suffix}-${tagIds.length}`, companyId: tenant.company.id, branchId, name,
+        metalType: 'GOLD', metalKarat: karat, grossWeight: 1, netWeight: 1, stoneWeight: 0,
+        costPrice: 4000, sellingPrice: 5150, createdById: userId,
+      },
+    });
+    tagIds.push(tag.id);
+    return tag;
+  }
+  const item = (over: Partial<Parameters<typeof _createInvoice>[0]['items'][number]> = {}) => ({
+    productCode: 'MISC', description: 'Chain', quantity: 1, grossWeight: 1, netGoldWeight: 1,
+    rateType: 'PER_GRAM', goldRate: 5000, makingCharge: 0, ...over,
+  });
+  const sell = async (clientId: string, over: Partial<Parameters<typeof _createInvoice>[0]> = {}) => {
+    const inv = await _createInvoice({ branchId, clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [item()], ...over }, tenant.ctx, userId);
+    invoiceIds.push(inv.id);
+    return inv;
+  };
+  const balanceOf = async (clientId: string) => Number((await prisma.client.findUniqueOrThrow({ where: { id: clientId } })).currentBalance);
+  async function clientWithReturnCredit(label: string) {
+    const clientId = await makeClient(label);
+    const tag = await makeTag(`Returned ${label}`);
+    const sold = await sell(clientId, { items: [item({ tagId: tag.id })], payments: [{ paymentDate: new Date(), amount: 5150, mode: 'UPI' }] });
+    await createSalesReturn({ invoiceId: sold.id, items: [{ invoiceItemId: sold.items[0].id }] }, tenant.ctx, userId);
+    return clientId;
+  }
+
+  beforeAll(async () => {
+    tenant = await createTestTenant(`RV${suffix}`, ['invoice:create']);
+    userId = tenant.user.id;
+    branchId = tenant.branch.id;
+    const today = new Date(new Date().toISOString().split('T')[0]);
+    rateIds.push((await prisma.metalRate.create({
+      data: { companyId: tenant.company.id, date: today, karat, purity: 0.916, ratePerGram: 5000 },
+    })).id);
+  });
+
+  afterAll(async () => {
+    const returnIds = (await prisma.salesReturn.findMany({ where: { clientId: { in: clientIds } }, select: { id: true } })).map((r) => r.id);
+    const payIds = (await prisma.invoicePayment.findMany({ where: { clientId: { in: clientIds } }, select: { id: true } })).map((p) => p.id);
+    const exchanges = await prisma.oldGoldExchange.findMany({ where: { clientId: { in: clientIds } }, select: { id: true, metalStockId: true } });
+    await cleanupJournalEntries([...invoiceIds, ...returnIds, ...payIds, ...exchanges.map((e) => e.id)]);
+    await prisma.salesReturn.deleteMany({ where: { clientId: { in: clientIds } } });
+    await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
+    await prisma.invoicePayment.deleteMany({ where: { clientId: { in: clientIds } } });
+    await prisma.oldGoldExchange.deleteMany({ where: { clientId: { in: clientIds } } });
+    await prisma.salesInvoice.deleteMany({ where: { id: { in: invoiceIds } } });
+    await prisma.jewelryTag.deleteMany({ where: { id: { in: tagIds } } });
+    await prisma.metalStock.deleteMany({ where: { companyId: tenant.company.id } });
+    await prisma.metalRate.deleteMany({ where: { id: { in: rateIds } } });
+    await prisma.client.deleteMany({ where: { id: { in: clientIds } } });
+    await cleanupTestTenant(tenant);
+    await prisma.$disconnect();
+  });
+
+  it('reverses a cash-mode payment: invoice reopens, client balance and ledger both reverse, original row kept', async () => {
+    const clientId = await makeClient('cash');
+    const inv = await sell(clientId, { payments: [{ paymentDate: new Date(), amount: 5150, mode: 'UPI' }] });
+    const payment = await prisma.invoicePayment.findFirstOrThrow({ where: { invoiceId: inv.id } });
+    expect(await balanceOf(clientId)).toBeCloseTo(0);
+
+    const result = await reverseInvoicePayment(payment.id, tenant.ctx, userId, 'Customer disputed the charge');
+
+    expect(result.invoiceAfter).toEqual({ paidAmount: 0, balanceDue: 5150, status: 'DRAFT' });
+    expect(await balanceOf(clientId)).toBeCloseTo(5150);
+
+    const reversed = await prisma.invoicePayment.findUniqueOrThrow({ where: { id: payment.id } });
+    expect(reversed.reversedAt).not.toBeNull();
+    expect(reversed.reversedById).toBe(userId);
+    expect(reversed.reversalReason).toBe('Customer disputed the charge');
+    expect(Number(reversed.amount)).toBe(5150); // original row untouched
+
+    const entries = await prisma.journalEntry.findMany({ where: { referenceId: payment.id }, include: { lines: { include: { account: { select: { code: true } } } } } });
+    const reversal = entries.find((e) => e.referenceType === 'InvoicePaymentReversal')!;
+    expect(Number(reversal.lines.find((l) => l.account.code === LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE)!.debit)).toBe(5150);
+    expect(Number(reversal.lines.find((l) => l.account.code === LEDGER_ACCOUNT.BANK_ACCOUNT)!.credit)).toBe(5150);
+
+    const audit = await prisma.auditLog.findFirst({ where: { recordId: payment.id, action: 'REVERSE' } });
+    expect(audit).not.toBeNull();
+    expect((audit!.newValues as any).reason).toBe('Customer disputed the charge');
+  });
+
+  it('rejects reversing an already-reversed payment', async () => {
+    const clientId = await makeClient('dup');
+    const inv = await sell(clientId, { payments: [{ paymentDate: new Date(), amount: 5150, mode: 'CASH' }] });
+    const payment = await prisma.invoicePayment.findFirstOrThrow({ where: { invoiceId: inv.id } });
+    await reverseInvoicePayment(payment.id, tenant.ctx, userId, 'first reversal');
+    await expect(reverseInvoicePayment(payment.id, tenant.ctx, userId, 'second reversal')).rejects.toThrow(/already been reversed/);
+  });
+
+  it('reverses a standalone (F2, no invoice) payment', async () => {
+    const clientId = await makeClient('standalone');
+    const payment = await recordClientPayment({ clientId, paymentDate: new Date(), amount: 20000, mode: 'CASH' }, tenant.ctx, userId);
+    expect(await balanceOf(clientId)).toBeCloseTo(-20000);
+
+    const result = await reverseInvoicePayment(payment.id, tenant.ctx, userId, 'keyed against the wrong client');
+    expect(result.invoiceAfter).toBeNull();
+    expect(await balanceOf(clientId)).toBeCloseTo(0);
+  });
+
+  it('reverses a STORE_CREDIT settlement: invoice reopens, currentBalance untouched, no journal either way', async () => {
+    const clientId = await clientWithReturnCredit('sc');
+    const tag = await makeTag('New piece SC');
+    const inv = await sell(clientId, { items: [item({ tagId: tag.id })], payments: [{ paymentDate: new Date(), amount: 5150, mode: 'STORE_CREDIT' }] });
+    const payment = await prisma.invoicePayment.findFirstOrThrow({ where: { invoiceId: inv.id, mode: 'STORE_CREDIT' } });
+    const balanceAfterSale = await balanceOf(clientId);
+
+    const result = await reverseInvoicePayment(payment.id, tenant.ctx, userId, 'applied to wrong invoice');
+
+    expect(result.invoiceAfter).toEqual({ paidAmount: 0, balanceDue: 5150, status: 'DRAFT' });
+    // No currentBalance movement either on application (already established behavior) or reversal.
+    expect(await balanceOf(clientId)).toBeCloseTo(balanceAfterSale);
+    expect(await getJournalEntry(payment.id)).toBeNull();
+  });
+
+  it('reverses an OLD_GOLD settlement: invoice reopens, client credited back, Metal Vault entry undone, exchange marked reversed', async () => {
+    const clientId = await makeClient('og');
+    const inv = await sell(clientId, {
+      payments: [{ paymentDate: new Date(), amount: 0, mode: 'OLD_GOLD', oldGold: { description: 'Old chain', karat, grossWeight: 1.03 } }],
+    }); // 1.03g x ₹5,000 = ₹5,150 — exactly settles the bill
+    const payment = await prisma.invoicePayment.findFirstOrThrow({ where: { invoiceId: inv.id, mode: 'OLD_GOLD' } });
+    const exchange = await prisma.oldGoldExchange.findFirstOrThrow({ where: { companyId: tenant.company.id, exchangeNumber: payment.referenceNo! } });
+    expect(await balanceOf(clientId)).toBeCloseTo(0);
+
+    const result = await reverseInvoicePayment(payment.id, tenant.ctx, userId, 'wrong weight keyed');
+
+    expect(result.invoiceAfter).toEqual({ paidAmount: 0, balanceDue: 5150, status: 'DRAFT' });
+    expect(await balanceOf(clientId)).toBeCloseTo(5150); // the exchange's credit is undone too
+
+    const reversedExchange = await prisma.oldGoldExchange.findUniqueOrThrow({ where: { id: exchange.id } });
+    expect(reversedExchange.reversedAt).not.toBeNull();
+    expect(reversedExchange.reversedById).toBe(userId);
+
+    const stock = await prisma.metalStock.findUniqueOrThrow({ where: { id: exchange.metalStockId! } });
+    expect(stock.isActive).toBe(false);
+    expect(Number(stock.availableWt)).toBe(0);
+
+    const exEntries = await prisma.journalEntry.findMany({ where: { referenceId: exchange.id }, include: { lines: { include: { account: { select: { code: true } } } } } });
+    const exReversal = exEntries.find((e) => e.referenceType === 'OldGoldExchangeReversal')!;
+    expect(Number(exReversal.lines.find((l) => l.account.code === LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE)!.debit)).toBe(5150);
+    expect(Number(exReversal.lines.find((l) => l.account.code === LEDGER_ACCOUNT.INVENTORY)!.credit)).toBe(5150);
+
+    // J3.5 Finding 5: a real before-snapshot, not just a reason string — reconstructable on its own,
+    // not only by cross-referencing the still-live exchange row or the payment's own audit entry.
+    const exchangeAudit = await prisma.auditLog.findFirst({ where: { recordId: exchange.id, action: 'REVERSE' } });
+    expect(exchangeAudit).not.toBeNull();
+    expect((exchangeAudit!.oldValues as any).valuedAmount).toBe(5150);
+    expect((exchangeAudit!.oldValues as any).exchangeNumber).toBe(exchange.exchangeNumber);
+    expect((exchangeAudit!.newValues as any).reason).toMatch(/wrong weight keyed/);
+
+    // J3.5 Finding 5: the MetalStock zeroing is now audited too — every OTHER MetalStock mutation
+    // in this codebase (addMetalStock -> CREATE, adjustMetalStock -> ADJUST) already was; this one
+    // silently wasn't, until now.
+    const stockAudit = await prisma.auditLog.findFirst({ where: { recordId: exchange.metalStockId!, action: 'REVERSE' } });
+    expect(stockAudit).not.toBeNull();
+    expect((stockAudit!.oldValues as any).availableWt).toBeCloseTo(1.03);
+    expect((stockAudit!.oldValues as any).isActive).toBe(true);
+    expect((stockAudit!.newValues as any).availableWt).toBe(0);
+    expect((stockAudit!.newValues as any).isActive).toBe(false);
+  });
+
+  it('refuses to reverse an OLD_GOLD settlement once its metal has been reserved elsewhere', async () => {
+    const clientId = await makeClient('ogreserved');
+    const inv = await sell(clientId, {
+      payments: [{ paymentDate: new Date(), amount: 0, mode: 'OLD_GOLD', oldGold: { description: 'Old bangle', karat, grossWeight: 1.03 } }],
+    });
+    const payment = await prisma.invoicePayment.findFirstOrThrow({ where: { invoiceId: inv.id, mode: 'OLD_GOLD' } });
+    const exchange = await prisma.oldGoldExchange.findFirstOrThrow({ where: { companyId: tenant.company.id, exchangeNumber: payment.referenceNo! } });
+
+    // Simulate the dormant production auto-reservation path (orders.service.ts:autoReserveMaterials)
+    // having already spent part of this exact metal before anyone tried to reverse the exchange.
+    await prisma.metalStock.update({ where: { id: exchange.metalStockId! }, data: { availableWt: { decrement: 0.5 } } });
+
+    await expect(reverseInvoicePayment(payment.id, tenant.ctx, userId, 'test')).rejects.toThrow(/already been reserved or adjusted/);
+
+    // Nothing was left partially reversed — the payment's own reversal claim must roll back too.
+    const stillLive = await prisma.invoicePayment.findUniqueOrThrow({ where: { id: payment.id } });
+    expect(stillLive.reversedAt).toBeNull();
+  });
+
+  it('rejects a cross-company payment id (404, indistinguishable from nonexistent)', async () => {
+    const other = await createTestTenant(`RVOTHER${suffix}`, ['invoice:create']);
+    try {
+      const otherClient = await prisma.client.create({
+        data: { companyId: other.company.id, clientCode: `TSTCL-RVX-${suffix}`, name: 'Other co client', panNumber: 'ABCDE1234F', type: 'RETAIL' },
+      });
+      const foreignInv = await _createInvoice({
+        branchId: other.branch.id, clientId: otherClient.id, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [item()],
+        payments: [{ paymentDate: new Date(), amount: 5150, mode: 'CASH' }],
+      }, other.ctx, other.user.id);
+      const foreignPayment = await prisma.invoicePayment.findFirstOrThrow({ where: { invoiceId: foreignInv.id } });
+
+      await expect(reverseInvoicePayment(foreignPayment.id, tenant.ctx, userId, 'test')).rejects.toThrow(/not found/i);
+
+      await cleanupJournalEntries([foreignInv.id, foreignPayment.id]);
+      await prisma.invoicePayment.deleteMany({ where: { id: foreignPayment.id } });
+      await prisma.taxInvoice.deleteMany({ where: { invoiceId: foreignInv.id } });
+      await prisma.salesInvoice.deleteMany({ where: { id: foreignInv.id } });
+      await prisma.client.deleteMany({ where: { id: otherClient.id } });
+    } finally {
+      await cleanupTestTenant(other);
+    }
+  });
+
+  // J3.5 Finding 3 — real concurrency, not two sequential calls: both promises are started together
+  // and only THEN awaited, so both requests reach the database before either resolves.
+  describe('concurrency (J3.5 Finding 3)', () => {
+    it('two simultaneous reversal attempts on the SAME OLD_GOLD payment: exactly one succeeds, no duplicate journal/balance/stock effect', async () => {
+      const clientId = await makeClient('race-same-payment');
+      const inv = await sell(clientId, {
+        payments: [{ paymentDate: new Date(), amount: 0, mode: 'OLD_GOLD', oldGold: { description: 'Race test chain', karat, grossWeight: 1.03 } }],
+      });
+      const payment = await prisma.invoicePayment.findFirstOrThrow({ where: { invoiceId: inv.id, mode: 'OLD_GOLD' } });
+      const exchange = await prisma.oldGoldExchange.findFirstOrThrow({ where: { companyId: tenant.company.id, exchangeNumber: payment.referenceNo! } });
+      const balanceBefore = await balanceOf(clientId);
+
+      const results = await Promise.allSettled([
+        reverseInvoicePayment(payment.id, tenant.ctx, userId, 'race A'),
+        reverseInvoicePayment(payment.id, tenant.ctx, userId, 'race B'),
+      ]);
+      const fulfilled = results.filter((r) => r.status === 'fulfilled');
+      const rejected = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].reason.message).toMatch(/already been reversed/);
+
+      // Balance moved by exactly ONE valuedAmount (5150) — a lost claim-check would double-credit it.
+      expect(await balanceOf(clientId)).toBeCloseTo(balanceBefore + 5150);
+
+      // Exactly one exchange-reversal journal — not two, not zero.
+      const exReversalEntries = await prisma.journalEntry.findMany({ where: { referenceId: exchange.id, referenceType: 'OldGoldExchangeReversal' } });
+      expect(exReversalEntries).toHaveLength(1);
+
+      // MetalStock left in a single, correct zeroed state — not corrupted by a second concurrent writer.
+      const stock = await prisma.metalStock.findUniqueOrThrow({ where: { id: exchange.metalStockId! } });
+      expect(Number(stock.availableWt)).toBe(0);
+      expect(stock.isActive).toBe(false);
+
+      const exReversed = await prisma.oldGoldExchange.findUniqueOrThrow({ where: { id: exchange.id } });
+      expect(exReversed.reversedAt).not.toBeNull();
+    });
+
+    // This is exactly the lost-update window the FOR UPDATE lock in reverseInvoicePayment closes:
+    // without it, two concurrent reversals on the SAME invoice (different payments) each read
+    // paidAmount before either wrote, and the second write silently discarded the first's effect.
+    it('two concurrent reversals of two DIFFERENT payments on the SAME invoice: neither loses the other\'s effect on paidAmount/balanceDue', async () => {
+      const clientId = await makeClient('race-same-invoice');
+      const inv = await sell(clientId, {
+        payments: [
+          { paymentDate: new Date(), amount: 2000, mode: 'CASH' },
+          { paymentDate: new Date(), amount: 2000, mode: 'UPI' },
+        ],
+      }); // 5150 total, 4000 paid, 1150 due, PARTIALLY_PAID
+      const payments = await prisma.invoicePayment.findMany({ where: { invoiceId: inv.id }, orderBy: { mode: 'asc' } });
+      expect(payments).toHaveLength(2);
+
+      const results = await Promise.allSettled([
+        reverseInvoicePayment(payments[0].id, tenant.ctx, userId, 'concurrent reversal 1'),
+        reverseInvoicePayment(payments[1].id, tenant.ctx, userId, 'concurrent reversal 2'),
+      ]);
+      expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
+
+      const finalInvoice = await prisma.salesInvoice.findUniqueOrThrow({ where: { id: inv.id } });
+      // Both reversals' effect present — a lost update would leave this at 2000, not 0.
+      expect(Number(finalInvoice.paidAmount)).toBeCloseTo(0);
+      expect(Number(finalInvoice.balanceDue)).toBeCloseTo(5150);
+      expect(finalInvoice.status).toBe('DRAFT');
+
+      // One reversal journal entry per payment — no duplicates, none dropped.
+      const reversalEntries = await prisma.journalEntry.findMany({
+        where: { referenceId: { in: payments.map((p) => p.id) }, referenceType: 'InvoicePaymentReversal' },
+      });
+      expect(reversalEntries).toHaveLength(2);
+    });
   });
 });

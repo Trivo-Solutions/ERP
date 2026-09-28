@@ -72,7 +72,10 @@ export async function assertCashLimit(
 
   const { start, end, label } = istDayBounds(payment.paymentDate);
   const agg = await tx.invoicePayment.aggregate({
-    where: { companyId, clientId, mode: { equals: 'CASH', mode: 'insensitive' }, paymentDate: { gte: start, lt: end } },
+    // J3.5 Finding 4: a reversed cash receipt didn't actually leave cash in hand — exclude it, or
+    // reversing a mistaken cash entry would keep consuming this client's daily allowance and could
+    // wrongly block a later, legitimate cash payment the same day.
+    where: { companyId, clientId, mode: { equals: 'CASH', mode: 'insensitive' }, paymentDate: { gte: start, lt: end }, reversedAt: null },
     _sum: { amount: true },
   });
   const already = Number(agg._sum.amount ?? 0);

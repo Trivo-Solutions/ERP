@@ -1,9 +1,10 @@
 import { Router, Request, Response } from 'express';
 import { authenticate } from '../../middleware/auth';
 import { requirePermission } from '../../middleware/rbac';
-import { resolveTenantContext } from '../../middleware/tenant';
+import { resolveTenantContext, rejectClientTenantSelectors } from '../../middleware/tenant';
 import { prisma } from '../../config/database';
 import { tenantQuery } from '../../shared/tenantContext';
+import { PERMISSION_CATALOG } from '../../shared/permissionCatalog';
 import * as settingsSvc from './settings.service';
 
 export const settingsRouter = Router();
@@ -12,7 +13,7 @@ settingsRouter.use(authenticate, resolveTenantContext);
 // Company-scoped — Role is company-owned as of the multi-tenant migration (see schema.prisma's
 // Role/RoleTemplate split). "users" -> "memberships": Role no longer relates to User directly,
 // only through CompanyUser (see the blueprint's explicit User-stays-global reasoning).
-settingsRouter.get('/roles', requirePermission('role:manage'), async (req: Request, res: Response) => {
+settingsRouter.get('/roles', requirePermission('role:view'), async (req: Request, res: Response) => {
   const roles = await tenantQuery(req.tenant!.companyId, (_tx) => _tx.role.findMany({
     where: { companyId: req.tenant!.companyId },
     include: { _count: { select: { memberships: true } } },
@@ -20,13 +21,36 @@ settingsRouter.get('/roles', requirePermission('role:manage'), async (req: Reque
   res.json({ success: true, data: roles });
 });
 
-settingsRouter.post('/roles', requirePermission('role:manage'), async (req: Request, res: Response) => {
-  const { name, displayName, permissions } = req.body;
-  const role = await tenantQuery(req.tenant!.companyId, (_tx) => _tx.role.create({
-    data: { companyId: req.tenant!.companyId, name, displayName, permissions },
-  }));
-  res.status(201).json({ success: true, data: role });
+// The permission grid's row/capability catalog — see permissionCatalog.ts for why this is a static
+// list rather than a DB table (it mirrors requirePermission(...) call sites, not app data).
+settingsRouter.get('/permission-catalog', requirePermission('role:view'), async (_req: Request, res: Response) => {
+  res.json({ success: true, data: PERMISSION_CATALOG });
 });
+
+settingsRouter.post(
+  '/roles', rejectClientTenantSelectors, requirePermission('role:create'),
+  async (req: Request, res: Response) => {
+    const { name, displayName, permissions } = req.body;
+    const role = await settingsSvc.createRole(req.tenant!, { name, displayName, permissions });
+    res.status(201).json({ success: true, data: role });
+  }
+);
+
+settingsRouter.patch(
+  '/roles/:id', rejectClientTenantSelectors, requirePermission('role:edit'),
+  async (req: Request, res: Response) => {
+    const role = await settingsSvc.updateRole(req.tenant!, req.params.id, req.body);
+    res.json({ success: true, data: role });
+  }
+);
+
+settingsRouter.delete(
+  '/roles/:id', requirePermission('role:delete'),
+  async (req: Request, res: Response) => {
+    await settingsSvc.deleteRole(req.tenant!, req.params.id);
+    res.json({ success: true, message: 'Role deleted' });
+  }
+);
 
 // Company-scoped — each company has its own value for every key (see settings.service.ts).
 settingsRouter.get('/config', requirePermission('system:config'), async (req: Request, res: Response) => {

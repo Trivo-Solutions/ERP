@@ -25,11 +25,11 @@ qualityRouter.patch('/hallmarking/:id/receive', requirePermission('hallmark:mana
   res.json({ success: true, message: 'Batch received and HUIDs recorded' });
 });
 
-qualityRouter.get('/repairs', requirePermission('repair:manage'), async (req: Request, res: Response) => {
+qualityRouter.get('/repairs', requirePermission('repair:view'), async (req: Request, res: Response) => {
   res.json({ success: true, data: await svc.listRepairJobs(req.tenant!, qs(req, 'status')) });
 });
 
-qualityRouter.post('/repairs', requirePermission('repair:manage'), async (req: Request, res: Response) => {
+qualityRouter.post('/repairs', requirePermission('repair:create'), async (req: Request, res: Response) => {
   const repair = await svc.createRepairJob(req.body, req.tenant!, req.user!.userId);
   res.status(201).json({ success: true, data: repair });
 });
@@ -50,7 +50,7 @@ qualityRouter.patch('/repairs/:id/status', requirePermission('repair:manage'), a
   res.json({ success: true, data: repair });
 });
 
-qualityRouter.patch('/repairs/:id', requirePermission('repair:manage'), async (req: Request, res: Response) => {
+qualityRouter.patch('/repairs/:id', requirePermission('repair:edit'), async (req: Request, res: Response) => {
   const repair = await svc.updateRepairJob(req.params.id, req.body, req.tenant!);
   res.json({ success: true, data: repair });
 });
@@ -62,8 +62,8 @@ qualityRouter.post('/repairs/:id/transactions', requirePermission('repair:manage
 
 // G1: "charge" the customer for a repair — creates a real SalesInvoice, so gated the same way
 // every other cross-module invoice-creating endpoint is (sales returns, old gold exchange), not
-// by repair:manage. See CLAUDE.md's RBAC note: PRODUCTION_MANAGER (the only role with
-// repair:manage) also needs invoice:create for this to be usable end to end.
+// by a repair permission. See CLAUDE.md's RBAC note: PRODUCTION_MANAGER also needs invoice:create
+// for this to be usable end to end.
 qualityRouter.post('/repairs/:id/bill', requirePermission('invoice:create'), async (req: Request, res: Response) => {
   const repair = await svc.billRepairJob(req.params.id, req.body.branchId, req.tenant!, req.user!.userId);
   res.json({ success: true, data: repair });

@@ -193,9 +193,23 @@ salesRouter.put('/invoices/:id', requirePermission('invoice:edit'), async (req: 
   res.json({ success: true, data: invoice });
 });
 
-salesRouter.post('/invoices/:id/payment', requirePermission('invoice:create'), async (req: Request, res: Response) => {
+salesRouter.post('/invoices/:id/payment', requirePermission('payment:create'), async (req: Request, res: Response) => {
   await svc.recordPayment({ invoiceId: req.params.id, ...req.body, paymentDate: parseDate(req.body.paymentDate, 'Payment date', true) }, req.tenant!, req.user!.userId);
   res.json({ success: true, message: 'Payment recorded' });
+});
+
+// J3 Decision 5: Void — a whole-invoice reversal, distinct from invoice:edit (amend). SUPER_ADMIN-only
+// initially (not granted to any starter role — see permissionCatalog.ts / CLAUDE.md).
+salesRouter.post('/invoices/:id/void', requirePermission('invoice:void'), async (req: Request, res: Response) => {
+  const result = await svc.voidInvoice(req.params.id, req.tenant!, req.user!.userId, req.body?.reason);
+  res.json({ success: true, data: result });
+});
+
+// J3 Decision 1/2: reverse a receipt (never edit/delete the original row) — see reverseInvoicePayment.
+// SUPER_ADMIN-only initially, same posture as invoice:void.
+salesRouter.post('/payments/:id/reverse', requirePermission('payment:reverse'), async (req: Request, res: Response) => {
+  const result = await svc.reverseInvoicePayment(req.params.id, req.tenant!, req.user!.userId, req.body?.reason);
+  res.json({ success: true, data: { paymentId: req.params.id, invoice: result.invoiceAfter, exchangeReversed: result.exchangeReversal } });
 });
 
 salesRouter.get('/invoices/:id/packing-list', requirePermission('export:doc'), async (req: Request, res: Response) => {
@@ -204,20 +218,22 @@ salesRouter.get('/invoices/:id/packing-list', requirePermission('export:doc'), a
 });
 
 // On-account client payments (F2) — an advance, or a payment against a client's general
-// outstanding balance rather than one specific invoice.
-salesRouter.get('/clients/:clientId/payments', requirePermission('sales:view'), async (req: Request, res: Response) => {
+// outstanding balance rather than one specific invoice. J4-D6: payment:view is now its own
+// permission, independently delegable from general sales visibility.
+salesRouter.get('/clients/:clientId/payments', requirePermission('payment:view'), async (req: Request, res: Response) => {
   const payments = await svc.listClientPayments(req.tenant!, req.params.clientId);
   res.json({ success: true, data: payments });
 });
 
-salesRouter.post('/clients/:clientId/payments', requirePermission('invoice:create'), async (req: Request, res: Response) => {
+salesRouter.post('/clients/:clientId/payments', requirePermission('payment:create'), async (req: Request, res: Response) => {
   const payment = await svc.recordClientPayment({ clientId: req.params.clientId, ...req.body, paymentDate: parseDate(req.body.paymentDate, 'Payment date', true) }, req.tenant!, req.user!.userId);
   res.status(201).json({ success: true, data: payment });
 });
 
 // Credit a customer holds (from sales returns / old-gold exchanges) that the New Sale screen can spend as the
-// "Store Credit" payment mode. Same gate as creating the invoice it is spent on.
-salesRouter.get('/clients/:clientId/credit', requirePermission('invoice:create'), async (req: Request, res: Response) => {
+// "Store Credit" payment mode. J3 Decision 7: reclassified from invoice:create to client:view — it only reads
+// Client-domain data (Client.currentBalance), it does not create anything.
+salesRouter.get('/clients/:clientId/credit', requirePermission('client:view'), async (req: Request, res: Response) => {
   res.json({ success: true, data: await svc.getClientCredit(req.tenant!, req.params.clientId) });
 });
 
@@ -234,7 +250,7 @@ salesRouter.get('/returns', requirePermission('sales:view'), async (req: Request
   res.json({ success: true, data: returns });
 });
 
-salesRouter.post('/returns', requirePermission('invoice:create'), async (req: Request, res: Response) => {
+salesRouter.post('/returns', requirePermission('return:create'), async (req: Request, res: Response) => {
   const salesReturn = await svc.createSalesReturn(req.body, req.tenant!, req.user!.userId);
   res.status(201).json({ success: true, data: salesReturn });
 });

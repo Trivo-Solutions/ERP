@@ -15,6 +15,7 @@ import { DataTable } from '../../components/common/DataTable';
 import { DateField } from '../../components/fields/DateField';
 import { printInvoice } from '../../utils/printInvoice';
 import { useAuthStore } from '../../store/auth.store';
+import { PermissionGate } from '../../components/auth/PermissionGate';
 
 function fmt(n: number) {
   return '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
@@ -242,7 +243,9 @@ function InvoiceDrawer({ invoiceId, onClose, onEdit }: { invoiceId: string; onCl
               </TableBody>
             </Table>
 
-            <ReturnItemsForm invoiceId={invoice.id} items={invoice.items ?? []} alreadyReturnedIds={returnedItemIds} />
+            <PermissionGate permission="return:create">
+              <ReturnItemsForm invoiceId={invoice.id} items={invoice.items ?? []} alreadyReturnedIds={returnedItemIds} />
+            </PermissionGate>
 
             {returns.length > 0 && (
               <Box sx={{ mt: 2, mb: 2 }}>
@@ -322,11 +325,11 @@ function InvoiceDrawer({ invoiceId, onClose, onEdit }: { invoiceId: string; onCl
             )}
 
             {Number(invoice.balanceDue) > 0 && (
-              <>
+              <PermissionGate permission="payment:create">
                 <Divider sx={{ my: 2 }} />
                 <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1 }}>Record Payment</Typography>
                 <RecordPaymentForm invoiceId={invoice.id} balanceDue={Number(invoice.balanceDue)} />
-              </>
+              </PermissionGate>
             )}
           </>
         )}
@@ -342,6 +345,7 @@ export function SalesInvoices() {
   const [selectedInvoiceId, setSelectedInvoiceId] = useState('');
   // Editing an issued invoice is its own permission (SUPER_ADMIN, or a role that was granted it) — the server enforces it too.
   const canEdit = useAuthStore((s) => s.hasPermission('invoice:edit'));
+  const canCreateInvoice = useAuthStore((s) => s.hasPermission('invoice:create'));
   const editInvoice = (id: string) => navigate(`/sales/invoices/${id}/edit`);
   // Invoice-date range (both ends inclusive), sent to the server. Empty = the latest 50; a range lifts that cap.
   const [from, setFrom] = useState('');
@@ -371,7 +375,7 @@ export function SalesInvoices() {
         {!from && !to && <Typography variant="caption" color="text.secondary">Showing the latest 50 — pick dates to see older invoices</Typography>}
         {/* On the filter row (right-aligned) rather than in the header, where a lone button cost a whole line. */}
         <Box sx={{ ml: 'auto' }}>
-          <PageActions actions={[{ label: 'New Sale', icon: <Add />, onClick: () => navigate('/sales/invoices/new') }]} />
+          <PageActions actions={canCreateInvoice ? [{ label: 'New Sale', icon: <Add />, onClick: () => navigate('/sales/invoices/new') }] : []} />
         </Box>
       </Stack>
 

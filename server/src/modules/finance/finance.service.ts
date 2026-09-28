@@ -3,7 +3,7 @@ import { prisma } from '../../config/database';
 import { AppError } from '../../middleware/error';
 import { nextDocumentNumber } from '../../shared/numberSequence';
 import { tenantQuery, tenantBatch, tenantTransaction, TenantContext } from '../../shared/tenantContext';
-import { assertOwnedByCompany } from '../../middleware/tenant';
+import { assertOwnedByCompany, assertAllOwned } from '../../middleware/tenant';
 import { CREDIT_SETTLEMENT_MODES } from '../../shared/constants';
 import { getStarterPackage, type StarterAccount } from '../platform/starterPackage';
 
@@ -40,6 +40,10 @@ export async function createJournalEntry(
 
   const run = async (c: Prisma.TransactionClient) => {
     if (data.costCenterId) await assertOwnedByCompany('costCenter', data.costCenterId, companyId, 'Cost center');
+    // Layer 2: a JournalLine.accountId is a plain (non-composite) FK — Postgres FK checks bypass
+    // RLS, so a forged Company-B account id would otherwise be accepted here and have its
+    // balance mutated by postJournalEntry. Every line's account must be verified explicitly.
+    await assertAllOwned('account', data.lines.map((l) => l.accountId), companyId, 'Account');
     const entryNumber = await nextDocumentNumber(companyId, 'JE', 'JE', c, data.date.getFullYear());
     return c.journalEntry.create({
       data: {
@@ -220,7 +224,10 @@ export async function getDealerAging(companyId: string, asOfDate?: Date) {
   const cutoff = asOfDate ?? new Date();
   const invoices = await tenantQuery(companyId, (tx) =>
     tx.salesInvoice.findMany({
-      where: { companyId, balanceDue: { gt: 0 } },
+      // J3.5 Finding 1: a VOID invoice keeps balanceDue == totalAmount by design (voiding never
+      // touches it — void's own eligibility already required zero payments) but is not a live
+      // receivable; it must not age here.
+      where: { companyId, balanceDue: { gt: 0 }, status: { not: 'VOID' } },
       select: {
         dueDate: true, invoiceDate: true, balanceDue: true,
         client: {
@@ -295,13 +302,17 @@ export async function getClientLedger(ctx: TenantContext, clientId: string, from
 
   const [invoices, payments, returns, exchanges] = await tenantBatch(ctx.companyId, (tx) => [
     tx.salesInvoice.findMany({
-      where: { companyId: ctx.companyId, clientId },
+      // J3.5 Finding 1: a VOID invoice's debit is reversed the moment it's voided (client.currentBalance
+      // is decremented in the same transaction) — including it here with no offsetting entry would make
+      // this statement's own computed closingBalance disagree with client.currentBalance below.
+      where: { companyId: ctx.companyId, clientId, status: { not: 'VOID' } },
       select: { id: true, invoiceNumber: true, invoiceDate: true, totalAmount: true, createdAt: true },
     }),
     tx.invoicePayment.findMany({
       // Not OLD_GOLD / STORE_CREDIT: those settle a bill out of credit already shown above as the exchange / return
-      // row, so listing them as receipts too would credit the customer twice.
-      where: { companyId: ctx.companyId, clientId, mode: { notIn: CREDIT_SETTLEMENT_MODES } },
+      // row, so listing them as receipts too would credit the customer twice. Not reversed (J3 Decision 1): a
+      // reversed payment's original row is kept for the audit trail but never counts as a receipt again.
+      where: { companyId: ctx.companyId, clientId, mode: { notIn: CREDIT_SETTLEMENT_MODES }, reversedAt: null },
       select: {
         id: true, paymentNumber: true, paymentDate: true, amount: true, mode: true, createdAt: true,
         invoice: { select: { invoiceNumber: true } },
@@ -452,12 +463,15 @@ export async function getDayBook(companyId: string, date: Date) {
 
   const [invoices, payments, returns, exchanges] = await tenantBatch(companyId, (tx) => [
     tx.salesInvoice.findMany({
-      where: { companyId, invoiceDate: { gte: start, lte: end } },
+      // J3.5 Finding 1: a voided invoice keeps its original invoiceDate — without this exclusion it
+      // would inflate that day's sales total forever, however long after that day it was voided.
+      where: { companyId, invoiceDate: { gte: start, lte: end }, status: { not: 'VOID' } },
       select: { invoiceNumber: true, invoiceType: true, totalAmount: true, client: { select: { name: true } } },
     }),
     tx.invoicePayment.findMany({
       // Money received only — old gold / store credit settlements are already in the exchanges / returns below.
-      where: { companyId, paymentDate: { gte: start, lte: end }, mode: { notIn: CREDIT_SETTLEMENT_MODES } },
+      // Not reversed (J3 Decision 1) — a reversed payment moved no money for this day's rollup either.
+      where: { companyId, paymentDate: { gte: start, lte: end }, mode: { notIn: CREDIT_SETTLEMENT_MODES }, reversedAt: null },
       select: { mode: true, amount: true },
     }),
     tx.salesReturn.findMany({
@@ -503,7 +517,10 @@ export async function getDayBook(companyId: string, date: Date) {
 export async function getGstSummary(companyId: string, from: Date, to: Date) {
   const items = await tenantQuery(companyId, (tx) =>
     tx.invoiceItem.findMany({
-      where: { companyId, invoice: { invoiceDate: { gte: from, lte: to }, currency: 'INR' } },
+      // J3.5 Finding 1: a voided invoice's lines were never actually a taxable sale — exclude them
+      // from GST prep (already documented in the UI as prep, not filing-ready, but still wrong to
+      // include a reversed sale's lines at all).
+      where: { companyId, invoice: { invoiceDate: { gte: from, lte: to }, currency: 'INR', status: { not: 'VOID' } } },
       select: {
         totalPrice: true, taxRate: true,
         hsnCode: { select: { code: true, description: true } },

@@ -209,9 +209,9 @@ CLI equivalent: `npm run company:provision -- --code VASAVI --name "Vasavi Jewel
 | POST | `/orders` | `po:create` | Create a PO |
 | PATCH | `/orders/:id/status` | `po:approve` | Set PO status |
 | POST | `/orders/:id/submit` | `po:create` | Submit PO for approval |
-| POST | `/orders/:id/approve` | `po:approve` | Approve PO |
+| POST | `/orders/:id/approve` | `po:approve` (+ `po:approve_high_value` if the goods value exceeds ₹5,00,000) | Approve PO |
 | POST | `/orders/:id/reject` | `po:approve` | Reject PO |
-| GET | `/grn` | `grn:create` | List goods receipt notes |
+| GET | `/grn` | `grn:view` | List goods receipt notes |
 | POST | `/grn` | `grn:create` | Create a GRN. `branchId` (receiving branch) is required when it has a `FINISHED_GOODS` or `FINISHED_LOT` line. Tagging is a separate step: `POST /tagging/tags/from-grn-item` (Gap #1), or — for a `FINISHED_LOT` line, which is received whole and opens a purchase lot — `POST /tagging/tags` with `purchaseLotId` |
 | PATCH | `/grn/:id/verify` | `grn:verify` | Verify/approve a GRN |
 | GET | `/suppliers/performance` | `po:view` | Supplier performance stats |
@@ -319,7 +319,7 @@ CLI equivalent: `npm run company:provision -- --code VASAVI --name "Vasavi Jewel
 | PUT | `/invoices/:id` | `invoice:edit` | **Amend an issued invoice** — body is the full new bill (`items[]` with `id` to update a line in place, no `id` to add, omitted to remove; optional `clientId`, `invoiceDate`, `dueDate`, `invoiceType`, `discountAmount`, `otherCharges`, `roundOff`, `salesPersonId`, `terms`, `notes`, `reason`). One transaction: tag stock, GST record, an adjustment journal for the difference, customer balance; audit-logged with before/after. Returned lines are locked; customer is fixed once a payment/return exists |
 | POST | `/invoices/:id/payment` | `invoice:create` | Record a payment against an invoice |
 | GET | `/invoices/:id/packing-list` | `export:doc` | Generate a packing list |
-| GET | `/clients/:clientId/payments` | `sales:view` | List a client's payments, invoice-scoped + standalone (F2) |
+| GET | `/clients/:clientId/payments` | `payment:view` | List a client's payments, invoice-scoped + standalone (F2) |
 | POST | `/clients/:clientId/payments` | `invoice:create` | Record an on-account payment (F2) |
 | GET | `/returns` | `sales:view` | List sales returns (D1) |
 | POST | `/returns` | `invoice:create` | Create a sales return — flips tag back to `IN_STOCK` |
@@ -334,24 +334,26 @@ CLI equivalent: `npm run company:provision -- --code VASAVI --name "Vasavi Jewel
 | GET | `/journals` | `finance:view` | List journal entries |
 | POST | `/journals` | `journal:create` | Create a manual (discretionary) journal entry |
 | POST | `/journals/:id/post` | `journal:post` | Post a draft journal entry |
-| GET | `/reports/trial-balance` | `report:view` | Trial balance as of a date |
-| GET | `/reports/pnl` | `report:view` | P&L for a period — this **is** the "profit/margin" report (Phase H) |
-| GET | `/reports/balance-sheet` | `report:view` | Balance sheet as of a date |
+| GET | `/reports/trial-balance` | `report:financial_view` | Trial balance as of a date |
+| GET | `/reports/pnl` | `report:financial_view` | P&L for a period — this **is** the "profit/margin" report (Phase H) |
+| GET | `/reports/balance-sheet` | `report:financial_view` | Balance sheet as of a date |
 | GET | `/reports/cost-centers` | `report:view` | Cost-center profitability |
-| GET | `/reports/dealer-aging` | `report:view` | Outstanding balances aged into buckets, over-limit flag (F3) |
-| GET | `/reports/client-ledger/:clientId` | `report:view` | One client's full statement, running balance (F4) |
-| GET | `/reports/supplier-ledger/:supplierId` | `report:view` | One supplier's statement — purchases, returns, payments, running payable (I2) |
-| GET | `/reports/purchase-gst-summary` | `report:view` | Input tax credit: HSN-wise net of returns + bill-wise, for a period (I2) |
-| GET | `/reports/day-book` | `report:view` | One day's company-wide sales/payments/returns/exchanges (H4) |
-| GET | `/reports/gst-summary` | `report:view` | HSN-wise GST summary for a period, filing prep (H5) |
+| GET | `/reports/dealer-aging` | `report:financial_view` | Outstanding balances aged into buckets, over-limit flag (F3) |
+| GET | `/reports/client-ledger/:clientId` | `report:financial_view` | One client's full statement, running balance (F4) |
+| GET | `/reports/supplier-ledger/:supplierId` | `report:financial_view` | One supplier's statement — purchases, returns, payments, running payable (I2) |
+| GET | `/reports/purchase-gst-summary` | `report:financial_view` | Input tax credit: HSN-wise net of returns + bill-wise, for a period (I2) |
+| GET | `/reports/day-book` | `report:financial_view` | One day's company-wide sales/payments/returns/exchanges (H4) |
+| GET | `/reports/gst-summary` | `report:financial_view` | HSN-wise GST summary for a period, filing prep (H5) |
 | GET | `/cost-centers` | `finance:view` | List cost centers |
 
 ### Settings — `/settings`
 
 | Method | Path | Permission | Description |
 |---|---|---|---|
-| GET | `/roles` | `role:manage` | List roles |
-| POST | `/roles` | `role:manage` | Create a role |
+| GET | `/roles` | `role:view` | List roles |
+| POST | `/roles` | `role:create` | Create a role |
+| PATCH | `/roles/:id` | `role:edit` | Update a role's display name / permissions |
+| DELETE | `/roles/:id` | `role:delete` | Delete a role (blocked if any member/invitation still holds it) |
 | GET | `/config` | `system:config` | List system config entries |
 | PUT | `/config/:key` | `system:config` | Upsert a config entry |
 | GET | `/design-categories` | authenticated | List design categories |
@@ -384,7 +386,7 @@ Tagging `/reports/*` rows above).
 | GET | `/wip-summary` | `report:view` | WIP-by-process/priority *(dormant data)* |
 | GET | `/stock-summary` | `report:view` | Metal/stone/consumable stock *(mostly dormant data)* |
 | GET | `/karigar-balances` | `report:view` | Artisans with an outstanding metal balance *(dormant)* |
-| GET | `/aging-receivables` | `report:view` | Superseded by `finance/reports/dealer-aging` (F3) — kept for compatibility |
+| GET | `/aging-receivables` | `report:financial_view` | Superseded by `finance/reports/dealer-aging` (F3) — kept for compatibility. J4-D1: same sensitivity class as dealer-aging |
 
 ### Tagging — `/tagging` (live — core inventory module)
 
@@ -447,10 +449,17 @@ shape; `price-master` and `making-charges` additionally support a soft-delete `D
 | Role | Scope |
 |---|---|
 | `SUPER_ADMIN` | `*` — everything |
-| `PRODUCTION_MANAGER` | Manufacturing + procurement + hallmarking/repairs (incl. `invoice:create` for repair billing) + `masters:view`/`report:view` |
-| `ACCOUNTANT` | Finance, journals, tax, `invoice:create`, `sales:view`, `masters:view` |
-| `SALES_MANAGER` | Sales, memo, invoice creation, export docs, order view/create, `masters:view` |
+| `PRODUCTION_MANAGER` | Manufacturing + procurement (incl. `po:approve`/`po:approve_high_value` — J4-D2) + hallmarking/repairs (incl. `invoice:create` for repair billing) + `masters:view`/`report:view`/`grn:view` |
+| `ACCOUNTANT` | Finance, journals, tax, `invoice:create`, `sales:view`, `masters:view`, `report:financial_view` (J4-D1), `payment:view` (J4-D6) |
+| `SALES_MANAGER` | Sales, memo, invoice creation, export docs, order view/create, `masters:view`, `payment:view` (J4-D6) |
 | `FLOOR_WORKER` | `job:view`, `wip:update`, `karigar:view` only |
-| `STORE_MANAGER` | Stock view/adjust, stone handling, consumables, GRN, `masters:view` |
+| `STORE_MANAGER` | Stock view/adjust, stone handling, consumables, GRN (incl. `grn:view` — J4-D5), `masters:view` |
 
-Full permission constants: `server/src/middleware/rbac.ts` (`PERMISSIONS` object, ~35 entries).
+`client:deactivate`, `client:delete`, `invoice:void`, `invoice:edit`, `payment:reverse` remain
+SUPER_ADMIN-only by omission (J3 Decision 6 / J4-D3 — not granted to any starter role yet).
+
+The full, authoritative list of permission strings is `server/src/shared/permissionCatalog.ts`
+(`PERMISSION_CATALOG` / `ALL_CATALOG_PERMISSIONS`) — this is what `requirePermission(...)` call
+sites and the Role Editor both key off of. The old `PERMISSIONS` constant object in
+`server/src/middleware/rbac.ts` was removed in Phase J4 (it had zero usages and had drifted stale
+relative to the catalog).

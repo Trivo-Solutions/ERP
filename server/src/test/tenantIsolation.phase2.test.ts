@@ -14,7 +14,7 @@ import {
   createMemoOut, convertMemoToInvoice, createOldGoldExchange,
   getSalesRegister,
 } from '../modules/sales/sales.service';
-import { getDealerAging, getClientLedger, getGstSummary, getTrialBalance } from '../modules/finance/finance.service';
+import { getDealerAging, getClientLedger, getGstSummary, getTrialBalance, createJournalEntry } from '../modules/finance/finance.service';
 import { createClient } from '../modules/orders/orders.service';
 
 // ═══════════════════════════════════════════════════
@@ -65,8 +65,8 @@ describe('Phase 2: tenant isolation & concurrency', () => {
   }
 
   beforeAll(async () => {
-    companyA = await createTestTenant(`P2A${suffix}`, ['tag:create', 'invoice:create', 'memo:manage', 'branch:transfer', 'branch:approve', 'stock:adjust', 'tagTemplate:manage']);
-    companyB = await createTestTenant(`P2B${suffix}`, ['tag:create', 'invoice:create', 'memo:manage', 'branch:transfer', 'branch:approve', 'stock:adjust', 'tagTemplate:manage']);
+    companyA = await createTestTenant(`P2A${suffix}`, ['tag:create', 'invoice:create', 'memo:manage', 'branch:transfer', 'branch:approve', 'stock:adjust', 'tagTemplate:view', 'tagTemplate:create', 'tagTemplate:edit']);
+    companyB = await createTestTenant(`P2B${suffix}`, ['tag:create', 'invoice:create', 'memo:manage', 'branch:transfer', 'branch:approve', 'stock:adjust', 'tagTemplate:view', 'tagTemplate:create', 'tagTemplate:edit']);
 
     for (const t of [companyA, companyB]) {
       const category = await prisma.productCategory.create({ data: { companyId: t.company.id, code: `P2CAT-${suffix}`, name: 'Phase2 Category' } });
@@ -245,6 +245,52 @@ describe('Phase 2: tenant isolation & concurrency', () => {
 
       const retired = await retireTag(tag.id, companyA.ctx, companyA.user.id);
       expect(retired.status).toBe('RETIRED');
+    });
+  });
+
+  // ─── createTag: jobCardId/designId cross-company forgery (found and fixed during the
+  // repo-wide company-isolation audit) — both are plain, non-composite FKs left over from the
+  // manufacturing era that createTag never ownership-checked, unlike every other optional id
+  // on the same call. ─────────────────────────────────────────────────────────────────────
+  describe('createTag: jobCardId/designId cross-company forgery is rejected', () => {
+    it('rejects a Company B designId and a Company B jobCardId', async () => {
+      const { categoryId, stockTypeId } = mastersByCompany[companyA.company.id];
+      const designCategoryB = await prisma.designCategory.create({
+        data: { companyId: companyB.company.id, code: `P2DCB-${suffix}`, name: 'Phase2 Design Cat B' },
+      });
+      const designB = await prisma.design.create({
+        data: {
+          companyId: companyB.company.id, designCode: `P2DES-B-${suffix}`, name: 'Phase2 Design B',
+          categoryId: designCategoryB.id, metalKarat: '22K',
+          grossWeightMin: 1, grossWeightMax: 2, netWeightMin: 1, netWeightMax: 2,
+        },
+      });
+      const jobCardB = await prisma.jobCard.create({
+        data: { companyId: companyB.company.id, jobNumber: `P2JC-B-${suffix}`, designId: designB.id, issuedWeight: 5, barcodeData: `P2JCBC-${suffix}` },
+      });
+
+      await expect(
+        createTag(companyA.ctx, {
+          branchId: companyA.branch.id, stockTypeId, categoryId, name: 'Hostile Job Card Ring',
+          metalType: 'GOLD', metalKarat: '22K', grossWeight: 5, netWeight: 5,
+          jobCardId: jobCardB.id,
+        }, companyA.user.id)
+      ).rejects.toThrow('Job card not found');
+
+      await expect(
+        createTag(companyA.ctx, {
+          branchId: companyA.branch.id, stockTypeId, categoryId, name: 'Hostile Design Ring',
+          metalType: 'GOLD', metalKarat: '22K', grossWeight: 5, netWeight: 5,
+          designId: designB.id,
+        }, companyA.user.id)
+      ).rejects.toThrow('Design not found');
+
+      const leaked = await prisma.jewelryTag.findFirst({ where: { companyId: companyA.company.id, jobCardId: jobCardB.id } });
+      expect(leaked).toBeNull();
+
+      await prisma.jobCard.delete({ where: { id: jobCardB.id } });
+      await prisma.design.delete({ where: { id: designB.id } });
+      await prisma.designCategory.delete({ where: { id: designCategoryB.id } });
     });
   });
 
@@ -500,6 +546,41 @@ describe('Phase 2: tenant isolation & concurrency', () => {
       ]);
       expect(accountsA.every((a) => a.companyId === companyA.company.id)).toBe(true);
       expect(accountsB.every((a) => a.companyId === companyB.company.id)).toBe(true);
+    });
+  });
+
+  // ─── JournalLine.accountId cross-company forgery (found and fixed during the repo-wide
+  // company-isolation audit) — a plain, non-composite FK that createJournalEntry never
+  // ownership-checked, unlike costCenterId right next to it. ────────────────────────────
+  describe('createJournalEntry: accountId cross-company forgery is rejected', () => {
+    it('rejects a Company B accountId supplied on a Company A journal line', async () => {
+      const accountB = await prisma.account.findFirstOrThrow({ where: { companyId: companyB.company.id } });
+      await expect(
+        createJournalEntry(companyA.company.id, {
+          date: new Date(), description: 'Hostile cross-company line',
+          lines: [
+            { accountId: accountB.id, debit: 100, credit: 0 },
+            { accountId: accountB.id, debit: 0, credit: 100 },
+          ],
+        }, companyA.user.id)
+      ).rejects.toThrow('Account not found');
+
+      // Confirm no forged line — and no entry at all — was actually persisted.
+      const leaked = await prisma.journalLine.findFirst({ where: { accountId: accountB.id, companyId: companyA.company.id } });
+      expect(leaked).toBeNull();
+    });
+
+    it('still accepts a same-company accountId (regression guard on the new check)', async () => {
+      const accountA = await prisma.account.findFirstOrThrow({ where: { companyId: companyA.company.id } });
+      const entry = await createJournalEntry(companyA.company.id, {
+        date: new Date(), description: 'Legit same-company line',
+        lines: [
+          { accountId: accountA.id, debit: 50, credit: 0 },
+          { accountId: accountA.id, debit: 0, credit: 50 },
+        ],
+      }, companyA.user.id);
+      expect(entry.companyId).toBe(companyA.company.id);
+      await prisma.journalEntry.delete({ where: { id: entry.id } }).catch(() => {});
     });
   });
 

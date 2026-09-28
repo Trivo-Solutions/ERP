@@ -48,7 +48,7 @@ estimationRouter.get('/estimates/:id', requirePermission('estimation:view'), asy
 });
 
 // ─── Estimate Templates (drag-and-drop print designer) ───────────────────────
-// Read (estimateTemplate:view) is separate from write (estimateTemplate:manage) — printing an
+// Read (estimateTemplate:view) is separate from write (estimateTemplate:create/edit) — printing an
 // estimate only needs to read the templates list to find the default one, so sales/counter roles
 // that never touch the designer itself can still print without also getting edit rights on it.
 
@@ -60,12 +60,12 @@ estimationRouter.get('/templates/:id', requirePermission('estimateTemplate:view'
   res.json({ success: true, data: await templateSvc.getEstimateTemplateById(req.tenant!.companyId, req.params.id) });
 });
 
-estimationRouter.post('/templates', requirePermission('estimateTemplate:manage'), async (req: Request, res: Response) => {
+estimationRouter.post('/templates', requirePermission('estimateTemplate:create'), async (req: Request, res: Response) => {
   const template = await templateSvc.createEstimateTemplate(req.tenant!.companyId, req.body, req.user!.userId);
   res.status(201).json({ success: true, data: template });
 });
 
-estimationRouter.put('/templates/:id', requirePermission('estimateTemplate:manage'), async (req: Request, res: Response) => {
+estimationRouter.put('/templates/:id', requirePermission('estimateTemplate:edit'), async (req: Request, res: Response) => {
   const template = await templateSvc.updateEstimateTemplate(req.tenant!.companyId, req.params.id, req.body);
   res.json({ success: true, data: template });
 });

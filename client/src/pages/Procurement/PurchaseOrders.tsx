@@ -52,7 +52,6 @@ function CommentDialog({ open, title, onConfirm, onClose, required = false }: {
 function POApprovalDrawer({ poId, onClose }: { poId: string; onClose: () => void }) {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
-  const user = useAuthStore((s) => s.user);
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const [commentDialog, setCommentDialog] = useState<null | 'approve' | 'reject'>(null);
 
@@ -103,9 +102,11 @@ function POApprovalDrawer({ poId, onClose }: { poId: string; onClose: () => void
   const totalAmount = Number(po?.totalAmount ?? 0);
   const taxAmount = Number(po?.taxAmount ?? 0);
   // The limit is on the value of the goods ordered (matches approvePO), not on the GST added to it.
-  const needsSuperAdmin = totalAmount - taxAmount > PO_APPROVAL_THRESHOLD;
+  // J4-D2: permission-based, not role-name based — po:approve_high_value can be granted to any role
+  // (including a custom delegated one) through the Role Editor, same as every other capability.
+  const needsHighValueApproval = totalAmount - taxAmount > PO_APPROVAL_THRESHOLD;
   const canApprove = hasPermission('po:approve') &&
-    (!needsSuperAdmin || user?.role === 'SUPER_ADMIN');
+    (!needsHighValueApproval || hasPermission('po:approve_high_value'));
 
   return (
     <Drawer anchor="right" open={!!poId} onClose={onClose} PaperProps={{ sx: { width: 640 } }}>
@@ -131,13 +132,13 @@ function POApprovalDrawer({ poId, onClose }: { poId: string; onClose: () => void
               <Grid item xs={6}><Typography variant="caption" color="text.secondary">Order Date</Typography>
                 <Typography>{new Date(po.orderDate).toLocaleDateString('en-IN')}</Typography></Grid>
               <Grid item xs={6}><Typography variant="caption" color="text.secondary">Total Amount{taxAmount > 0 ? ' (incl. GST)' : ''}</Typography>
-                <Typography fontWeight={700} color={needsSuperAdmin ? 'warning.main' : 'inherit'}>{fmt(totalAmount)}</Typography>
+                <Typography fontWeight={700} color={needsHighValueApproval ? 'warning.main' : 'inherit'}>{fmt(totalAmount)}</Typography>
                 {taxAmount > 0 && <Typography variant="caption" color="text.secondary">GST {fmt(taxAmount)}</Typography>}</Grid>
             </Grid>
 
-            {needsSuperAdmin && po.status === 'PENDING_APPROVAL' && (
+            {needsHighValueApproval && po.status === 'PENDING_APPROVAL' && (
               <Alert severity="warning" sx={{ mb: 2 }}>
-                This PO exceeds ₹5,00,000 — SUPER_ADMIN approval required.
+                This PO exceeds ₹5,00,000 — approval requires the po:approve_high_value permission.
               </Alert>
             )}
 
@@ -217,7 +218,7 @@ function POApprovalDrawer({ poId, onClose }: { poId: string; onClose: () => void
 
             <Divider sx={{ my: 2 }} />
             <Stack direction="row" spacing={1}>
-              {po.status === 'DRAFT' && (
+              {po.status === 'DRAFT' && hasPermission('po:create') && (
                 <Button variant="contained" startIcon={<Send />}
                   disabled={submitMutation.isPending}
                   onClick={() => submitMutation.mutate()}>Submit for Approval</Button>
@@ -673,7 +674,9 @@ export function PurchaseOrders() {
           </Grid>
           <Grid item><Typography variant="caption" color="text.secondary">{(data as any)?.total ?? 0} orders</Typography></Grid>
           <Grid item sx={{ ml: 'auto', alignSelf: 'center' }}>
-            <Button variant="contained" size="small" startIcon={<Add />} onClick={() => setCreateOpen(true)}>New PO</Button>
+            {hasPermission('po:create') && (
+              <Button variant="contained" size="small" startIcon={<Add />} onClick={() => setCreateOpen(true)}>New PO</Button>
+            )}
           </Grid>
         </Grid>
       </Card>

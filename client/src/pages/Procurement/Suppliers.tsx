@@ -166,7 +166,9 @@ function SupplierList() {
   return (
     <>
       <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 2 }}>
-        <Button variant="contained" startIcon={<Add />} onClick={() => setCreateOpen(true)}>Add Supplier</Button>
+        {hasPermission('po:create') && (
+          <Button variant="contained" startIcon={<Add />} onClick={() => setCreateOpen(true)}>Add Supplier</Button>
+        )}
       </Box>
       <Card>
         <Box sx={{ overflowX: 'auto' }}>
@@ -202,7 +204,8 @@ function SupplierList() {
                   {hasPermission('journal:create') && (
                     <Button size="small" variant="outlined" sx={{ mr: 1 }} onClick={() => setPaySupplier(s)}>Pay</Button>
                   )}
-                  {hasPermission('report:view') && (
+                  {/* J4-D1: supplier-ledger now requires report:financial_view, not the broader report:view. */}
+                  {hasPermission('report:financial_view') && (
                     <Button size="small" onClick={() => navigate(`/finance/supplier-ledger/${s.id}`)}>Statement</Button>
                   )}
                 </TableCell>

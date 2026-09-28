@@ -11,6 +11,23 @@ companyRouter.use(authenticate, resolveTenantContext);
 
 const grantSchema = z.object({ branchId: z.string().cuid() });
 
+// This company's active branches, for the invite/edit-member branch picker.
+companyRouter.get(
+  '/branches', requirePermission('user:manage'),
+  async (req: Request, res: Response) => {
+    res.json({ success: true, data: await companyService.listBranches(req.tenant!.companyId) });
+  }
+);
+
+// The specific branches a member currently holds (via explicit grants, not the allBranches flag).
+companyRouter.get(
+  '/users/:companyUserId/branch-access', requirePermission('user:manage'),
+  async (req: Request, res: Response) => {
+    const branchIds = await companyService.listBranchAccess(req.tenant!, req.params.companyUserId);
+    res.json({ success: true, data: branchIds });
+  }
+);
+
 // Branch access for a member of the caller's own company. Both the membership and the branch must
 // belong to that company (see company.service.ts); the company itself is never taken from the body.
 companyRouter.post(

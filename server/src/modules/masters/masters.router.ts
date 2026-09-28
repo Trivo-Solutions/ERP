@@ -3,7 +3,7 @@ import { authenticate } from '../../middleware/auth';
 import { requirePermission } from '../../middleware/rbac';
 import { resolveTenantContext, assertOwnedByCompany, assertOwnedIfPresent } from '../../middleware/tenant';
 import { tenantQuery, tenantTransaction } from '../../shared/tenantContext';
-import { Prisma } from '@prisma/client';
+import { isBlockedByForeignKey } from '../../shared/prismaErrors';
 import { AppError } from '../../middleware/error';
 
 export const mastersRouter = Router();
@@ -34,10 +34,7 @@ async function deleteUnusedMaster(companyId: string, label: string, remove: Para
   try {
     await tenantQuery(companyId, remove);
   } catch (err) {
-    // Inside a batch the driver surfaces Postgres's own 23001/23503 as an unknown-request error rather than P2003.
-    const blockedByReference = (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2003') ||
-      (err instanceof Prisma.PrismaClientUnknownRequestError && /23001|23503|violates (RESTRICT|foreign key)/.test(err.message));
-    if (blockedByReference) {
+    if (isBlockedByForeignKey(err)) {
       throw new AppError(`${label} is in use and cannot be deleted. Deactivate it instead.`, 409);
     }
     throw err;
@@ -58,14 +55,14 @@ mastersRouter.get('/stock-types', requirePermission('masters:view'), async (req:
   res.json({ success: true, data });
 });
 
-mastersRouter.post('/stock-types', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.post('/stock-types', requirePermission('masters:create'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   const data = withUpperCode(pick(req.body, STOCK_TYPE_FIELDS)) as { code: string; name: string };
   const item = await tenantQuery(companyId, (tx) => tx.stockType.create({ data: { ...data, companyId } }));
   res.status(201).json({ success: true, data: item });
 });
 
-mastersRouter.patch('/stock-types/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.patch('/stock-types/:id', requirePermission('masters:edit'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('stockType', req.params.id, companyId, 'Stock type');
   const item = await tenantQuery(companyId, (tx) =>
@@ -74,7 +71,7 @@ mastersRouter.patch('/stock-types/:id', requirePermission('masters:manage'), asy
   res.json({ success: true, data: item });
 });
 
-mastersRouter.delete('/stock-types/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.delete('/stock-types/:id', requirePermission('masters:delete'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('stockType', req.params.id, companyId, 'Stock type');
   await deleteUnusedMaster(companyId, 'This stock type', (tx) => tx.stockType.delete({ where: { id: req.params.id } }));
@@ -97,7 +94,7 @@ mastersRouter.get('/categories', requirePermission('masters:view'), async (req: 
   res.json({ success: true, data });
 });
 
-mastersRouter.post('/categories', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.post('/categories', requirePermission('masters:create'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   const { code, name } = req.body;
   const item = await tenantQuery(companyId, (tx) =>
@@ -106,7 +103,7 @@ mastersRouter.post('/categories', requirePermission('masters:manage'), async (re
   res.status(201).json({ success: true, data: item });
 });
 
-mastersRouter.patch('/categories/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.patch('/categories/:id', requirePermission('masters:edit'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('productCategory', req.params.id, companyId, 'Category');
   const item = await tenantQuery(companyId, (tx) =>
@@ -115,7 +112,7 @@ mastersRouter.patch('/categories/:id', requirePermission('masters:manage'), asyn
   res.json({ success: true, data: item });
 });
 
-mastersRouter.delete('/categories/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.delete('/categories/:id', requirePermission('masters:delete'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('productCategory', req.params.id, companyId, 'Category');
   await deleteUnusedMaster(companyId, 'This category', (tx) => tx.productCategory.delete({ where: { id: req.params.id } }));
@@ -138,7 +135,7 @@ mastersRouter.get('/subcategories', requirePermission('masters:view'), async (re
   res.json({ success: true, data });
 });
 
-mastersRouter.post('/subcategories', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.post('/subcategories', requirePermission('masters:create'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   const { code, name, categoryId } = req.body;
   // The parent category is a foreign id from the client — must be this company's own.
@@ -152,7 +149,7 @@ mastersRouter.post('/subcategories', requirePermission('masters:manage'), async 
   res.status(201).json({ success: true, data: item });
 });
 
-mastersRouter.patch('/subcategories/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.patch('/subcategories/:id', requirePermission('masters:edit'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('subCategory', req.params.id, companyId, 'Sub-category');
   await assertOwnedIfPresent('productCategory', req.body.categoryId, companyId, 'Category');
@@ -162,7 +159,7 @@ mastersRouter.patch('/subcategories/:id', requirePermission('masters:manage'), a
   res.json({ success: true, data: item });
 });
 
-mastersRouter.delete('/subcategories/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.delete('/subcategories/:id', requirePermission('masters:delete'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('subCategory', req.params.id, companyId, 'Sub-category');
   await deleteUnusedMaster(companyId, 'This sub-category', (tx) => tx.subCategory.delete({ where: { id: req.params.id } }));
@@ -181,14 +178,14 @@ mastersRouter.get('/collections', requirePermission('masters:view'), async (req:
   res.json({ success: true, data });
 });
 
-mastersRouter.post('/collections', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.post('/collections', requirePermission('masters:create'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   const data = withUpperCode(pick(req.body, COLLECTION_FIELDS)) as { code: string; name: string };
   const item = await tenantQuery(companyId, (tx) => tx.collection.create({ data: { ...data, companyId } }));
   res.status(201).json({ success: true, data: item });
 });
 
-mastersRouter.patch('/collections/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.patch('/collections/:id', requirePermission('masters:edit'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('collection', req.params.id, companyId, 'Collection');
   const item = await tenantQuery(companyId, (tx) =>
@@ -197,7 +194,7 @@ mastersRouter.patch('/collections/:id', requirePermission('masters:manage'), asy
   res.json({ success: true, data: item });
 });
 
-mastersRouter.delete('/collections/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.delete('/collections/:id', requirePermission('masters:delete'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('collection', req.params.id, companyId, 'Collection');
   await deleteUnusedMaster(companyId, 'This collection', (tx) => tx.collection.delete({ where: { id: req.params.id } }));
@@ -219,14 +216,14 @@ mastersRouter.get('/material-codes', requirePermission('masters:view'), async (r
   res.json({ success: true, data });
 });
 
-mastersRouter.post('/material-codes', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.post('/material-codes', requirePermission('masters:create'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   const data = withUpperCode(pick(req.body, MATERIAL_CODE_FIELDS)) as { code: string; name: string; materialType: string };
   const item = await tenantQuery(companyId, (tx) => tx.materialCode.create({ data: { ...data, companyId } }));
   res.status(201).json({ success: true, data: item });
 });
 
-mastersRouter.patch('/material-codes/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.patch('/material-codes/:id', requirePermission('masters:edit'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('materialCode', req.params.id, companyId, 'Material code');
   const item = await tenantQuery(companyId, (tx) =>
@@ -235,7 +232,7 @@ mastersRouter.patch('/material-codes/:id', requirePermission('masters:manage'), 
   res.json({ success: true, data: item });
 });
 
-mastersRouter.delete('/material-codes/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.delete('/material-codes/:id', requirePermission('masters:delete'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('materialCode', req.params.id, companyId, 'Material code');
   await deleteUnusedMaster(companyId, 'This material code', (tx) => tx.materialCode.delete({ where: { id: req.params.id } }));
@@ -259,14 +256,14 @@ mastersRouter.get('/karats', requirePermission('masters:view'), async (req: Requ
   res.json({ success: true, data });
 });
 
-mastersRouter.post('/karats', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.post('/karats', requirePermission('masters:create'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   const data = withUpperCode(pick(req.body, KARAT_FIELDS)) as { code: string; metalType: string; purity: string };
   const item = await tenantQuery(companyId, (tx) => tx.karatMaster.create({ data: { ...data, companyId } }));
   res.status(201).json({ success: true, data: item });
 });
 
-mastersRouter.patch('/karats/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.patch('/karats/:id', requirePermission('masters:edit'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('karatMaster', req.params.id, companyId, 'Karat');
   const item = await tenantQuery(companyId, (tx) =>
@@ -275,7 +272,7 @@ mastersRouter.patch('/karats/:id', requirePermission('masters:manage'), async (r
   res.json({ success: true, data: item });
 });
 
-mastersRouter.delete('/karats/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.delete('/karats/:id', requirePermission('masters:delete'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('karatMaster', req.params.id, companyId, 'Karat');
   // Tags, rates, POs, invoices and making charges hold the karat as plain text (no FK), so the database
@@ -312,14 +309,14 @@ mastersRouter.get('/stone-types', requirePermission('masters:view'), async (req:
   res.json({ success: true, data });
 });
 
-mastersRouter.post('/stone-types', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.post('/stone-types', requirePermission('masters:create'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   const data = withUpperCode(pick(req.body, STONE_TYPE_FIELDS)) as { code: string; name: string };
   const item = await tenantQuery(companyId, (tx) => tx.stoneType.create({ data: { ...data, companyId } }));
   res.status(201).json({ success: true, data: item });
 });
 
-mastersRouter.patch('/stone-types/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.patch('/stone-types/:id', requirePermission('masters:edit'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('stoneType', req.params.id, companyId, 'Stone type');
   const item = await tenantQuery(companyId, (tx) =>
@@ -328,7 +325,7 @@ mastersRouter.patch('/stone-types/:id', requirePermission('masters:manage'), asy
   res.json({ success: true, data: item });
 });
 
-mastersRouter.delete('/stone-types/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.delete('/stone-types/:id', requirePermission('masters:delete'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('stoneType', req.params.id, companyId, 'Stone type');
   await deleteUnusedMaster(companyId, 'This stone type', (tx) => tx.stoneType.delete({ where: { id: req.params.id } }));
@@ -358,7 +355,7 @@ mastersRouter.get('/stone-grades', requirePermission('masters:view'), async (req
   res.json({ success: true, data });
 });
 
-mastersRouter.post('/stone-grades', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.post('/stone-grades', requirePermission('masters:create'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   // The parent stone type is a foreign id from the client — must be this company's own.
   await assertOwnedByCompany('stoneType', req.body.stoneTypeId, companyId, 'Stone type');
@@ -379,7 +376,7 @@ mastersRouter.post('/stone-grades', requirePermission('masters:manage'), async (
   res.status(201).json({ success: true, data: item });
 });
 
-mastersRouter.patch('/stone-grades/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.patch('/stone-grades/:id', requirePermission('masters:edit'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('stoneGrade', req.params.id, companyId, 'Stone grade');
   await assertOwnedIfPresent('stoneType', req.body.stoneTypeId, companyId, 'Stone type');
@@ -389,7 +386,7 @@ mastersRouter.patch('/stone-grades/:id', requirePermission('masters:manage'), as
   res.json({ success: true, data: item });
 });
 
-mastersRouter.delete('/stone-grades/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.delete('/stone-grades/:id', requirePermission('masters:delete'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('stoneGrade', req.params.id, companyId, 'Stone grade');
   await deleteUnusedMaster(companyId, 'This stone grade', (tx) => tx.stoneGrade.delete({ where: { id: req.params.id } }));
@@ -448,7 +445,7 @@ async function snapshotGradeClassification(companyId: string, stoneGradeId: stri
   };
 }
 
-mastersRouter.post('/price-master', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.post('/price-master', requirePermission('masters:create'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   const classification = await snapshotGradeClassification(companyId, req.body.stoneGradeId);
   const item = await tenantQuery(companyId, (tx) =>
@@ -470,7 +467,7 @@ mastersRouter.post('/price-master', requirePermission('masters:manage'), async (
   res.status(201).json({ success: true, data: item });
 });
 
-mastersRouter.patch('/price-master/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.patch('/price-master/:id', requirePermission('masters:edit'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('priceMaster', req.params.id, companyId, 'Price master entry');
   const data = pick(req.body, PRICE_MASTER_FIELDS);
@@ -481,7 +478,7 @@ mastersRouter.patch('/price-master/:id', requirePermission('masters:manage'), as
   res.json({ success: true, data: item });
 });
 
-mastersRouter.delete('/price-master/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.delete('/price-master/:id', requirePermission('masters:delete'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('priceMaster', req.params.id, companyId, 'Price master entry');
   await tenantQuery(companyId, (tx) => tx.priceMaster.update({ where: { id: req.params.id }, data: { isActive: false } }));
@@ -517,7 +514,7 @@ mastersRouter.get('/making-charges', requirePermission('masters:view'), async (r
   res.json({ success: true, data });
 });
 
-mastersRouter.post('/making-charges', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.post('/making-charges', requirePermission('masters:create'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   // Both are foreign master ids from the client — must be this company's own.
   await assertOwnedIfPresent('materialCode', req.body.materialCodeId, companyId, 'Material code');
@@ -543,7 +540,7 @@ mastersRouter.post('/making-charges', requirePermission('masters:manage'), async
   res.status(201).json({ success: true, data: item });
 });
 
-mastersRouter.patch('/making-charges/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.patch('/making-charges/:id', requirePermission('masters:edit'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('makingCharge', req.params.id, companyId, 'Making charge entry');
   await assertOwnedIfPresent('materialCode', req.body.materialCodeId, companyId, 'Material code');
@@ -554,7 +551,7 @@ mastersRouter.patch('/making-charges/:id', requirePermission('masters:manage'), 
   res.json({ success: true, data: item });
 });
 
-mastersRouter.delete('/making-charges/:id', requirePermission('masters:manage'), async (req: Request, res: Response) => {
+mastersRouter.delete('/making-charges/:id', requirePermission('masters:delete'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('makingCharge', req.params.id, companyId, 'Making charge entry');
   await tenantQuery(companyId, (tx) => tx.makingCharge.update({ where: { id: req.params.id }, data: { isActive: false } }));

@@ -51,18 +51,43 @@ ordersRouter.patch('/reservations/:id/release', requirePermission('reservation:m
   res.json({ success: true, message: 'Reservation released — stock returned to vault' });
 });
 
-ordersRouter.get('/clients', requirePermission('order:view'), async (req: Request, res: Response) => {
+// Client CRUD: gated by client:* rather than order:* — a client (customer/dealer) is retail/wholesale
+// party data, unrelated to the order:* permission family, which is production-order (SalesOrder, a
+// dormant manufacturing concept per CLAUDE.md §2). It lives in this router only because listClients/
+// createClient/updateClient already did (orders.service.ts predates the pivot); not moved to reduce
+// diff noise on an otherwise-unrelated change.
+ordersRouter.get('/clients', requirePermission('client:view'), async (req: Request, res: Response) => {
   res.json({ success: true, data: await svc.listClients(req.tenant!.companyId, qs(req, 'search')) });
 });
 
-ordersRouter.post('/clients', requirePermission('order:create'), async (req: Request, res: Response) => {
+ordersRouter.post('/clients', requirePermission('client:create'), async (req: Request, res: Response) => {
   const client = await svc.createClient(req.tenant!.companyId, req.body);
   res.status(201).json({ success: true, data: client });
 });
 
-ordersRouter.patch('/clients/:id', requirePermission('order:create'), async (req: Request, res: Response) => {
+ordersRouter.patch('/clients/:id', requirePermission('client:edit'), async (req: Request, res: Response) => {
   const client = await svc.updateClient(req.params.id, req.tenant!.companyId, req.body);
   res.json({ success: true, data: client });
+});
+
+// J3 Decision 3: deactivate/reactivate is its own permission, distinct from client:edit — a
+// lifecycle action (blocks future sales/memos/payments once set) rather than a detail edit.
+ordersRouter.patch('/clients/:id/deactivate', requirePermission('client:deactivate'), async (req: Request, res: Response) => {
+  const client = await svc.setClientActive(req.params.id, req.tenant!.companyId, false, req.user!.userId, req.body?.reason);
+  res.json({ success: true, data: client });
+});
+
+ordersRouter.patch('/clients/:id/reactivate', requirePermission('client:deactivate'), async (req: Request, res: Response) => {
+  const client = await svc.setClientActive(req.params.id, req.tenant!.companyId, true, req.user!.userId, req.body?.reason);
+  res.json({ success: true, data: client });
+});
+
+// J3 Decision 3: permanent removal, only when the client has zero transaction history anywhere —
+// see deleteClient(). Not the generic Delete button's behavior (that's Deactivate); a distinct,
+// higher-trust, reason-required action.
+ordersRouter.delete('/clients/:id', requirePermission('client:delete'), async (req: Request, res: Response) => {
+  const result = await svc.deleteClient(req.params.id, req.tenant!, req.user!.userId, req.body?.reason);
+  res.json({ success: true, data: result });
 });
 
 ordersRouter.get('/', requirePermission('order:view'), async (req: Request, res: Response) => {

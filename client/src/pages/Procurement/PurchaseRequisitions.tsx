@@ -322,6 +322,7 @@ function PRDrawer({ prId, onClose }: { prId: string; onClose: () => void }) {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export function PurchaseRequisitions() {
+  const hasPermission = useAuthStore((s) => s.hasPermission);
   const [createOpen, setCreateOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState('');
   const [selectedPRId, setSelectedPRId] = useState('');
@@ -351,7 +352,7 @@ export function PurchaseRequisitions() {
             <Typography variant="caption" color="text.secondary">{(data as any)?.total ?? 0} requisitions</Typography>
           </Grid>
           <Grid item sx={{ ml: 'auto', alignSelf: 'center' }}>
-            <PageActions actions={[{ label: 'New Requisition', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
+            <PageActions actions={hasPermission('po:create') ? [{ label: 'New Requisition', icon: <Add />, onClick: () => setCreateOpen(true) }] : []} />
           </Grid>
         </Grid>
       </Card>

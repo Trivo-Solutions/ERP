@@ -6,10 +6,12 @@ import { useForm, Controller, useFieldArray } from 'react-hook-form';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost } from '../../api/client';
 import { PageHeader } from '../../components/common/PageHeader';
+import { useAuthStore } from '../../store/auth.store';
 
 export function JournalEntries() {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
+  const hasPermission = useAuthStore((s) => s.hasPermission);
   const [createOpen, setCreateOpen] = useState(false);
 
   const { data, isLoading } = useQuery({ queryKey: ['journal-entries'], queryFn: () => apiGet<any[]>('/finance/journals') });
@@ -39,7 +41,7 @@ export function JournalEntries() {
   return (
     <Box>
       <PageHeader title="Journal Entries"
-        actions={[{ label: 'New Journal', icon: <Add />, onClick: () => setCreateOpen(true) }]} />
+        actions={hasPermission('journal:create') ? [{ label: 'New Journal', icon: <Add />, onClick: () => setCreateOpen(true) }] : []} />
 
       <Card>
         <Box sx={{ overflowX: 'auto' }}>
@@ -63,7 +65,9 @@ export function JournalEntries() {
                   <TableCell align="center">{je.lines?.length ?? 0}</TableCell>
                   <TableCell><Chip label={je.isPosted ? 'Posted' : 'Draft'} size="small" color={je.isPosted ? 'success' : 'default'} /></TableCell>
                   <TableCell>
-                    {!je.isPosted && <Button size="small" startIcon={<PlayArrow />} onClick={() => postMutation.mutate(je.id)}>Post</Button>}
+                    {!je.isPosted && hasPermission('journal:post') && (
+                      <Button size="small" startIcon={<PlayArrow />} onClick={() => postMutation.mutate(je.id)}>Post</Button>
+                    )}
                   </TableCell>
                 </TableRow>
               ))}

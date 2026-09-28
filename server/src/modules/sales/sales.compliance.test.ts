@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { platformPrisma as prisma } from '../../config/database'; // tests act as the platform/admin role for fixtures and verification; the code under test uses the runtime client
-import { createInvoice as _createInvoice, recordClientPayment, recordPayment, createMemoOut, convertMemoToInvoice } from './sales.service';
+import { createInvoice as _createInvoice, recordClientPayment, recordPayment, createMemoOut, convertMemoToInvoice, reverseInvoicePayment } from './sales.service';
 import { createClient, updateClient } from '../orders/orders.service';
 import { normalizePan, panFromGstin, assertPanIfRequired, CASH_RECEIPT_LIMIT, PAN_REQUIRED_ABOVE } from '../../shared/compliance';
 import { cleanupJournalEntries } from '../../test/ledger';
@@ -261,6 +261,29 @@ describe('PAN and cash-receipt compliance', () => {
         recordPayment({ invoiceId: inv.id, paymentDate: today(), amount: 250000, mode: 'CASH' }, tenant.ctx, userId)
       ).rejects.toThrow(/Cash limit/);
       await recordPayment({ invoiceId: inv.id, paymentDate: today(), amount: 250000, mode: 'BANK_TRANSFER' }, tenant.ctx, userId);
+    });
+
+    // J3.5 Finding 4: a reversed cash receipt didn't actually leave cash in hand — it must stop
+    // counting toward the client's daily ceiling, without weakening the check for a still-active one.
+    it('excludes a reversed cash payment from the daily total, but an active one still counts and still blocks', async () => {
+      const client = await cashClient();
+
+      const p1 = await recordClientPayment({ clientId: client.id, paymentDate: today(), amount: 150000, mode: 'CASH' }, tenant.ctx, userId);
+      paymentIds.push(p1.id);
+
+      // Without the fix, this would still fail: 150000 (reversed) + 199999 >= 200000.
+      await reverseInvoicePayment(p1.id, tenant.ctx, userId, 'keyed against the wrong client');
+      const p2 = await recordClientPayment({ clientId: client.id, paymentDate: today(), amount: 199999, mode: 'CASH' }, tenant.ctx, userId);
+      paymentIds.push(p2.id);
+
+      // No loophole: p2 is a real, active cash receipt — it still blocks a further cash payment the same day.
+      await expect(
+        recordClientPayment({ clientId: client.id, paymentDate: today(), amount: 1, mode: 'CASH' }, tenant.ctx, userId)
+      ).rejects.toThrow(/Cash limit \(Sec 269ST\).*₹1,99,999 already received/);
+
+      // ...but a non-cash payment of any size is still fine, exactly as before.
+      const p3 = await recordClientPayment({ clientId: client.id, paymentDate: today(), amount: 500000, mode: 'UPI' }, tenant.ctx, userId);
+      paymentIds.push(p3.id);
     });
   });
 });

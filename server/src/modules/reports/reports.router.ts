@@ -96,9 +96,13 @@ reportsRouter.get('/karigar-balances', requirePermission('report:view'), async (
   res.json({ success: true, data: artisans });
 });
 
-reportsRouter.get('/aging-receivables', requirePermission('report:view'), async (req: Request, res: Response) => {
+// J4-D1: same sensitivity class as finance/reports/dealer-aging (named customer balances + aging) —
+// gated consistently rather than leaving an equivalent report reachable via the narrower report:view.
+reportsRouter.get('/aging-receivables', requirePermission('report:financial_view'), async (req: Request, res: Response) => {
   const invoices = await tenantQuery(req.tenant!.companyId, (_tx) => _tx.salesInvoice.findMany({
-    where: { companyId: req.tenant!.companyId, status: { notIn: ['PAID', 'CANCELLED'] }, balanceDue: { gt: 0 } },
+    // J3.5 Finding 1: 'VOID' didn't exist when this list was written — a voided invoice keeps
+    // balanceDue == totalAmount by design and must not age here as a live receivable.
+    where: { companyId: req.tenant!.companyId, status: { notIn: ['PAID', 'CANCELLED', 'VOID'] }, balanceDue: { gt: 0 } },
     include: { client: { select: { name: true, clientCode: true } } },
     orderBy: { invoiceDate: 'asc' },
   }));

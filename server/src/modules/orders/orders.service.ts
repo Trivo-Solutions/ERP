@@ -5,6 +5,7 @@ import { createAuditEntry } from '../../middleware/audit';
 import { TenantContext, tenantTransaction, tenantQuery, tenantBatch } from '../../shared/tenantContext';
 import { assertOwnedByCompany } from '../../middleware/tenant';
 import { normalizePan } from '../../shared/compliance';
+import { isBlockedByForeignKey } from '../../shared/prismaErrors';
 
 export async function listOrders(companyId: string, filters: {
   status?: string; clientId?: string; priority?: string;
@@ -177,12 +178,16 @@ export async function listClients(companyId: string, search?: string) {
 type ClientWritable = {
   name: string; type: string; gstNumber: string; panNumber: string | null; form60Received: boolean;
   address: string; city: string; district: string; state: string; pincode: string; phone: string;
-  email: string; contactPerson: string; creditLimit: number; pricingTier: string; isActive: boolean;
+  email: string; contactPerson: string; creditLimit: number; pricingTier: string;
   dateOfBirth: Date | null;
 };
+// J3 Decision 3 (B1): isActive is deliberately NOT writable through ordinary client:edit — toggling
+// it is its own lifecycle action (client:deactivate — see setClientActive below), not a detail edit.
+// A delegate trusted to fix a client's phone number is not automatically trusted to make that
+// client un-billable.
 const CLIENT_WRITABLE_KEYS: Array<keyof ClientWritable> = [
   'name', 'type', 'gstNumber', 'panNumber', 'form60Received', 'address', 'city', 'district', 'state',
-  'pincode', 'phone', 'email', 'contactPerson', 'creditLimit', 'pricingTier', 'isActive',
+  'pincode', 'phone', 'email', 'contactPerson', 'creditLimit', 'pricingTier',
   'dateOfBirth',
 ];
 
@@ -221,4 +226,77 @@ export async function getClient(id: string, companyId: string) {
   const client = await tenantQuery(companyId, (_tx) => _tx.client.findUnique({ where: { id } }));
   if (!client || client.companyId !== companyId) throw new AppError('Client not found', 404);
   return client;
+}
+
+// J3 Decision 3 (B1): deactivate/reactivate is its own action — separately permissioned
+// (client:deactivate), separately audited, and fully reversible. It touches nothing else on the
+// row. The protective half (an inactive client is rejected for a NEW sale/memo/payment) lives at
+// the three call sites that start those transactions — see sales.service.ts.
+export async function setClientActive(
+  id: string, companyId: string, isActive: boolean, userId: string, reason: string | undefined,
+) {
+  const existing = await tenantQuery(companyId, (_tx) => _tx.client.findUnique({ where: { id } }));
+  if (!existing || existing.companyId !== companyId) throw new AppError('Client not found', 404);
+  if (existing.isActive === isActive) {
+    throw new AppError(`${existing.name} is already ${isActive ? 'active' : 'inactive'}`, 409);
+  }
+
+  const updated = await tenantQuery(companyId, (_tx) => _tx.client.update({ where: { id }, data: { isActive } }));
+  await createAuditEntry(
+    'clients', id, userId, isActive ? 'REACTIVATE' : 'DEACTIVATE',
+    { isActive: existing.isActive }, { isActive, reason: reason ?? null }, companyId,
+  );
+  return updated;
+}
+
+// J3 Decision 3: a real but narrow capability — permanent removal, only when the client has ZERO
+// rows across every one of the eight dependent relations (PHASE_J3_DESIGN_AUDIT.md §6). The FK
+// layer (every one of these relations is the Postgres default/RESTRICT, never CASCADE) already
+// guarantees this at the database level even if this count check had a bug — this is defense in
+// depth, not the only thing standing between a hard delete and an erased transaction history.
+// Never cascades; never touches the dependent rows themselves.
+export async function deleteClient(id: string, ctx: TenantContext, userId: string, reason: string) {
+  if (!reason || !reason.trim()) throw new AppError('A reason is required to permanently delete a client', 400);
+
+  const existing = await tenantQuery(ctx.companyId, (tx) => tx.client.findUnique({
+    where: { id },
+    include: {
+      _count: {
+        select: {
+          salesOrders: true, memoOuts: true, salesInvoices: true, salesReturns: true,
+          oldGoldExchanges: true, payments: true, repairJobs: true, manufacturedTags: true,
+        },
+      },
+    },
+  }));
+  if (!existing || existing.companyId !== ctx.companyId) throw new AppError('Client not found', 404);
+
+  const dependents = Object.entries(existing._count).filter(([, n]) => n > 0);
+  if (dependents.length > 0) {
+    throw new AppError(
+      `Cannot permanently delete ${existing.name}: this client has transaction history (${dependents.map(([k, n]) => `${n} ${k}`).join(', ')}). Deactivate it instead.`,
+      409,
+    );
+  }
+
+  // J3.5 Finding 6: the dependency count-check above and this delete are two separate statements —
+  // a dependent row created in that narrow window is still caught (the FK layer is the real backstop,
+  // per the comment above), but it would otherwise surface as a raw, ungraceful 500. Translate it into
+  // the same clean 409 the check above already gives for the non-racy case, matching the established
+  // isBlockedByForeignKey convention (masters.router.ts, settings.service.ts) — never weakened, just
+  // given a friendlier shape.
+  try {
+    await tenantTransaction(ctx.companyId, (tx) => tx.client.delete({ where: { id } }));
+  } catch (err) {
+    if (isBlockedByForeignKey(err)) {
+      throw new AppError(`Cannot permanently delete ${existing.name}: a transaction was recorded against this client just now. Deactivate it instead.`, 409);
+    }
+    throw err;
+  }
+  await createAuditEntry(
+    'clients', id, userId, 'FORCE_DELETE',
+    { name: existing.name, clientCode: existing.clientCode, type: existing.type, isActive: existing.isActive, reason },
+    undefined, ctx.companyId,
+  );
+  return { id, deleted: true };
 }

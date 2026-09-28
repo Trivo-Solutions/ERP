@@ -4,6 +4,7 @@ import { AppError } from '../../middleware/error';
 import {
   createRepairJob, updateRepairJob, deliverRepairJob, billRepairJob, createHallmarkingBatch,
 } from './quality.service';
+import { voidInvoice } from '../sales/sales.service';
 import { cleanupJournalEntries } from '../../test/ledger';
 import { createTestTenant, cleanupTestTenant, TestTenant } from '../../test/fixtures';
 
@@ -119,6 +120,62 @@ describe('Repair jobs (G1)', () => {
     invoiceIds.push(billed.invoiceId!);
 
     await expect(billRepairJob(repair.id, branchId, tenant.ctx, userId)).rejects.toThrow(AppError);
+  });
+
+  // J3.5 Finding 2: voiding a repair-billing invoice used to leave the repair job permanently
+  // unbillable (the old guard checked only whether invoiceId was set, never the linked invoice's
+  // status). Rebilling now succeeds once the previous invoice is VOID, reassigns invoiceId to the
+  // new invoice, and a second active billing is still blocked afterward — the old (voided) invoice
+  // stays a real, independently queryable SalesInvoice row; nothing is deleted.
+  describe('rebilling after the linked invoice is voided (J3.5 Finding 2)', () => {
+    it('a repair job whose invoice was voided can be billed again', async () => {
+      const repair = await makeRepair();
+      await updateRepairJob(repair.id, { repairCost: 1200 }, tenant.ctx);
+      const firstBill = await billRepairJob(repair.id, branchId, tenant.ctx, userId);
+      const firstInvoiceId = firstBill.invoiceId!;
+      invoiceIds.push(firstInvoiceId);
+
+      await voidInvoice(firstInvoiceId, tenant.ctx, userId, 'wrong amount keyed');
+
+      const rebilled = await billRepairJob(repair.id, branchId, tenant.ctx, userId);
+      expect(rebilled.invoiceId).toBeTruthy();
+      expect(rebilled.invoiceId).not.toBe(firstInvoiceId);
+      invoiceIds.push(rebilled.invoiceId!);
+
+      // The old invoice is untouched history, not deleted or reassigned away from its own facts.
+      const oldInvoice = await prisma.salesInvoice.findUniqueOrThrow({ where: { id: firstInvoiceId } });
+      expect(oldInvoice.status).toBe('VOID');
+
+      const audit = await prisma.auditLog.findFirst({ where: { recordId: repair.id, action: 'REBILL' } });
+      expect(audit).not.toBeNull();
+      expect((audit!.oldValues as any).invoiceId).toBe(firstInvoiceId);
+      expect((audit!.newValues as any).invoiceId).toBe(rebilled.invoiceId);
+    });
+
+    it('after rebilling, a second active billing is still blocked', async () => {
+      const repair = await makeRepair();
+      await updateRepairJob(repair.id, { repairCost: 900 }, tenant.ctx);
+      const firstBill = await billRepairJob(repair.id, branchId, tenant.ctx, userId);
+      invoiceIds.push(firstBill.invoiceId!);
+      await voidInvoice(firstBill.invoiceId!, tenant.ctx, userId, 'test');
+
+      const rebilled = await billRepairJob(repair.id, branchId, tenant.ctx, userId);
+      invoiceIds.push(rebilled.invoiceId!);
+
+      await expect(billRepairJob(repair.id, branchId, tenant.ctx, userId)).rejects.toThrow(/already billed/);
+    });
+
+    it('rejects a cross-company repair job id (404, indistinguishable from nonexistent)', async () => {
+      const other = await createTestTenant(`REPAIROTHER${suffix}`, ['invoice:create', 'repair:manage']);
+      try {
+        const repair = await makeRepair();
+        await updateRepairJob(repair.id, { repairCost: 500 }, tenant.ctx);
+        // This tenant's own repair id, but a DIFFERENT company's tenant context/branch attempting to bill it.
+        await expect(billRepairJob(repair.id, other.branch.id, other.ctx, other.user.id)).rejects.toThrow(/not found/i);
+      } finally {
+        await cleanupTestTenant(other);
+      }
+    });
   });
 });
 

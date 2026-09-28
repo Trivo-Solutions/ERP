@@ -3,7 +3,7 @@ import {
   DesignServices, ShoppingCart, Inventory2, Assignment, Factory,
   Engineering, Verified, PointOfSale, AccountBalance,
   Dashboard, Settings,
-  HardwareOutlined, Assessment, AltRoute, Style, Tune, Calculate,
+  HardwareOutlined, Assessment, AltRoute, Style, Tune, Calculate, People,
 } from '@mui/icons-material';
 
 export interface NavItem {
@@ -29,7 +29,8 @@ export const NAV_ITEMS: NavItem[] = [
     children: [
       { label: 'Purchase Requisitions', path: '/procurement/requisitions', permission: 'po:view' },
       { label: 'Purchase Orders', path: '/procurement/orders', permission: 'po:view' },
-      { label: 'GRN Verification', path: '/procurement/grn', permission: 'grn:create' },
+      // J4-D5: GET /procurement/grn now requires grn:view, not grn:create.
+      { label: 'GRN Verification', path: '/procurement/grn', permission: 'grn:view' },
       { label: 'Purchase Returns', path: '/procurement/returns', permission: 'po:view' },
       { label: 'Suppliers', path: '/procurement/suppliers', permission: 'po:view' },
     ],
@@ -46,7 +47,7 @@ export const NAV_ITEMS: NavItem[] = [
     label: 'Orders', icon: <Assignment />, permission: 'order:view',
     children: [
       { label: 'Sales Orders', path: '/orders', permission: 'order:view' },
-      { label: 'Clients', path: '/orders/clients', permission: 'order:view' },
+      { label: 'Clients', path: '/orders/clients', permission: 'client:view' },
       { label: 'Reservations', path: '/orders/reservations', permission: 'reservation:manage' },
     ],
   },
@@ -70,7 +71,10 @@ export const NAV_ITEMS: NavItem[] = [
     label: 'Quality & Compliance', icon: <Verified />, permission: 'hallmark:manage',
     children: [
       { label: 'Hallmarking', path: '/quality/hallmarking', permission: 'hallmark:manage' },
-      { label: 'Repair Jobs', path: '/quality/repairs', permission: 'repair:manage' },
+      // Loosened from repair:manage to repair:view — opening the page (viewing repairs) shouldn't
+      // require the workflow-action permission; the page's own create/deliver/bill actions still
+      // check repair:create/repair:manage individually.
+      { label: 'Repair Jobs', path: '/quality/repairs', permission: 'repair:view' },
     ],
   },
   {
@@ -78,10 +82,10 @@ export const NAV_ITEMS: NavItem[] = [
     children: [
       { label: 'Tags & Inventory',  path: '/tagging/tags',      permission: 'tag:view' },
       { label: 'Stock Lookup',      path: '/tagging/lookup',    permission: 'tag:view' },
-      { label: 'Tag Label Designer', path: '/tagging/templates', permission: 'tagTemplate:manage' },
+      { label: 'Tag Label Designer', path: '/tagging/templates', permission: 'tagTemplate:view' },
       { label: 'Branch Stock Summary', path: '/tagging/branch-stock', permission: 'tag:view' },
       { label: 'Stock Audit',       path: '/tagging/audits',    permission: 'stock:view' },
-      { label: 'Branches',          path: '/tagging/branches',  permission: 'branch:manage' },
+      { label: 'Branches',          path: '/tagging/branches',  permission: 'branch:create' },
       { label: 'Branch Transfers',  path: '/tagging/transfers', permission: 'branch:transfer' },
       { label: 'Branch Receives',   path: '/tagging/receives',  permission: 'branch:transfer' },
     ],
@@ -92,7 +96,7 @@ export const NAV_ITEMS: NavItem[] = [
     label: 'Estimation', icon: <Calculate />, permission: 'estimation:view',
     children: [
       { label: 'Estimate a Piece', path: '/estimation', permission: 'estimation:view' },
-      { label: 'Estimate Templates', path: '/estimation/templates', permission: 'estimateTemplate:manage' },
+      { label: 'Estimate Templates', path: '/estimation/templates', permission: 'estimateTemplate:view' },
     ],
   },
   {
@@ -108,12 +112,14 @@ export const NAV_ITEMS: NavItem[] = [
     children: [
       { label: 'Journal Entries', path: '/finance/journals', permission: 'journal:create' },
       { label: 'Chart of Accounts', path: '/finance/accounts', permission: 'finance:view' },
-      { label: 'Trial Balance', path: '/finance/trial-balance', permission: 'report:view' },
-      { label: 'P&L Statement', path: '/finance/pnl', permission: 'report:view' },
+      // J4-D1: these six now require report:financial_view on the backend (sensitive financial
+      // detail) — Cost Centers stayed on report:view (finance:view actually gates its list route).
+      { label: 'Trial Balance', path: '/finance/trial-balance', permission: 'report:financial_view' },
+      { label: 'P&L Statement', path: '/finance/pnl', permission: 'report:financial_view' },
       { label: 'Cost Centers', path: '/finance/cost-centers', permission: 'report:view' },
-      { label: 'Dealer Aging', path: '/finance/dealer-aging', permission: 'report:view' },
-      { label: 'Client Ledger', path: '/finance/client-ledger', permission: 'report:view' },
-      { label: 'Supplier Ledger', path: '/finance/supplier-ledger', permission: 'report:view' },
+      { label: 'Dealer Aging', path: '/finance/dealer-aging', permission: 'report:financial_view' },
+      { label: 'Client Ledger', path: '/finance/client-ledger', permission: 'report:financial_view' },
+      { label: 'Supplier Ledger', path: '/finance/supplier-ledger', permission: 'report:financial_view' },
     ],
   },
   {
@@ -122,17 +128,28 @@ export const NAV_ITEMS: NavItem[] = [
       { label: 'WIP Summary', path: '/reports/wip', permission: 'report:view' },
       { label: 'Stock Summary', path: '/reports/stock', permission: 'report:view' },
       { label: 'Karigar Balances', path: '/reports/karigar', permission: 'report:view' },
-      { label: 'Aging Receivables', path: '/reports/aging', permission: 'report:view' },
+      // J4-D1: same sensitivity class as Dealer Aging above — requires report:financial_view.
+      { label: 'Aging Receivables', path: '/reports/aging', permission: 'report:financial_view' },
       { label: 'Sales Register', path: '/reports/sales-register', permission: 'report:view' },
       { label: 'Stock Book', path: '/reports/stock-book', permission: 'report:view' },
       { label: 'Stock on Hand', path: '/reports/stock-on-hand', permission: 'report:view' },
       { label: 'Dead Stock / Ageing', path: '/reports/dead-stock', permission: 'report:view' },
-      { label: 'Day Book', path: '/reports/day-book', permission: 'report:view' },
-      { label: 'GST Summary', path: '/reports/gst-summary', permission: 'report:view' },
-      { label: 'Purchase GST (ITC)', path: '/reports/purchase-gst-summary', permission: 'report:view' },
+      { label: 'Day Book', path: '/reports/day-book', permission: 'report:financial_view' },
+      { label: 'GST Summary', path: '/reports/gst-summary', permission: 'report:financial_view' },
+      { label: 'Purchase GST (ITC)', path: '/reports/purchase-gst-summary', permission: 'report:financial_view' },
     ],
   },
   { label: 'Hardware', icon: <HardwareOutlined />, path: '/hardware', permission: 'hardware:manage' },
   { label: 'Masters', icon: <Tune />, path: '/masters', permission: 'masters:view' },
+  {
+    label: 'Management', icon: <People />, permission: 'user:manage',
+    children: [
+      { label: 'Users', path: '/settings/users', permission: 'user:manage' },
+      // J4: role:manage was retired (migration 20260927150000_split_role_manage_permission) and is
+      // no longer a valid catalog string — this nav entry was permanently unreachable for every
+      // role except a '*' wildcard. role:view mirrors the read-oriented convention used elsewhere.
+      { label: 'Roles & Permissions', path: '/settings/roles', permission: 'role:view' },
+    ],
+  },
   { label: 'Settings', icon: <Settings />, path: '/settings', permission: 'system:config' },
 ];

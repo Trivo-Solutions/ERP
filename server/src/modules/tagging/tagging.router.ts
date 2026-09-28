@@ -52,12 +52,12 @@ taggingRouter.get('/reports/dead-stock', requirePermission('report:view'), async
   res.json({ success: true, data });
 });
 
-taggingRouter.post('/branches', requirePermission('branch:manage'), async (req: Request, res: Response) => {
+taggingRouter.post('/branches', requirePermission('branch:create'), async (req: Request, res: Response) => {
   const branch = await svc.createBranch(req.tenant!.companyId, req.body);
   res.status(201).json({ success: true, data: branch });
 });
 
-taggingRouter.patch('/branches/:id', requirePermission('branch:manage'), async (req: Request, res: Response) => {
+taggingRouter.patch('/branches/:id', requirePermission('branch:edit'), async (req: Request, res: Response) => {
   const branch = await svc.updateBranch(req.params.id, req.tenant!.companyId, req.body);
   res.json({ success: true, data: branch });
 });
@@ -142,20 +142,20 @@ taggingRouter.post('/lots/:id/close', requirePermission('tag:create'), async (re
 
 // ─── Tag Templates (Stage 3: the visual designer) ─────────────────────────────
 
-taggingRouter.get('/templates', requirePermission('tagTemplate:manage'), async (req: Request, res: Response) => {
+taggingRouter.get('/templates', requirePermission('tagTemplate:view'), async (req: Request, res: Response) => {
   res.json({ success: true, data: await svc.listTagTemplates(req.tenant!.companyId) });
 });
 
-taggingRouter.get('/templates/:id', requirePermission('tagTemplate:manage'), async (req: Request, res: Response) => {
+taggingRouter.get('/templates/:id', requirePermission('tagTemplate:view'), async (req: Request, res: Response) => {
   res.json({ success: true, data: await svc.getTagTemplateById(req.tenant!.companyId, req.params.id) });
 });
 
-taggingRouter.post('/templates', requirePermission('tagTemplate:manage'), async (req: Request, res: Response) => {
+taggingRouter.post('/templates', requirePermission('tagTemplate:create'), async (req: Request, res: Response) => {
   const template = await svc.createTagTemplate(req.tenant!.companyId, req.body, req.user!.userId);
   res.status(201).json({ success: true, data: template });
 });
 
-taggingRouter.put('/templates/:id', requirePermission('tagTemplate:manage'), async (req: Request, res: Response) => {
+taggingRouter.put('/templates/:id', requirePermission('tagTemplate:edit'), async (req: Request, res: Response) => {
   const template = await svc.updateTagTemplate(req.tenant!.companyId, req.params.id, req.body);
   res.json({ success: true, data: template });
 });

@@ -8,6 +8,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost } from '../../api/client';
 import { PageHeader } from '../../components/common/PageHeader';
+import { useAuthStore } from '../../store/auth.store';
 
 function fmt(n: number) {
   return '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
@@ -16,6 +17,8 @@ function fmt(n: number) {
 export function PurchaseReturns() {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
+  // POST /procurement/returns is gated by po:approve server-side (see procurement.router.ts).
+  const canReturn = useAuthStore((s) => s.hasPermission('po:approve'));
   const [supplierId, setSupplierId] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
   const [reason, setReason] = useState('');
@@ -100,15 +103,17 @@ export function PurchaseReturns() {
                       </Typography>
                     </Stack>
                   ))}
-                  <Stack direction="row" spacing={1} alignItems="flex-start" sx={{ pt: 1 }}>
-                    <TextField size="small" label="Reason (optional)" value={reason}
-                      onChange={(e) => setReason(e.target.value)} sx={{ flex: 1 }} />
-                    <Button variant="contained" color="warning" size="small" startIcon={<Undo />}
-                      disabled={selected.length === 0 || mutation.isPending}
-                      onClick={() => mutation.mutate()} sx={{ height: 40 }}>
-                      Return Selected
-                    </Button>
-                  </Stack>
+                  {canReturn && (
+                    <Stack direction="row" spacing={1} alignItems="flex-start" sx={{ pt: 1 }}>
+                      <TextField size="small" label="Reason (optional)" value={reason}
+                        onChange={(e) => setReason(e.target.value)} sx={{ flex: 1 }} />
+                      <Button variant="contained" color="warning" size="small" startIcon={<Undo />}
+                        disabled={selected.length === 0 || mutation.isPending}
+                        onClick={() => mutation.mutate()} sx={{ height: 40 }}>
+                        Return Selected
+                      </Button>
+                    </Stack>
+                  )}
                 </Stack>
               )}
             </Box>

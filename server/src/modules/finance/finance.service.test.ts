@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { platformPrisma as prisma } from '../../config/database'; // tests act as the platform/admin role for fixtures and verification; the code under test uses the runtime client
 import { getDealerAging, getClientLedger, getDayBook, getGstSummary } from './finance.service';
-import { createInvoice } from '../sales/sales.service';
+import { createInvoice, voidInvoice } from '../sales/sales.service';
 import { cleanupJournalEntries } from '../../test/ledger';
 import { createTestTenant, cleanupTestTenant, TestTenant } from '../../test/fixtures';
 
@@ -110,6 +110,24 @@ describe('getDealerAging (F3)', () => {
     const idxB = result.rows.findIndex((r) => r.clientId === clientBId);
     expect(idxA).toBeLessThan(idxB); // A owes 150000, B owes 5000
   });
+
+  // J3.5 Finding 1: a VOID invoice keeps balanceDue == totalAmount (voidInvoice never zeroes it —
+  // eligibility already required zero payments) but is not a live receivable and must not age.
+  it('excludes a VOID invoice, even though its balanceDue is still positive', async () => {
+    const voided = await prisma.salesInvoice.create({
+      data: {
+        companyId: tenant.company.id, branchId: tenant.branch.id,
+        invoiceNumber: `TSTINV-AGE-${suffix}-void`, clientId: clientBId,
+        invoiceDate: daysAgo(50), dueDate: daysAgo(50), invoiceType: 'RETAIL',
+        subtotal: 77777, totalAmount: 77777, balanceDue: 77777, status: 'VOID',
+      },
+    });
+    invoiceIds.push(voided.id);
+
+    const result = await getDealerAging(tenant.company.id, asOf);
+    const rowB = result.rows.find((r) => r.clientId === clientBId)!;
+    expect(rowB.total).toBeCloseTo(5000); // unchanged — the voided invoice contributes nothing
+  });
 });
 
 // F4: one client's statement — every SalesInvoice (debit), InvoicePayment (credit), SalesReturn
@@ -214,6 +232,27 @@ describe('getClientLedger (F4)', () => {
     expect(result.openingBalance).toBe(0);
     expect(result.closingBalance).toBe(0);
   });
+
+  // J3.5 Finding 1: a VOID invoice's debit was already reversed (client.currentBalance decremented
+  // in the same transaction as the void) — without this exclusion the statement would show an
+  // extra, un-offset debit and closingBalance would stop matching Client.currentBalance (the
+  // exact reconciliation break the safety audit found).
+  it('excludes a VOID invoice so the statement keeps reconciling to Client.currentBalance', async () => {
+    const voided = await prisma.salesInvoice.create({
+      data: {
+        companyId: tenant.company.id, branchId: tenant.branch.id,
+        invoiceNumber: `TSTINV-LEDGER-${suffix}-void`, clientId, invoiceDate: d('2026-01-20'),
+        invoiceType: 'WHOLESALE', subtotal: 99999, totalAmount: 99999, balanceDue: 99999, status: 'VOID',
+      },
+    });
+
+    const result = await getClientLedger(tenant.ctx, clientId);
+    expect(result.rows.some((r) => r.refNumber === voided.invoiceNumber)).toBe(false);
+    expect(result.closingBalance).toBeCloseTo(35000); // unchanged from the earlier test — still reconciles
+    expect(result.closingBalance).toBeCloseTo(result.client.currentBalance);
+
+    await prisma.salesInvoice.deleteMany({ where: { id: voided.id } });
+  });
 });
 
 // H4: one day's company-wide rollup — sales/payments/returns/exchanges. Rows are created directly
@@ -316,6 +355,24 @@ describe('getDayBook (H4)', () => {
     const result = await getDayBook(tenant.company.id, targetDate);
     expect(result.sales.rows.some((r) => r.amount === 99999)).toBe(false);
   });
+
+  // J3.5 Finding 1: a voided invoice keeps its original invoiceDate — without this exclusion it
+  // would inflate this day's sales total forever, however long after this day it was voided.
+  it('excludes a VOID invoice from the sales rollup', async () => {
+    const voided = await prisma.salesInvoice.create({
+      data: {
+        companyId: tenant.company.id, branchId: tenant.branch.id,
+        invoiceNumber: `TSTINV-DAYBOOK-${suffix}-void`, clientId, invoiceDate: targetDate,
+        invoiceType: 'RETAIL', subtotal: 55555, totalAmount: 55555, balanceDue: 55555, status: 'VOID',
+      },
+    });
+    otherIds.salesInvoice.push(voided.id);
+
+    const result = await getDayBook(tenant.company.id, targetDate);
+    expect(result.sales.count).toBe(1); // unchanged — still just the one active invoice
+    expect(result.sales.totalAmount).toBeCloseTo(20000);
+    expect(result.sales.rows.some((r) => r.amount === 55555)).toBe(false);
+  });
 });
 
 // H5: GST HSN-wise summary for a period. Uses real createInvoice() runs (not direct rows) because
@@ -416,5 +473,29 @@ describe('getGstSummary (H5)', () => {
     const altRow = result.rows.find((r) => r.hsnCode === `TSTHSN-${suffix}`)!;
     expect(altRow.taxRate).toBeCloseTo(0.05);
     expect(altRow.taxableValue).toBeGreaterThan(0);
+  });
+
+  // J3.5 Finding 1: a voided invoice's lines were never actually a taxable sale — this uses the
+  // real voidInvoice() flow (not a direct row edit) to prove the end-to-end interaction, not just
+  // the query's own status filter in isolation.
+  it('excludes a voided invoice\'s lines from the GST summary', async () => {
+    const before = await getGstSummary(tenant.company.id, new Date('2026-05-01'), new Date('2026-05-31'));
+    const taxableBefore = before.rows.find((r) => r.hsnCode === '7113' && r.taxRate === 0.03)!.taxableValue;
+
+    const invoice = await createInvoice(
+      { clientId: intraClientId, invoiceDate, invoiceType: 'RETAIL', branchId: tenant.branch.id, items: [baseItem()] },
+      tenant.ctx, userId
+    );
+    invoiceIds.push(invoice.id);
+
+    const afterCreate = await getGstSummary(tenant.company.id, new Date('2026-05-01'), new Date('2026-05-31'));
+    const taxableAfterCreate = afterCreate.rows.find((r) => r.hsnCode === '7113' && r.taxRate === 0.03)!.taxableValue;
+    expect(taxableAfterCreate).toBeGreaterThan(taxableBefore); // sanity: the fresh invoice did contribute
+
+    await voidInvoice(invoice.id, tenant.ctx, userId, 'test reason');
+
+    const afterVoid = await getGstSummary(tenant.company.id, new Date('2026-05-01'), new Date('2026-05-31'));
+    const taxableAfterVoid = afterVoid.rows.find((r) => r.hsnCode === '7113' && r.taxRate === 0.03)?.taxableValue ?? 0;
+    expect(taxableAfterVoid).toBeCloseTo(taxableBefore); // back to what it was before this invoice existed
   });
 });
