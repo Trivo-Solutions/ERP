@@ -4,10 +4,12 @@
   "description": "Local print agent for a counter PC's USB-attached TSC TTP-244 Pro. Receives TSPL from the SEA ERP web app over localhost and writes it straight to the Windows printer queue.",
   "private": true,
   "main": "dist/index.js",
+  "bin": "dist/index.js",
   "scripts": {
     "dev": "nodemon --watch src --ext ts --exec ts-node src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "package": "npm run build && pkg . --output dist-exe/printer-agent.exe"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -19,7 +21,12 @@
     "@types/express": "^4.17.25",
     "@types/node": "^22.10.0",
     "nodemon": "^3.1.9",
+    "pkg": "^5.8.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.7.2"
+  },
+  "pkg": {
+    "targets": ["node18-win-x64"],
+    "assets": ["scripts/print-raw.ps1"]
   }
 }

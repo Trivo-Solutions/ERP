@@ -12,6 +12,7 @@ import { PageHeader } from '../../components/common/PageHeader';
 import { SelectField } from '../../components/fields/SelectField';
 import { NumberField } from '../../components/fields/NumberField';
 import { printTsplViaAgent } from '../../utils/printAgent';
+import { printAgentSnackbarAction } from '../../utils/printAgentSnackbarAction';
 
 // Must match server/src/shared/tsplGenerator.ts's KNOWN_BOUND_FIELDS exactly — this is the
 // contract between what a template element can point at and what generateTsplForTag can resolve.
@@ -239,7 +240,7 @@ export function TagTemplateDesignerPage() {
       await printTsplViaAgent(tspl);
     },
     onSuccess: () => enqueueSnackbar('Test label sent to printer', { variant: 'success' }),
-    onError: (e: any) => enqueueSnackbar(e.message ?? 'Test print failed', { variant: 'error' }),
+    onError: (e: any) => enqueueSnackbar(e.message ?? 'Test print failed', { variant: 'error', action: printAgentSnackbarAction(e) }),
   });
 
   return (

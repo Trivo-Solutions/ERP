@@ -18,6 +18,7 @@ import { usePermissions } from '../../hooks/usePermissions';
 import { SelectField } from '../../components/fields/SelectField';
 import { NumberField } from '../../components/fields/NumberField';
 import { printTsplViaAgent } from '../../utils/printAgent';
+import { printAgentSnackbarAction } from '../../utils/printAgentSnackbarAction';
 
 const FINISHED_GOODS = 'FINISHED_GOODS';
 const FINISHED_LOT = 'FINISHED_LOT';
@@ -364,7 +365,7 @@ function TagFromGrnDialog({ grn, item, onClose }: { grn: any | null; item: any |
       await printTsplViaAgent(tspl);
     },
     onSuccess: () => enqueueSnackbar('Label sent to printer', { variant: 'success' }),
-    onError: (e: any) => enqueueSnackbar(e.message ?? 'Print failed', { variant: 'error' }),
+    onError: (e: any) => enqueueSnackbar(e.message ?? 'Print failed', { variant: 'error', action: printAgentSnackbarAction(e) }),
   });
 
   const close = () => { setCreatedTag(null); onClose(); };

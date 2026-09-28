@@ -4,13 +4,14 @@ import {
   Alert, Table, TableHead, TableBody, TableRow, TableCell, Divider, Tooltip,
 } from '@mui/material';
 import { useQuery, useMutation } from '@tanstack/react-query';
-import { Scale, QrCode, Nfc, Link as LinkIcon, LinkOff, Usb } from '@mui/icons-material';
+import { Scale, QrCode, Nfc, Link as LinkIcon, LinkOff, Usb, Print, Download } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost } from '../../api/client';
 import { PageHeader } from '../../components/common/PageHeader';
 import { useScaleReading } from '../../hooks/useSocket';
 import { useWebSerial } from '../../hooks/useWebSerial';
 import { useUiStore } from '../../store/ui.store';
+import { getPrintAgentStatus, PRINT_AGENT_DOWNLOAD_URL } from '../../utils/printAgent';
 
 export function HardwarePage() {
   const { enqueueSnackbar } = useSnackbar();
@@ -39,6 +40,15 @@ export function HardwarePage() {
     queryKey: ['hardware-devices'],
     queryFn: () => apiGet<any>('/hardware/devices'),
     refetchInterval: 10_000,
+  });
+
+  // Local print agent (printer-agent/) — a separate process on this same PC, not a backend
+  // device, so this polls it directly rather than through /hardware/devices.
+  const { data: printAgentStatus, isError: printAgentOffline } = useQuery({
+    queryKey: ['print-agent-status'],
+    queryFn: getPrintAgentStatus,
+    refetchInterval: 10_000,
+    retry: false,
   });
 
   const simulateMutation = useMutation({
@@ -248,6 +258,51 @@ export function HardwarePage() {
                   )}
                 </TableBody>
               </Table>
+            </CardContent>
+          </Card>
+        </Grid>
+
+        {/* ── Label Printer Agent ──────────────────────────────────────── */}
+        <Grid item xs={12} md={4}>
+          <Card>
+            <CardContent>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
+                <Print color="primary" />
+                <Typography variant="subtitle1" fontWeight={700}>Label Printer Agent</Typography>
+                <Chip
+                  label={printAgentStatus?.online ? 'ONLINE' : printAgentOffline ? 'NOT RUNNING' : 'CHECKING...'}
+                  size="small"
+                  color={printAgentStatus?.online ? 'success' : printAgentOffline ? 'error' : 'default'}
+                />
+              </Box>
+
+              <Alert severity="info" sx={{ mb: 2, fontSize: 12 }}>
+                A small app that runs on this counter PC and talks to its USB-attached label
+                printer — separate from the ERP web app itself. One-time setup per PC.
+              </Alert>
+
+              {printAgentStatus && (
+                <Typography variant="body2" sx={{ mb: 2 }}>
+                  {printAgentStatus.printerName} — {printAgentStatus.statusText}
+                </Typography>
+              )}
+
+              <Button
+                fullWidth
+                variant="contained"
+                startIcon={<Download />}
+                href={PRINT_AGENT_DOWNLOAD_URL}
+                download
+                sx={{ mb: 1 }}
+              >
+                Download Print Agent
+              </Button>
+
+              <Typography variant="caption" color="text.secondary" component="div">
+                Extract the zip, copy <code>.env.example</code> to <code>.env</code> and set your
+                printer's exact Windows name, then run <code>printer-agent.exe</code>. No Node or
+                other setup needed. Full steps are in the zip's README.
+              </Typography>
             </CardContent>
           </Card>
         </Grid>

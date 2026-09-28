@@ -1,10 +1,24 @@
 import path from 'path';
 import os from 'os';
+import fsSync from 'fs';
 import fs from 'fs/promises';
 import crypto from 'crypto';
 import { spawn } from 'child_process';
 
-const PRINT_SCRIPT = path.resolve(__dirname, '..', 'scripts', 'print-raw.ps1');
+const BUNDLED_SCRIPT = path.resolve(__dirname, '..', 'scripts', 'print-raw.ps1');
+
+// When packaged with `pkg`, bundled assets live in a virtual snapshot filesystem that only this
+// Node process can read — powershell.exe is a separate process and needs a real path on disk, so
+// extract the script once (no-op in the normal, non-pkg dev/prod run).
+let extractedScriptPath: string | null = null;
+function getPrintScriptPath(): string {
+  if (!extractedScriptPath) {
+    const dest = path.join(os.tmpdir(), 'sea-erp-print-raw.ps1');
+    fsSync.writeFileSync(dest, fsSync.readFileSync(BUNDLED_SCRIPT));
+    extractedScriptPath = dest;
+  }
+  return extractedScriptPath;
+}
 
 function runPowerShell(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
@@ -23,7 +37,7 @@ export async function printTspl(printerName: string, tspl: string): Promise<void
   await fs.writeFile(tmpFile, tspl);
   try {
     const { code, stdout, stderr } = await runPowerShell([
-      '-File', PRINT_SCRIPT, '-PrinterName', printerName, '-FilePath', tmpFile,
+      '-File', getPrintScriptPath(), '-PrinterName', printerName, '-FilePath', tmpFile,
     ]);
     if (code !== 0) {
       throw new Error(stderr.trim() || stdout.trim() || `print-raw.ps1 exited with code ${code}`);

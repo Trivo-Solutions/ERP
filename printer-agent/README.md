@@ -12,12 +12,25 @@ commands reach the printer unmodified).
    first (Control Panel > Devices and Printers > right-click > Printer properties > Print Test
    Page). This proves USB + driver are fine before this agent is involved at all.
 2. Note the printer's exact name as Windows shows it (or run `Get-Printer` in PowerShell).
-3. Copy `.env.example` to `.env` and set `PRINTER_NAME` to that exact name.
-4. Run `start.bat` (double-click, or from a terminal). The first run installs dependencies and
-   builds; later runs just start the agent.
+3. From the ERP web app, go to **Hardware** (or any "print agent not running" prompt) and click
+   **Download Print Agent** — this fetches `printer-agent.zip` straight from the ERP site itself,
+   no git or USB drive needed. Extract it anywhere on the counter PC.
+4. Copy `.env.example` to `.env` (same folder as the exe) and set `PRINTER_NAME` to the exact name
+   from step 2.
+5. Run `printer-agent.exe` (double-click). It's a standalone build — no Node/npm required on the
+   counter PC.
 
 Leave the window open — this is a foreground process for now. Running it as a proper Windows
 service / autostart-at-login is a documented fast-follow, not required to use printing today.
+
+### Building from source instead (development)
+
+Only needed if you're changing the agent's code. Copy `.env.example` to `.env`, set
+`PRINTER_NAME`, then run `start.bat` (double-click, or from a terminal) — the first run installs
+dependencies and builds via `tsc`; later runs just start the agent with plain `node`/`ts-node`.
+The downloadable `.exe` above is built from this same source with `npm run package` (uses `pkg`
+to bundle Node itself — see `package.json`'s `pkg` config) and is what `client/Dockerfile` ships
+under `/downloads/printer-agent.zip` on every deploy.
 
 ## API
 
