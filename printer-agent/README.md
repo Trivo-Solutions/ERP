@@ -30,7 +30,9 @@ Only needed if you're changing the agent's code. Copy `.env.example` to `.env`, 
 dependencies and builds via `tsc`; later runs just start the agent with plain `node`/`ts-node`.
 The downloadable `.exe` above is built from this same source with `npm run package` (uses `pkg`
 to bundle Node itself — see `package.json`'s `pkg` config) and is what `client/Dockerfile` ships
-under `/downloads/printer-agent.zip` on every deploy.
+under `/downloads/printer-agent.zip` on every deploy. On a native (non-Docker) deploy, run
+`scripts/build-download-package.ps1` before building the client — it does the same build + zip
+step by hand.
 
 ## API
 
