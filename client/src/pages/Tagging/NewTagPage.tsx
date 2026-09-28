@@ -18,6 +18,7 @@ import { PageHeader } from '../../components/common/PageHeader';
 import { stoneGradeCode } from '../../utils/stoneGrade';
 import { findMakingCharge, computeLineAmount, computeMakingAmount } from '../../utils/estimateCalc';
 import { getPrintAgentStatus, printTsplViaAgent } from '../../utils/printAgent';
+import { printAgentSnackbarAction } from '../../utils/printAgentSnackbarAction';
 
 const MAKE_TYPES  = ['GOLD', 'DIAMOND', 'SILVER', 'PLATINUM', 'OTHER'];
 
@@ -822,7 +823,7 @@ export function NewTagPage() {
       await printTsplViaAgent(tspl);
     },
     onSuccess: () => enqueueSnackbar('Label sent to printer', { variant: 'success' }),
-    onError: (e: any) => enqueueSnackbar(e.message ?? 'Print failed', { variant: 'error' }),
+    onError: (e: any) => enqueueSnackbar(e.message ?? 'Print failed', { variant: 'error', action: printAgentSnackbarAction(e) }),
   });
 
   const handleSaveAndNew = () => {

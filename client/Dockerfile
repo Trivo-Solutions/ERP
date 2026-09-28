@@ -10,6 +10,20 @@ RUN npm ci --workspace=client --include-workspace-root=false
 
 COPY client ./client
 
+# Build the counter-PC print agent into a standalone Windows .exe (bundles Node itself — no
+# Node/npm prerequisite on the counter PC) and ship it as a browser download alongside the SPA,
+# so store staff can get it from the ERP site itself instead of someone carrying a USB drive
+# around. See printer-agent/README.md.
+COPY printer-agent ./printer-agent
+RUN apt-get update && apt-get install -y --no-install-recommends zip && rm -rf /var/lib/apt/lists/*
+RUN npm --prefix printer-agent ci && npm --prefix printer-agent run package
+RUN mkdir -p /tmp/printer-agent-download \
+    && cp printer-agent/dist-exe/printer-agent.exe /tmp/printer-agent-download/ \
+    && cp printer-agent/.env.example /tmp/printer-agent-download/ \
+    && cp printer-agent/README.md /tmp/printer-agent-download/ \
+    && mkdir -p client/public/downloads \
+    && (cd /tmp/printer-agent-download && zip -r /app/client/public/downloads/printer-agent.zip .)
+
 ARG VITE_API_URL
 ENV VITE_API_URL=${VITE_API_URL}
 

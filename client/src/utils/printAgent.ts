@@ -4,6 +4,19 @@
 // where the web app itself is served from.
 const DEFAULT_AGENT_URL = 'http://127.0.0.1:9101';
 
+// Served by client/nginx.conf straight from client/public/downloads (built by client/Dockerfile
+// via printer-agent's `npm run package`) — a same-origin download, no git/USB drive needed.
+export const PRINT_AGENT_DOWNLOAD_URL = '/downloads/printer-agent.zip';
+
+// Distinguishable from other agent errors (bad request, printer offline, ...) so the UI can offer
+// a download link specifically when the agent process itself isn't reachable.
+export class PrintAgentNotRunningError extends Error {
+  constructor() {
+    super('Print agent not running on this PC. Download and run it, then try again.');
+    this.name = 'PrintAgentNotRunningError';
+  }
+}
+
 function agentBaseUrl(): string {
   return (localStorage.getItem('printAgentUrl') || DEFAULT_AGENT_URL).replace(/\/$/, '');
 }
@@ -20,7 +33,7 @@ async function callAgent<T>(path: string, init?: RequestInit, timeoutMs = 3000):
   try {
     res = await fetch(`${agentBaseUrl()}${path}`, { ...init, signal: AbortSignal.timeout(timeoutMs) });
   } catch {
-    throw new Error('Print agent not running on this PC. Start it (see printer-agent/README.md) and try again.');
+    throw new PrintAgentNotRunningError();
   }
   const body = await res.json().catch(() => null);
   if (!res.ok || body?.ok === false) {
