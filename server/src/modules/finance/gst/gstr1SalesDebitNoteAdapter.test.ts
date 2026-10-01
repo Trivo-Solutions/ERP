@@ -352,7 +352,7 @@ describe('toTable13SalesDebitNoteDocument + aggregateGstr1Table13', () => {
     const result = aggregateGstr1Table13([sdn, invoice]);
     expect(result.series).toHaveLength(2);
     const categories = result.series.map((s) => s.category).sort();
-    expect(categories).toEqual(['OUTWARD_DEBIT_NOTE', 'SALES_INVOICE'].sort());
+    expect(categories).toEqual(['OUTWARD_DEBIT_NOTE', 'OUTWARD_INVOICE'].sort());
   });
 
   it('a procurement-style document (documentType "OUTWARD_DEBIT_NOTE" is the ONLY category this file ever produces) never collides with the procurement DebitNote domain — this test never touches that model/table at all', () => {
