@@ -4,8 +4,16 @@
 // where the web app itself is served from.
 const DEFAULT_AGENT_URL = 'http://127.0.0.1:9101';
 
-// Served by client/nginx.conf straight from client/public/downloads (built by client/Dockerfile
-// via printer-agent's `npm run package`) — a same-origin download, no git/USB drive needed.
+// Served by client/nginx.conf straight from client/public/downloads — a same-origin download, no
+// git/USB drive needed. The installer is the recommended path (run it, done — no .env, no
+// manual printer name). It's committed to the repo rather than built by client/Dockerfile,
+// because Inno Setup (its compiler) is Windows-only and can't run in that Linux build container —
+// see printer-agent/scripts/build-download-package.ps1 and the root .gitignore's carve-out.
+export const PRINT_AGENT_INSTALLER_URL = '/downloads/trivo-print-agent-setup.exe';
+
+// The old manual flow (extract zip, run the exe directly) — built by client/Dockerfile via
+// printer-agent's `npm run package`. Kept as a fallback for anyone who wants to inspect the
+// contents first or can't run an installer for some reason.
 export const PRINT_AGENT_DOWNLOAD_URL = '/downloads/printer-agent.zip';
 
 // Distinguishable from other agent errors (bad request, printer offline, ...) so the UI can offer
@@ -23,10 +31,16 @@ function agentBaseUrl(): string {
 
 export interface PrintAgentStatus {
   ok: true;
-  printerName: string;
+  configured: boolean;
+  printerName: string | null;
   online: boolean;
   statusText: string;
 }
+
+// Same-machine setup page the agent serves itself — open it to pick/change the printer or toggle
+// autostart. Not affected by `printAgentUrl` overrides; the agent always binds 127.0.0.1:9101
+// unless PRINT_AGENT_PORT was explicitly overridden, same assumption the rest of this file makes.
+export const PRINT_AGENT_SETUP_URL = `${DEFAULT_AGENT_URL}/setup`;
 
 async function callAgent<T>(path: string, init?: RequestInit, timeoutMs = 3000): Promise<T> {
   let res: Response;

@@ -28,6 +28,13 @@ const envSchema = z.object({
   SMS_SENDER_ID: z.string().optional(),
   METAL_RATE_API_URL: z.string().optional(),
   METAL_RATE_API_KEY: z.string().optional(),
+  // GST Phase C — GSTIN lookup provider. Unset (the default) = shared/gstProvider.ts always reports
+  // NOT_CONFIGURED, never a guess or fabricated result. Same "declared but unconfigured until a real
+  // provider is chosen" posture as METAL_RATE_API_URL/KEY above. GST_PROVIDER_NAME is only a label
+  // stamped onto a lookup result's `source` field — defaults to 'http' if unset.
+  GST_PROVIDER_API_URL: z.string().optional(),
+  GST_PROVIDER_API_KEY: z.string().optional(),
+  GST_PROVIDER_NAME: z.string().optional(),
   // (GSTIN / COMPANY_NAME / COMPANY_ADDRESS / COMPANY_STATE_CODE used to live here. Company identity is
   // per-company data on the Company row now; a process-wide env value would be shared by every company.)
   // Operator (platform) API key for POST /platform/* — unset = the platform API is disabled (404).

@@ -1,5 +1,15 @@
-const INR = (v: number) =>
-  v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// G1 Part J/F: no hardcoded seller identity — every seller/buyer value comes from the invoice's
+// own immutable snapshot (invoice.taxDetails.seller*/buyer* — see TaxInvoice in schema.prisma and
+// sales.service.ts's resolveSellerRegistration/buyerSnapshot), and section layout/labels/column
+// choice come from invoice.printTemplate (resolved server-side by GET /sales/invoices/:id — branch
+// override, else company default, else a safe built-in layout — see taxInvoiceTemplate.service.ts).
+// The template controls PRESENTATION ONLY: which of these already-computed values show, in what
+// order, under what label — never the values themselves (G1 Part G's statutory/presentation split).
+
+const INR = (v: unknown) =>
+  Number(v ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const DATE = (v: unknown) =>
+  v ? new Date(v as string).toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' }) : '';
 
 function row(label: string, value: string, bold = false, accent = false) {
   return `
@@ -9,42 +19,126 @@ function row(label: string, value: string, bold = false, accent = false) {
     </tr>`;
 }
 
+// Mirrors server/src/shared/taxInvoiceBoundFields.ts's field list — presentation lookup only
+// (the template merely picks which of these already-server-computed values to show and in what
+// order; it can never inject a value that isn't one of these).
+function fieldValue(key: string, invoice: any, tax: any): { label: string; value: string } {
+  const seller: Record<string, [string, string]> = {
+    'seller.legalName': ['Seller', tax?.sellerLegalName ?? invoice.company?.name ?? '—'],
+    'seller.tradeName': ['Trade Name', tax?.sellerTradeName ?? ''],
+    'seller.gstin': ['GSTIN', tax?.gstin ?? '—'],
+    'seller.stateCode': ['State Code', tax?.sellerStateCode ?? ''],
+    'seller.address': ['Address', tax?.sellerAddress ?? ''],
+    'seller.city': ['City', tax?.sellerCity ?? ''],
+    'seller.district': ['District', tax?.sellerDistrict ?? ''],
+    'seller.pincode': ['PIN', tax?.sellerPincode ?? ''],
+    'seller.country': ['Country', tax?.sellerCountry ?? ''],
+  };
+  const buyer: Record<string, [string, string]> = {
+    'buyer.name': ['Bill To', tax?.buyerName ?? invoice.client?.name ?? '—'],
+    'buyer.gstin': ['GSTIN', tax?.buyerGstin ?? invoice.client?.gstNumber ?? ''],
+    'buyer.pan': ['PAN', tax?.buyerPan ?? invoice.client?.panNumber ?? ''],
+    'buyer.address': ['Address', tax?.buyerAddress ?? invoice.client?.address ?? ''],
+    'buyer.city': ['City', tax?.buyerCity ?? invoice.client?.city ?? ''],
+    'buyer.state': ['State', tax?.buyerState ?? invoice.client?.state ?? ''],
+    'buyer.stateCode': ['State Code', tax?.buyerStateCode ?? ''],
+    'buyer.pincode': ['PIN', tax?.buyerPincode ?? ''],
+    'buyer.phone': ['Mobile', invoice.client?.phone ?? ''],
+    'buyer.email': ['Email', invoice.client?.email ?? ''],
+  };
+  const invMeta: Record<string, [string, string]> = {
+    'invoice.number': ['Invoice No.', invoice.invoiceNumber],
+    'invoice.date': ['Date', DATE(invoice.invoiceDate)],
+    'invoice.financialYear': ['Financial Year', ''],
+    'invoice.type': ['Invoice Type', invoice.invoiceType],
+    'invoice.placeOfSupply': ['Place of Supply', tax?.placeOfSupply || '—'],
+    'invoice.reverseCharge': ['Reverse Charge', tax?.reverseCharge ? 'Yes' : 'No'],
+    'invoice.terms': ['Terms', invoice.terms ?? ''],
+    'invoice.salesPerson': ['Sales Executive', invoice.salesPerson?.name ?? ''],
+  };
+  const totals: Record<string, [string, string]> = {
+    'totals.subtotal': ['Subtotal', `₹ ${INR(invoice.subtotal)}`],
+    'totals.taxableValue': ['Taxable Value', `₹ ${INR(tax?.taxableAmount ?? invoice.subtotal)}`],
+    'totals.cgst': ['CGST', `₹ ${INR(tax?.cgst)}`],
+    'totals.sgst': ['SGST', `₹ ${INR(tax?.sgst)}`],
+    'totals.igst': ['IGST', `₹ ${INR(tax?.igst)}`],
+    'totals.otherCharges': ['Shipping / Other Charges', `+ ₹ ${INR(invoice.otherCharges)}`],
+    'totals.discount': ['Discount', `- ₹ ${INR(invoice.discountAmount)}`],
+    'totals.roundOff': ['Round off', `${Number(invoice.roundOff ?? 0) >= 0 ? '+' : '-'} ₹ ${INR(Math.abs(Number(invoice.roundOff ?? 0)))}`],
+    'totals.grandTotal': ['Total', `₹ ${INR(invoice.totalAmount)}`],
+  };
+  const payment: Record<string, [string, string]> = {
+    'payment.paidAmount': ['Paid', `₹ ${INR(invoice.paidAmount ?? 0)}`],
+    'payment.balanceDue': ['Balance Due', `₹ ${INR(invoice.balanceDue ?? invoice.totalAmount)}`],
+  };
+  const all = { ...seller, ...buyer, ...invMeta, ...totals, ...payment };
+  const [label, value] = all[key] ?? [key, ''];
+  return { label, value };
+}
+
+function itemColumnHeader(col: string): string {
+  const labels: Record<string, string> = {
+    srNo: '#', description: 'Description', productCode: 'Tag No.', hsnCode: 'HSN', quantity: 'Qty',
+    uom: 'UOM', grossWeight: 'Gross Wt', stoneWeight: 'Stone Wt', netWeight: 'Net Wt (g)',
+    rate: 'Rate', makingCharge: 'Making Charge', lineDiscountAmount: 'Discount',
+    taxableValue: 'Taxable Value', cgstAmount: 'CGST', sgstAmount: 'SGST', igstAmount: 'IGST',
+    lineTotalTax: 'Tax', totalPrice: 'Amount',
+  };
+  return labels[col] ?? col;
+}
+
+function itemColumnValue(col: string, item: any, idx: number): string {
+  switch (col) {
+    case 'srNo': return String(idx + 1);
+    case 'description': return `<div>${item.description}</div>${item.productCode ? `<div style="font-size:10px;color:#999">${item.productCode}${item.huid ? ` &nbsp;|&nbsp; HUID ${item.huid}` : ''}</div>` : ''}`;
+    case 'productCode': return item.productCode ?? '—';
+    case 'hsnCode': return item.hsnCode?.code ?? '—';
+    case 'quantity': return String(item.quantity);
+    case 'uom': return item.uom ?? '—';
+    case 'grossWeight': return Number(item.grossWeight ?? 0).toFixed(3);
+    case 'stoneWeight': return Number(item.stoneWeight ?? 0).toFixed(3);
+    case 'netWeight': return Number(item.netGoldWeight ?? 0).toFixed(3);
+    case 'rate': return `₹ ${INR(item.goldRate)}`;
+    case 'makingCharge': return `₹ ${INR(item.makingCharge)}`;
+    case 'lineDiscountAmount': return `₹ ${INR(item.lineDiscountAmount)}`;
+    case 'taxableValue': return `₹ ${INR(item.taxableValue)}`;
+    case 'cgstAmount': return `₹ ${INR(item.cgstAmount)}`;
+    case 'sgstAmount': return `₹ ${INR(item.sgstAmount)}`;
+    case 'igstAmount': return `₹ ${INR(item.igstAmount)}`;
+    case 'lineTotalTax': return `₹ ${INR(item.lineTotalTax)}`;
+    case 'totalPrice': return `₹ ${INR(item.totalPrice)}`;
+    default: return '—';
+  }
+}
+
+const RIGHT_ALIGNED = new Set(['quantity', 'uom', 'grossWeight', 'stoneWeight', 'netWeight', 'rate', 'makingCharge', 'lineDiscountAmount', 'taxableValue', 'cgstAmount', 'sgstAmount', 'igstAmount', 'lineTotalTax', 'totalPrice']);
+
 export function printInvoice(invoice: any) {
   const items: any[] = invoice.items ?? [];
   const tax = invoice.taxDetails;
+  const layout = invoice.printTemplate?.sections;
 
-  const invoiceDate = new Date(invoice.invoiceDate).toLocaleDateString('en-IN', {
-    day: '2-digit', month: 'long', year: 'numeric',
-  });
+  const isInterState = Number(tax?.igst ?? 0) > 0;
 
-  const subtotal = Number(invoice.subtotal);
-  const discount = Number(invoice.discountAmount ?? 0);
-  const otherCharges = Number(invoice.otherCharges ?? 0);
-  const taxAmount = Number(invoice.taxAmount ?? 0);
-  const total = Number(invoice.totalAmount);
-  const roundOff = Number(invoice.roundOff ?? 0);
-  const cgst = Number(tax?.cgst ?? 0);
-  const sgst = Number(tax?.sgst ?? 0);
-  const igst = Number(tax?.igst ?? 0);
-  const isInterState = igst > 0;
+  const sellerFields: string[] = layout?.seller?.fields ?? ['seller.legalName', 'seller.tradeName', 'seller.gstin', 'seller.address', 'seller.city', 'seller.stateCode'];
+  const buyerFields: string[] = layout?.buyer?.fields ?? ['buyer.name', 'buyer.gstin', 'buyer.pan', 'buyer.address', 'buyer.city', 'buyer.state'];
+  const invoiceMetaFields: string[] = layout?.invoiceMeta?.fields ?? ['invoice.number', 'invoice.date', 'invoice.type', 'invoice.placeOfSupply'];
+  const itemColumns: string[] = layout?.items?.columns ?? ['srNo', 'hsnCode', 'description', 'quantity', 'netWeight', 'rate', 'taxableValue', 'cgstAmount', 'sgstAmount', 'igstAmount', 'totalPrice'];
+  const totalsFields: string[] = layout?.totals?.fields ?? ['totals.subtotal', 'totals.discount', 'totals.otherCharges', 'totals.cgst', 'totals.sgst', 'totals.igst', 'totals.roundOff', 'totals.grandTotal'];
+  const headerTitle = layout?.header?.title ?? 'Tax Invoice';
+  const footerTerms = layout?.footer?.termsText;
+  const showSignatory = layout?.footer?.showSignatory !== false;
 
-  const companyName = 'SEA Jewelry Pvt. Ltd.';
-  const companyAddr = 'Jewelry Wholesale & Retail Division';
-  const companyGstin = tax?.gstin ?? '—';
+  const sellerLine = fieldValue('seller.legalName', invoice, tax);
+  const sellerTradeName = fieldValue('seller.tradeName', invoice, tax).value;
+  const sellerRest = sellerFields.filter((f) => f !== 'seller.legalName' && f !== 'seller.tradeName' && f !== 'seller.gstin')
+    .map((f) => fieldValue(f, invoice, tax).value).filter(Boolean).join(', ');
+  const sellerGstin = fieldValue('seller.gstin', invoice, tax).value;
 
+  const itemColHeaders = itemColumns.map((c) => `<th${RIGHT_ALIGNED.has(c) ? ' style="text-align:right"' : ''}>${itemColumnHeader(c)}</th>`).join('');
   const itemRows = items.map((item, idx) => `
     <tr>
-      <td>${idx + 1}</td>
-      <td style="font-family:'Courier New',monospace;font-size:11px">${item.hsnCode?.code ?? '—'}</td>
-      <td>
-        <div>${item.description}</div>
-        ${item.productCode ? `<div style="font-size:10px;color:#999">${item.productCode}${item.huid ? ` &nbsp;|&nbsp; HUID ${item.huid}` : ''}</div>` : ''}
-      </td>
-      <td style="font-size:11px">${item.category?.name ?? '—'}</td>
-      <td style="text-align:right">${item.quantity}</td>
-      <td style="text-align:right">${Number(item.netGoldWeight).toFixed(3)}</td>
-      <td style="text-align:right">${item.taxRate != null ? (Number(item.taxRate) * 100).toFixed(0) + '%' : '—'}</td>
-      <td style="text-align:right;font-family:'Courier New',monospace">₹ ${INR(Number(item.totalPrice))}</td>
+      ${itemColumns.map((c) => `<td${RIGHT_ALIGNED.has(c) ? ' style="text-align:right;font-family:\'Courier New\',monospace"' : ''}>${itemColumnValue(c, item, idx)}</td>`).join('')}
     </tr>`).join('');
 
   const categoryTotals = items.reduce((acc: Record<string, { pieces: number; netWeight: number; amount: number }>, item) => {
@@ -65,11 +159,33 @@ export function printInvoice(invoice: any) {
       <td style="text-align:right;font-family:'Courier New',monospace">₹ ${INR(t.amount)}</td>
     </tr>`).join('');
 
+  const totalsRows = totalsFields
+    .filter((f) => f !== 'totals.grandTotal')
+    .filter((f) => !((f === 'totals.cgst' || f === 'totals.sgst') && isInterState) && !(f === 'totals.igst' && !isInterState))
+    .filter((f) => {
+      if (f === 'totals.otherCharges') return Number(invoice.otherCharges ?? 0) > 0;
+      if (f === 'totals.discount') return Number(invoice.discountAmount ?? 0) > 0;
+      if (f === 'totals.roundOff') return Math.abs(Number(invoice.roundOff ?? 0)) >= 0.005;
+      return true;
+    })
+    .map((f) => {
+      const { label, value } = fieldValue(f, invoice, tax);
+      return row(label, value);
+    }).join('');
+
+  const eInvoiceSection = layout?.eInvoice?.enabled !== false && tax?.irn ? `
+    <div class="info-box" style="margin-top:12px">
+      <div class="title">e-Invoice</div>
+      <div class="line">IRN: ${tax.irn}</div>
+      ${tax.ackNumber ? `<div class="line">Ack No: ${tax.ackNumber}</div>` : ''}
+      ${tax.ackDate ? `<div class="line">Ack Date: ${DATE(tax.ackDate)}</div>` : ''}
+    </div>` : '';
+
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Tax Invoice — ${invoice.invoiceNumber}</title>
+  <title>${headerTitle} — ${invoice.invoiceNumber}</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -124,7 +240,7 @@ export function printInvoice(invoice: any) {
     .info-box .line { font-size: 12px; color: #444; margin-top: 2px; }
 
     .meta-strip {
-      display: flex; gap: 24px;
+      display: flex; gap: 24px; flex-wrap: wrap;
       font-size: 11px; color: #666;
       margin-bottom: 16px;
     }
@@ -139,10 +255,6 @@ export function printInvoice(invoice: any) {
       font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: #888;
       padding: 8px 10px; border-bottom: 2px solid #EEE;
     }
-    table.items thead th:nth-child(4),
-    table.items thead th:nth-child(5),
-    table.items thead th:nth-child(6),
-    table.items thead th:nth-child(7) { text-align: right; }
     table.items tbody td {
       padding: 8px 10px; border-bottom: 1px solid #F4F6FB; font-size: 12px; vertical-align: top;
     }
@@ -204,56 +316,52 @@ export function printInvoice(invoice: any) {
 <div class="page">
   <div class="header">
     <div class="logo-block">
-      <div class="logo-circle">S</div>
+      ${layout?.header?.showLogo === false ? '' : `<div class="logo-circle">${(sellerLine.value || 'S').charAt(0)}</div>`}
       <div>
-        <div class="company-name">${companyName}</div>
-        <div class="company-sub">${companyAddr}</div>
-        <div class="company-gstin">GSTIN: ${companyGstin}</div>
+        <div class="company-name">${sellerLine.value}${sellerTradeName ? ` <span style="font-size:12px;color:#666">(${sellerTradeName})</span>` : ''}</div>
+        ${sellerRest ? `<div class="company-sub">${sellerRest}</div>` : ''}
+        <div class="company-gstin">GSTIN: ${sellerGstin}</div>
       </div>
     </div>
     <div class="doc-meta">
-      <div class="doc-title">Tax Invoice</div>
+      <div class="doc-title">${headerTitle}</div>
       <div class="doc-number">${invoice.invoiceNumber}</div>
-      <div class="doc-date">${invoiceDate}</div>
+      <div class="doc-date">${DATE(invoice.invoiceDate)}</div>
     </div>
   </div>
 
   <div class="meta-strip">
-    <div>Invoice Type: <b>${invoice.invoiceType}</b></div>
-    <div>Currency: <b>${invoice.currency}</b></div>
-    <div>Place of Supply: <b>${tax?.placeOfSupply || '—'}</b></div>
+    ${invoiceMetaFields.filter((f) => f !== 'invoice.number' && f !== 'invoice.date').map((f) => {
+      const { label, value } = fieldValue(f, invoice, tax);
+      return value ? `<div>${label}: <b>${value}</b></div>` : '';
+    }).join('')}
     <div>Supply Type: <b>${isInterState ? 'Inter-State (IGST)' : 'Intra-State (CGST+SGST)'}</b></div>
-    ${invoice.salesPerson?.name ? `<div>Sales Executive: <b>${invoice.salesPerson.name}</b></div>` : ''}
-    ${invoice.terms ? `<div>Terms: <b>${invoice.terms}</b></div>` : ''}
   </div>
 
   <div class="info-grid">
     <div class="info-box">
       <div class="title">Bill To</div>
-      <div class="name">${invoice.client?.name ?? '—'}</div>
-      ${invoice.client?.address ? `<div class="line">${invoice.client.address}</div>` : ''}
-      ${invoice.client?.city || invoice.client?.state ? `<div class="line">${[invoice.client?.city, invoice.client?.state].filter(Boolean).join(', ')}</div>` : ''}
-      <div class="line">${invoice.client?.gstNumber ? `GSTIN: ${invoice.client.gstNumber}` : 'Unregistered (B2C)'}</div>
-      ${invoice.client?.phone ? `<div class="line">Mobile: ${invoice.client.phone}</div>` : ''}
-      ${invoice.client?.dateOfBirth ? `<div class="line">DOB: ${new Date(invoice.client.dateOfBirth).toLocaleDateString('en-IN', { timeZone: 'UTC' })}</div>` : ''}
-      ${invoice.client?.panNumber ? `<div class="line">PAN: ${invoice.client.panNumber}</div>` : ''}
+      ${buyerFields.map((f) => {
+        const { label, value } = fieldValue(f, invoice, tax);
+        if (!value) return '';
+        if (f === 'buyer.name') return `<div class="name">${value}</div>`;
+        if (f === 'buyer.gstin') return `<div class="line">GSTIN: ${value}</div>`;
+        return `<div class="line">${label}: ${value}</div>`;
+      }).join('') || `<div class="line">Unregistered (B2C)</div>`}
     </div>
     <div class="info-box">
       <div class="title">Payment Status</div>
-      <div class="line">Total: <b>₹ ${INR(total)}</b></div>
-      <div class="line">Paid: ₹ ${INR(Number(invoice.paidAmount ?? 0))}</div>
-      <div class="line">Balance Due: <b>₹ ${INR(Number(invoice.balanceDue ?? total))}</b></div>
+      <div class="line">Total: <b>₹ ${INR(invoice.totalAmount)}</b></div>
+      <div class="line">Paid: ₹ ${INR(invoice.paidAmount ?? 0)}</div>
+      <div class="line">Balance Due: <b>₹ ${INR(invoice.balanceDue ?? invoice.totalAmount)}</b></div>
     </div>
   </div>
+  ${eInvoiceSection}
 
   <table class="items">
-    <thead>
-      <tr>
-        <th>#</th><th>HSN</th><th>Description</th><th>Category</th><th>Qty</th><th>Net Wt (g)</th><th>GST</th><th>Amount</th>
-      </tr>
-    </thead>
+    <thead><tr>${itemColHeaders}</tr></thead>
     <tbody>
-      ${itemRows || '<tr><td colspan="8" style="text-align:center;color:#999;padding:20px">No items</td></tr>'}
+      ${itemRows || `<tr><td colspan="${itemColumns.length}" style="text-align:center;color:#999;padding:20px">No items</td></tr>`}
     </tbody>
   </table>
 
@@ -269,30 +377,27 @@ export function printInvoice(invoice: any) {
     <div class="summary-box">
       <table class="tax-table">
         <tbody>
-          ${row('Subtotal', `₹ ${INR(subtotal)}`)}
-          ${otherCharges > 0 ? row('Shipping / Other Charges', `+ ₹ ${INR(otherCharges)}`) : ''}
-          ${discount > 0 ? row('Discount', `- ₹ ${INR(discount)}`) : ''}
-          ${!isInterState ? row('CGST', `₹ ${INR(cgst)}`) : ''}
-          ${!isInterState ? row('SGST', `₹ ${INR(sgst)}`) : ''}
-          ${isInterState ? row('IGST', `₹ ${INR(igst)}`) : ''}
-          ${Math.abs(roundOff) >= 0.005 ? row('Round off', `${roundOff > 0 ? '+' : '-'} ₹ ${INR(Math.abs(roundOff))}`) : ''}
+          ${totalsRows}
           <tr class="divider total-row">
             <td class="label bold" style="font-size:15px">Total</td>
-            <td class="value bold accent" style="font-size:18px">₹ ${INR(total)}</td>
+            <td class="value bold accent" style="font-size:18px">₹ ${INR(invoice.totalAmount)}</td>
           </tr>
         </tbody>
       </table>
     </div>
   </div>
 
+  ${showSignatory ? `
   <div class="signature">
     <div class="signature-box">
       <div class="signature-line">Authorized Signatory</div>
     </div>
-  </div>
+  </div>` : ''}
+
+  ${footerTerms ? `<div style="margin-top:16px;font-size:10px;color:#666">${footerTerms}</div>` : ''}
 
   <div class="footer">
-    <span>${companyName} &nbsp;|&nbsp; Invoice No: ${invoice.invoiceNumber}</span>
+    <span>${sellerLine.value} &nbsp;|&nbsp; Invoice No: ${invoice.invoiceNumber}</span>
     <span>Printed on ${new Date().toLocaleString('en-IN')}</span>
   </div>
 </div>

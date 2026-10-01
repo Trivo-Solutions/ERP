@@ -5,6 +5,10 @@ import { resolveTenantContext, assertBranchAccessible } from '../../middleware/t
 import { AppError } from '../../middleware/error';
 import { parseDate, parseOptionalDate } from '../../shared/parseDate';
 import * as svc from './sales.service';
+import * as creditNoteSvc from './creditNote.service';
+import * as salesDebitNoteSvc from './salesDebitNote.service';
+import * as taxInvoiceTemplateSvc from './taxInvoiceTemplate.service';
+import * as creditNoteTemplateSvc from './creditNoteTemplate.service';
 import * as estimationSvc from '../tagging/estimation.service';
 import { canAccessBranch } from '../../shared/tenantContext';
 import { prisma } from '../../config/database';
@@ -121,7 +125,11 @@ salesRouter.get('/invoices/:id', requirePermission('sales:view'), async (req: Re
     (!req.tenant!.branchAccess.allBranches && !req.tenant!.branchAccess.branchIds.includes(invoice.branchId))) {
     return res.status(404).json({ success: false, error: 'Invoice not found' });
   }
-  res.json({ success: true, data: invoice });
+  // G1 Part H: resolve which tax-invoice template this invoice's own branch prints under —
+  // branch override, else the company default, else the safe built-in fallback — so the browser
+  // print (printInvoice.ts) never needs its own template-resolution logic.
+  const printTemplate = await taxInvoiceTemplateSvc.resolveTaxInvoiceTemplate(req.tenant!.companyId, invoice.branchId);
+  res.json({ success: true, data: { ...invoice, printTemplate } });
 });
 
 // Lightweight staff picker for the "Sales Executive" field — same permission gate as creating the
@@ -177,7 +185,11 @@ salesRouter.post('/invoices', requirePermission('invoice:create'), async (req: R
     ...(req.body.payments !== undefined && { payments: withPaymentDates(req.body.payments) }),
   };
   const invoice = await svc.createInvoice(body, req.tenant!, req.user!.userId);
-  res.status(201).json({ success: true, data: invoice });
+  // G1 Part H: same resolved-template attachment as GET /invoices/:id, so an immediate
+  // bill-then-print (NewSalePage's own flow) already gets the branch's/company's real template,
+  // not just the safe built-in default it would otherwise silently fall back to.
+  const printTemplate = await taxInvoiceTemplateSvc.resolveTaxInvoiceTemplate(req.tenant!.companyId, invoice.branchId);
+  res.status(201).json({ success: true, data: { ...invoice, printTemplate } });
 });
 
 // Amend an issued invoice (full new state — see amendInvoice). Its own permission, deliberately not invoice:create:
@@ -251,8 +263,79 @@ salesRouter.get('/returns', requirePermission('sales:view'), async (req: Request
 });
 
 salesRouter.post('/returns', requirePermission('return:create'), async (req: Request, res: Response) => {
-  const salesReturn = await svc.createSalesReturn(req.body, req.tenant!, req.user!.userId);
+  // G2c: issueCreditNote is additive and opt-in — omitted (the existing default), behavior is
+  // completely unchanged for every current caller.
+  const { issueCreditNote, ...body } = req.body ?? {};
+  const salesReturn = await svc.createSalesReturn(body, req.tenant!, req.user!.userId, { issueCreditNote: !!issueCreditNote });
   res.status(201).json({ success: true, data: salesReturn });
+});
+
+// G2c — Credit Notes (GST Credit Note lifecycle; see PHASE_G2_GST_DOCUMENTS_LIFECYCLE_DESIGN.md §3/§19).
+salesRouter.get('/credit-notes', requirePermission('creditNote:view'), async (req: Request, res: Response) => {
+  const notes = await creditNoteSvc.listCreditNotes(req.tenant!, {
+    clientId: req.query.clientId as string | undefined,
+    invoiceId: req.query.invoiceId as string | undefined,
+    status: req.query.status as string | undefined,
+    from: parseOptionalDate(req.query.from, 'From date'),
+    to: parseOptionalDate(req.query.to, 'To date'),
+  });
+  res.json({ success: true, data: notes });
+});
+
+salesRouter.get('/credit-notes/:id', requirePermission('creditNote:view'), async (req: Request, res: Response) => {
+  const note = await creditNoteSvc.getCreditNoteById(req.tenant!, req.params.id);
+  const printTemplate = await creditNoteTemplateSvc.resolveCreditNoteTemplate(req.tenant!.companyId, note.invoice?.branchId);
+  res.json({ success: true, data: { ...note, printTemplate } });
+});
+
+// Path B — standalone, value-only credit note against an invoice with no physical return.
+salesRouter.post('/credit-notes', requirePermission('creditNote:create'), async (req: Request, res: Response) => {
+  const body = { ...req.body, creditNoteDate: parseOptionalDate(req.body?.creditNoteDate, 'Credit note date') };
+  const note = await creditNoteSvc.createStandaloneCreditNote(body, req.tenant!, req.user!.userId);
+  res.status(201).json({ success: true, data: note });
+});
+
+// Path A — wraps an existing Sales Return with no Credit Note yet, a deliberate, separate,
+// auditable action taken after the return itself succeeds (see design §19's note on this shape).
+salesRouter.post('/returns/:returnId/credit-note', requirePermission('creditNote:create'), async (req: Request, res: Response) => {
+  const note = await creditNoteSvc.createCreditNoteForExistingReturn(req.params.returnId, req.tenant!, req.user!.userId, { reasonNotes: req.body?.reasonNotes });
+  res.status(201).json({ success: true, data: note });
+});
+
+// SUPER_ADMIN-only initially — same posture as invoice:void/payment:reverse (not granted to any starter role).
+salesRouter.post('/credit-notes/:id/cancel', requirePermission('creditNote:cancel'), async (req: Request, res: Response) => {
+  const result = await creditNoteSvc.cancelCreditNote(req.params.id, req.tenant!, req.user!.userId, req.body?.reason);
+  res.json({ success: true, data: result });
+});
+
+// G2g-4b — Sales (outward) Debit Note. A wholly separate domain/permission family from the
+// procurement-side DebitNote (debitNote:*) — never reused or extended, per CLAUDE.md.
+salesRouter.get('/debit-notes', requirePermission('salesDebitNote:view'), async (req: Request, res: Response) => {
+  const notes = await salesDebitNoteSvc.listSalesDebitNotes(req.tenant!, {
+    clientId: req.query.clientId as string | undefined,
+    invoiceId: req.query.invoiceId as string | undefined,
+    status: req.query.status as string | undefined,
+    from: parseOptionalDate(req.query.from, 'From date'),
+    to: parseOptionalDate(req.query.to, 'To date'),
+  });
+  res.json({ success: true, data: notes });
+});
+
+salesRouter.get('/debit-notes/:id', requirePermission('salesDebitNote:view'), async (req: Request, res: Response) => {
+  const note = await salesDebitNoteSvc.getSalesDebitNoteById(req.tenant!, req.params.id);
+  res.json({ success: true, data: note });
+});
+
+salesRouter.post('/debit-notes', requirePermission('salesDebitNote:create'), async (req: Request, res: Response) => {
+  const body = { ...req.body, debitNoteDate: parseOptionalDate(req.body?.debitNoteDate, 'Debit note date') };
+  const note = await salesDebitNoteSvc.createSalesDebitNote(body, req.tenant!, req.user!.userId);
+  res.status(201).json({ success: true, data: note });
+});
+
+// SUPER_ADMIN-only initially — same posture as credit-notes/:id/cancel above (not granted to any starter role).
+salesRouter.post('/debit-notes/:id/cancel', requirePermission('salesDebitNote:cancel'), async (req: Request, res: Response) => {
+  const result = await salesDebitNoteSvc.cancelSalesDebitNote(req.params.id, req.tenant!, req.user!.userId, req.body?.reason);
+  res.json({ success: true, data: result });
 });
 
 // Old Gold Exchange (D4)
@@ -272,4 +355,61 @@ salesRouter.post('/exchanges', requirePermission('invoice:create'), async (req: 
   const body = { ...req.body, ...(req.body.exchangeDate && { exchangeDate: parseDate(req.body.exchangeDate, 'Exchange date') }) };
   const exchange = await svc.createOldGoldExchange(body, req.tenant!, req.user!.userId);
   res.status(201).json({ success: true, data: exchange });
+});
+
+// G1 Part F/L — Tax Invoice Templates. view is separate from create/edit (same reasoning as
+// estimateTemplate: printing/resolving a template needs read access, not edit rights on the designer).
+salesRouter.get('/tax-invoice-templates', requirePermission('taxInvoiceTemplate:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await taxInvoiceTemplateSvc.listTaxInvoiceTemplates(req.tenant!.companyId) });
+});
+
+salesRouter.get('/tax-invoice-templates/default-layout', requirePermission('taxInvoiceTemplate:view'), async (_req: Request, res: Response) => {
+  res.json({ success: true, data: taxInvoiceTemplateSvc.buildDefaultLayout() });
+});
+
+salesRouter.get('/tax-invoice-templates/:id', requirePermission('taxInvoiceTemplate:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await taxInvoiceTemplateSvc.getTaxInvoiceTemplateById(req.tenant!.companyId, req.params.id) });
+});
+
+salesRouter.post('/tax-invoice-templates', requirePermission('taxInvoiceTemplate:create'), async (req: Request, res: Response) => {
+  const t = await taxInvoiceTemplateSvc.createTaxInvoiceTemplate(req.tenant!.companyId, req.body, req.user!.userId);
+  res.status(201).json({ success: true, data: t });
+});
+
+salesRouter.put('/tax-invoice-templates/:id', requirePermission('taxInvoiceTemplate:edit'), async (req: Request, res: Response) => {
+  const t = await taxInvoiceTemplateSvc.updateTaxInvoiceTemplate(req.tenant!.companyId, req.params.id, req.body);
+  res.json({ success: true, data: t });
+});
+
+salesRouter.post('/tax-invoice-templates/:id/duplicate', requirePermission('taxInvoiceTemplate:create'), async (req: Request, res: Response) => {
+  const t = await taxInvoiceTemplateSvc.duplicateTaxInvoiceTemplate(req.tenant!.companyId, req.params.id, req.user!.userId);
+  res.status(201).json({ success: true, data: t });
+});
+
+// G2d — Credit Note Templates (mirrors Tax Invoice Templates)
+salesRouter.get('/credit-note-templates', requirePermission('creditNoteTemplate:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await creditNoteTemplateSvc.listCreditNoteTemplates(req.tenant!.companyId) });
+});
+
+salesRouter.get('/credit-note-templates/default-layout', requirePermission('creditNoteTemplate:view'), async (_req: Request, res: Response) => {
+  res.json({ success: true, data: creditNoteTemplateSvc.buildDefaultCreditNoteLayout() });
+});
+
+salesRouter.get('/credit-note-templates/:id', requirePermission('creditNoteTemplate:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await creditNoteTemplateSvc.getCreditNoteTemplateById(req.tenant!.companyId, req.params.id) });
+});
+
+salesRouter.post('/credit-note-templates', requirePermission('creditNoteTemplate:create'), async (req: Request, res: Response) => {
+  const t = await creditNoteTemplateSvc.createCreditNoteTemplate(req.tenant!.companyId, req.body, req.user!.userId);
+  res.status(201).json({ success: true, data: t });
+});
+
+salesRouter.put('/credit-note-templates/:id', requirePermission('creditNoteTemplate:edit'), async (req: Request, res: Response) => {
+  const t = await creditNoteTemplateSvc.updateCreditNoteTemplate(req.tenant!.companyId, req.params.id, req.body);
+  res.json({ success: true, data: t });
+});
+
+salesRouter.post('/credit-note-templates/:id/duplicate', requirePermission('creditNoteTemplate:create'), async (req: Request, res: Response) => {
+  const t = await creditNoteTemplateSvc.duplicateCreditNoteTemplate(req.tenant!.companyId, req.params.id, req.user!.userId);
+  res.status(201).json({ success: true, data: t });
 });

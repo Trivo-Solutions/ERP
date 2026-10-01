@@ -13,6 +13,8 @@ import { PurchaseOrders } from './pages/Procurement/PurchaseOrders';
 import { GrnVerification } from './pages/Procurement/GrnVerification';
 import { Suppliers } from './pages/Procurement/Suppliers';
 import { PurchaseReturns } from './pages/Procurement/PurchaseReturns';
+import { DebitNotesPage } from './pages/Procurement/DebitNotesPage';
+import { DebitNoteTemplatesPage } from './pages/Procurement/DebitNoteTemplatesPage';
 
 // Inventory
 import { MetalVault } from './pages/Inventory/MetalVault';
@@ -64,6 +66,11 @@ import { MemoOutPage } from './pages/Sales/MemoOutPage';
 import { SalesInvoices } from './pages/Sales/SalesInvoices';
 import { NewSalePage } from './pages/Sales/NewSalePage';
 import { OldGoldExchange } from './pages/Sales/OldGoldExchange';
+import { GstRegistrationsPage } from './pages/Sales/GstRegistrationsPage';
+import { GstCompliancePage } from './pages/Compliance/GstCompliancePage';
+import { TaxInvoiceTemplatesPage } from './pages/Sales/TaxInvoiceTemplatesPage';
+import { CreditNotesPage } from './pages/Sales/CreditNotesPage';
+import { CreditNoteTemplatesPage } from './pages/Sales/CreditNoteTemplatesPage';
 
 // Finance
 import { JournalEntries } from './pages/Finance/JournalEntries';
@@ -87,6 +94,9 @@ import { StockBook } from './pages/Reports/StockBook';
 import { DayBook } from './pages/Reports/DayBook';
 import { GstSummary } from './pages/Reports/GstSummary';
 import { PurchaseGstSummary } from './pages/Reports/PurchaseGstSummary';
+import { Gstr1Table12 } from './pages/Reports/Gstr1Table12';
+import { Gstr1Table13 } from './pages/Reports/Gstr1Table13';
+import { Gstr1 } from './pages/Reports/Gstr1';
 
 // Settings & Hardware
 import { SettingsPage } from './pages/Settings/SettingsPage';
@@ -119,6 +129,8 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="procurement/orders" element={<RequirePermission permission="po:view"><PurchaseOrders /></RequirePermission>} />
       <Route path="procurement/grn" element={<RequirePermission permission="grn:view"><GrnVerification /></RequirePermission>} />
       <Route path="procurement/returns" element={<RequirePermission permission="po:view"><PurchaseReturns /></RequirePermission>} />
+      <Route path="procurement/debit-notes" element={<RequirePermission permission="debitNote:view"><DebitNotesPage /></RequirePermission>} />
+      <Route path="procurement/debit-note-templates" element={<RequirePermission permission="debitNoteTemplate:view"><DebitNoteTemplatesPage /></RequirePermission>} />
       <Route path="procurement/suppliers" element={<RequirePermission permission="po:view"><Suppliers /></RequirePermission>} />
 
       {/* Inventory */}
@@ -173,6 +185,12 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="sales/invoices/new" element={<RequirePermission permission="invoice:create"><NewSalePage /></RequirePermission>} />
       <Route path="sales/invoices/:id/edit" element={<RequirePermission permission="invoice:edit"><NewSalePage /></RequirePermission>} />
       <Route path="sales/exchanges" element={<RequirePermission permission="sales:view"><OldGoldExchange /></RequirePermission>} />
+      <Route path="sales/gst-registrations" element={<RequirePermission permission="gst:registration_view"><GstRegistrationsPage /></RequirePermission>} />
+      <Route path="sales/gst-compliance" element={<RequirePermission permission="gst:registration_view"><GstCompliancePage /></RequirePermission>} />
+      <Route path="compliance/gst" element={<RequirePermission permission="gst:registration_view"><GstCompliancePage /></RequirePermission>} />
+      <Route path="sales/tax-invoice-templates" element={<RequirePermission permission="taxInvoiceTemplate:view"><TaxInvoiceTemplatesPage /></RequirePermission>} />
+      <Route path="sales/credit-notes" element={<RequirePermission permission="creditNote:view"><CreditNotesPage /></RequirePermission>} />
+      <Route path="sales/credit-note-templates" element={<RequirePermission permission="creditNoteTemplate:view"><CreditNoteTemplatesPage /></RequirePermission>} />
 
       {/* Finance */}
       <Route path="finance/journals" element={<JournalEntries />} />
@@ -199,6 +217,12 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="reports/day-book" element={<RequirePermission permission="report:financial_view"><DayBook /></RequirePermission>} />
       <Route path="reports/gst-summary" element={<RequirePermission permission="report:financial_view"><GstSummary /></RequirePermission>} />
       <Route path="reports/purchase-gst-summary" element={<RequirePermission permission="report:financial_view"><PurchaseGstSummary /></RequirePermission>} />
+      <Route path="reports/gstr1-table12" element={<RequirePermission permission="report:financial_view"><Gstr1Table12 /></RequirePermission>} />
+      <Route path="finance/reports/gstr1-table12" element={<RequirePermission permission="report:financial_view"><Gstr1Table12 /></RequirePermission>} />
+      <Route path="reports/gstr1-table13" element={<RequirePermission permission="report:financial_view"><Gstr1Table13 /></RequirePermission>} />
+      <Route path="finance/reports/gstr1-table13" element={<RequirePermission permission="report:financial_view"><Gstr1Table13 /></RequirePermission>} />
+      <Route path="reports/gstr1" element={<RequirePermission permission="report:financial_view"><Gstr1 /></RequirePermission>} />
+      <Route path="finance/reports/gstr1" element={<RequirePermission permission="report:financial_view"><Gstr1 /></RequirePermission>} />
 
       {/* Hardware & Settings */}
       <Route path="hardware" element={<RequirePermission permission="hardware:manage"><HardwarePage /></RequirePermission>} />

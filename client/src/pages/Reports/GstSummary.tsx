@@ -1,27 +1,73 @@
-import { useState } from 'react';
-import { Box, Card, Table, TableHead, TableBody, TableRow, TableCell, Typography, Divider, Grid, TextField, Alert } from '@mui/material';
+import { useState, useMemo } from 'react';
+import {
+  Box, Card, Table, TableHead, TableBody, TableRow, TableCell, Typography, Divider,
+  Grid, TextField, MenuItem, Alert,
+} from '@mui/material';
 import { Download } from '@mui/icons-material';
 import { useQuery } from '@tanstack/react-query';
 import { apiGet } from '../../api/client';
 import { PageHeader, PageActions } from '../../components/common/PageHeader';
 import { exportToCsv } from '../../utils/exportToCsv';
+import { defaultGstFrom, defaultGstTo } from '../../utils/date';
+import { useAuthStore } from '../../store/auth.store';
 
 function money(n: number) {
   return '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 });
 }
 
-const currentYear = new Date().getFullYear();
+function formatRegistrationLabel(r: any): string {
+  const gstin = r.gstin || '';
+  const legal = r.legalName || '';
+  const trade = r.tradeName && r.tradeName !== legal ? r.tradeName : '';
+  if (trade) {
+    return `${gstin} — ${legal} (${trade})`;
+  }
+  return legal ? `${gstin} — ${legal}` : gstin;
+}
 
 // H5: GST HSN-wise summary for a period — the table a GSTR-1 filing needs assembled from. Prep
 // aid, not a submission-ready export (per-line tax is approximated, see the server-side note on
 // getGstSummary); the banner below says so explicitly rather than implying a finished filing.
 export function GstSummary() {
-  const [from, setFrom] = useState(`${currentYear}-04-01`);
-  const [to, setTo] = useState(new Date().toISOString().split('T')[0]);
+  const user = useAuthStore((s) => s.user);
+  const [from, setFrom] = useState(defaultGstFrom);
+  const [to, setTo] = useState(defaultGstTo);
+  const [branchId, setBranchId] = useState('');
+  const [gstRegistrationId, setGstRegistrationId] = useState('');
+
+  const { data: branchData } = useQuery({
+    queryKey: ['branches'],
+    queryFn: () => apiGet<any>('/tagging/branches'),
+  });
+  const allBranches: any[] = (branchData as any)?.data ?? branchData ?? [];
+
+  const accessibleBranches = useMemo(() => {
+    const active = allBranches.filter((b: any) => b.isActive !== false);
+    if (!user?.branchAccess || user.branchAccess.allBranches) {
+      return active;
+    }
+    const allowed = new Set(user.branchAccess.branchIds ?? []);
+    return active.filter((b: any) => allowed.has(b.id));
+  }, [allBranches, user?.branchAccess]);
+
+  const { data: regData } = useQuery({
+    queryKey: ['gst-registrations'],
+    queryFn: () => apiGet<any>('/company/gst-registrations'),
+  });
+  const allRegistrations: any[] = (regData as any)?.data ?? regData ?? [];
+
+  const activeRegistrations = useMemo(() => {
+    return allRegistrations.filter((r: any) => r.isActive !== false);
+  }, [allRegistrations]);
 
   const { data, isLoading } = useQuery({
-    queryKey: ['gst-summary', from, to],
-    queryFn: () => apiGet<any>('/finance/reports/gst-summary', { from, to }),
+    queryKey: ['gst-summary', from, to, branchId, gstRegistrationId],
+    queryFn: () => apiGet<any>('/finance/reports/gst-summary', {
+      from,
+      to,
+      ...(branchId ? { branchId } : {}),
+      ...(gstRegistrationId ? { gstRegistrationId } : {}),
+    }),
   });
 
   const rows: any[] = data?.rows ?? [];
@@ -38,14 +84,34 @@ export function GstSummary() {
       </Alert>
 
       <Card sx={{ p: 2, mb: 2 }}>
-        <Grid container spacing={2}>
-          <Grid item xs={6} sm={3}>
+        <Grid container spacing={2} alignItems="center">
+          <Grid item xs={6} sm={3} md={2}>
             <TextField fullWidth size="small" label="From" type="date" value={from}
               onChange={(e) => setFrom(e.target.value)} InputLabelProps={{ shrink: true }} />
           </Grid>
-          <Grid item xs={6} sm={3}>
+          <Grid item xs={6} sm={3} md={2}>
             <TextField fullWidth size="small" label="To" type="date" value={to}
               onChange={(e) => setTo(e.target.value)} InputLabelProps={{ shrink: true }} />
+          </Grid>
+          <Grid item xs={12} sm={6} md={3}>
+            <TextField fullWidth size="small" select label="Branch" value={branchId}
+              onChange={(e) => setBranchId(e.target.value)}
+              SelectProps={{ native: true }} InputLabelProps={{ shrink: true }}>
+              <option value="">All Branches</option>
+              {accessibleBranches.map((b: any) => (
+                <option key={b.id} value={b.id}>{b.name}</option>
+              ))}
+            </TextField>
+          </Grid>
+          <Grid item xs={12} sm={6} md={3.5}>
+            <TextField fullWidth size="small" select label="GST Registration" value={gstRegistrationId}
+              onChange={(e) => setGstRegistrationId(e.target.value)}
+              SelectProps={{ native: true }} InputLabelProps={{ shrink: true }}>
+              <option value="">All Registrations</option>
+              {activeRegistrations.map((r: any) => (
+                <option key={r.id} value={r.id}>{formatRegistrationLabel(r)}</option>
+              ))}
+            </TextField>
           </Grid>
           <Grid item sx={{ ml: 'auto', alignSelf: 'center' }}>
             <PageActions actions={rows.length > 0 ? [{

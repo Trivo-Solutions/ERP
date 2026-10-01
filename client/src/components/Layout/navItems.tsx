@@ -32,6 +32,8 @@ export const NAV_ITEMS: NavItem[] = [
       // J4-D5: GET /procurement/grn now requires grn:view, not grn:create.
       { label: 'GRN Verification', path: '/procurement/grn', permission: 'grn:view' },
       { label: 'Purchase Returns', path: '/procurement/returns', permission: 'po:view' },
+      { label: 'Debit Notes', path: '/procurement/debit-notes', permission: 'debitNote:view' },
+      { label: 'Debit Note Templates', path: '/procurement/debit-note-templates', permission: 'debitNoteTemplate:view' },
       { label: 'Suppliers', path: '/procurement/suppliers', permission: 'po:view' },
     ],
   },
@@ -105,6 +107,14 @@ export const NAV_ITEMS: NavItem[] = [
       { label: 'Memo-Out Tracking', path: '/sales/memos', permission: 'memo:manage' },
       { label: 'Sales Invoices', path: '/sales/invoices', permission: 'sales:view' },
       { label: 'Old Gold Exchange', path: '/sales/exchanges', permission: 'sales:view' },
+      // G1 Part K/L
+      { label: 'GST Registrations', path: '/sales/gst-registrations', permission: 'gst:registration_view' },
+      // Phase D — AATO + HSN Compliance
+      { label: 'GST Compliance & AATO', path: '/sales/gst-compliance', permission: 'gst:registration_view' },
+      { label: 'Tax Invoice Templates', path: '/sales/tax-invoice-templates', permission: 'taxInvoiceTemplate:view' },
+      // G2d — Credit Notes & Templates
+      { label: 'Credit Notes', path: '/sales/credit-notes', permission: 'creditNote:view' },
+      { label: 'Credit Note Templates', path: '/sales/credit-note-templates', permission: 'creditNoteTemplate:view' },
     ],
   },
   {
@@ -137,6 +147,9 @@ export const NAV_ITEMS: NavItem[] = [
       { label: 'Day Book', path: '/reports/day-book', permission: 'report:financial_view' },
       { label: 'GST Summary', path: '/reports/gst-summary', permission: 'report:financial_view' },
       { label: 'Purchase GST (ITC)', path: '/reports/purchase-gst-summary', permission: 'report:financial_view' },
+      { label: 'GSTR-1 Reports', path: '/reports/gstr1', permission: 'report:financial_view' },
+      { label: 'GSTR-1 Table 12', path: '/reports/gstr1-table12', permission: 'report:financial_view' },
+      { label: 'GSTR-1 Table 13', path: '/reports/gstr1-table13', permission: 'report:financial_view' },
     ],
   },
   { label: 'Hardware', icon: <HardwareOutlined />, path: '/hardware', permission: 'hardware:manage' },

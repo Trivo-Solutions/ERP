@@ -1,43 +1,15 @@
 import path from 'path';
 import os from 'os';
-import fsSync from 'fs';
 import fs from 'fs/promises';
 import crypto from 'crypto';
-import { spawn } from 'child_process';
-
-const BUNDLED_SCRIPT = path.resolve(__dirname, '..', 'scripts', 'print-raw.ps1');
-
-// When packaged with `pkg`, bundled assets live in a virtual snapshot filesystem that only this
-// Node process can read — powershell.exe is a separate process and needs a real path on disk, so
-// extract the script once (no-op in the normal, non-pkg dev/prod run).
-let extractedScriptPath: string | null = null;
-function getPrintScriptPath(): string {
-  if (!extractedScriptPath) {
-    const dest = path.join(os.tmpdir(), 'sea-erp-print-raw.ps1');
-    fsSync.writeFileSync(dest, fsSync.readFileSync(BUNDLED_SCRIPT));
-    extractedScriptPath = dest;
-  }
-  return extractedScriptPath;
-}
-
-function runPowerShell(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', ...args], { windowsHide: true });
-    let stdout = '';
-    let stderr = '';
-    proc.stdout.on('data', (d) => { stdout += d.toString(); });
-    proc.stderr.on('data', (d) => { stderr += d.toString(); });
-    proc.on('error', reject);
-    proc.on('close', (code) => resolve({ code: code ?? 1, stdout, stderr }));
-  });
-}
+import { runPowerShell, resolveBundledScript } from './shell';
 
 export async function printTspl(printerName: string, tspl: string): Promise<void> {
   const tmpFile = path.join(os.tmpdir(), `tspl-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.prn`);
   await fs.writeFile(tmpFile, tspl);
   try {
     const { code, stdout, stderr } = await runPowerShell([
-      '-File', getPrintScriptPath(), '-PrinterName', printerName, '-FilePath', tmpFile,
+      '-File', resolveBundledScript('print-raw.ps1'), '-PrinterName', printerName, '-FilePath', tmpFile,
     ]);
     if (code !== 0) {
       throw new Error(stderr.trim() || stdout.trim() || `print-raw.ps1 exited with code ${code}`);

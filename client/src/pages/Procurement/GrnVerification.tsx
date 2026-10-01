@@ -503,6 +503,7 @@ export function GrnVerification() {
   // keep their own separate permissions.
   const canCreateGrn = hasPermission('grn:create');
   const canVerifyGrn = hasPermission('grn:verify');
+  const canCreateDebitNote = hasPermission('debitNote:create');
   const navigate = useNavigate();
 
   useScaleReading(scaleDevice, (w) => setScaleWeight(w));
@@ -577,13 +578,24 @@ export function GrnVerification() {
                   </Stack>
                 </TableCell>
                 <TableCell align="right">
-                  {grn.status === 'VERIFIED' && canVerifyGrn && (
-                    <Button size="small" variant="contained" color="success" startIcon={<CheckCircle />}
-                      disabled={verifyMutation.isPending}
-                      onClick={() => verifyMutation.mutate(grn.id)}>
-                      Approve
-                    </Button>
-                  )}
+                  <Stack direction="row" spacing={1} justifyContent="flex-end" alignItems="center">
+                    {canCreateDebitNote && (
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        onClick={() => navigate(`/procurement/debit-notes?grnId=${grn.id}`)}
+                      >
+                        Debit Note
+                      </Button>
+                    )}
+                    {grn.status === 'VERIFIED' && canVerifyGrn && (
+                      <Button size="small" variant="contained" color="success" startIcon={<CheckCircle />}
+                        disabled={verifyMutation.isPending}
+                        onClick={() => verifyMutation.mutate(grn.id)}>
+                        Approve
+                      </Button>
+                    )}
+                  </Stack>
                 </TableCell>
               </TableRow>
               {hasFinished && (

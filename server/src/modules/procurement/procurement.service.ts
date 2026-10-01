@@ -10,6 +10,7 @@ import { assertOwnedByCompany, assertBranchAccessible, assertAllOwned } from '..
 import { isValidKarat } from '../../shared/karatMaster';
 import { FINISHED_GOODS_MATERIAL_TYPE, FINISHED_LOT_MATERIAL_TYPE, DEFAULT_HSN_CODE } from '../../shared/constants';
 import { round2, resolveSupplierStateCode, splitInputGst } from '../../shared/inputGst';
+import { createDebitNoteForPurchaseReturnTx } from './debitNote.service';
 
 export async function listPOs(ctx: TenantContext, filters: {
   status?: string; supplierId?: string; poType?: string;
@@ -798,7 +799,7 @@ export async function createPurchaseReturn(data: {
   items: Array<{ tagId: string; amount?: number }>;
   reason?: string;
   notes?: string;
-}, ctx: TenantContext, userId: string) {
+}, ctx: TenantContext, userId: string, opts: { issueDebitNote?: boolean } = {}) {
   if (data.items.length === 0) throw new AppError('At least one item is required', 400);
 
   const tagIds = data.items.map((i) => i.tagId);
@@ -858,7 +859,7 @@ export async function createPurchaseReturn(data: {
   const totalAmount = resolvedItems.reduce((s, i) => s + i.amount, 0);
   const taxAmount = round2(resolvedItems.reduce((s, i) => s + i.cgst + i.sgst + i.igst, 0));
 
-  const purchaseReturn = await tenantTransaction(ctx.companyId, async (tx) => {
+  const result = await tenantTransaction(ctx.companyId, async (tx) => {
     const returnNumber = await nextDocumentNumber(ctx.companyId, 'PRET', 'PRET', tx);
     const flipped = await tx.jewelryTag.updateMany({
       where: { id: { in: tagIds }, companyId: ctx.companyId, status: 'IN_STOCK' },
@@ -885,7 +886,7 @@ export async function createPurchaseReturn(data: {
     // F1: reverse of createTagFromGrnItem's intake entry — the piece leaves Inventory, the input GST
     // claimed on it is given back, and what we owed the supplier for it goes down by both.
     const sumOf = (k: 'cgst' | 'sgst' | 'igst') => round2(resolvedItems.reduce((s, i) => s + i[k], 0));
-    await postAutoJournalEntry(tx, ctx.companyId, {
+    const returnJournalEntry = await postAutoJournalEntry(tx, ctx.companyId, {
       date: new Date(), description: `Purchase Return ${returnNumber}`,
       referenceType: 'PurchaseReturn', referenceId: created.id, userId,
       lines: [
@@ -898,11 +899,51 @@ export async function createPurchaseReturn(data: {
     });
     await tx.supplier.update({ where: { id: supplierId }, data: { currentDue: { decrement: round2(totalAmount + taxAmount) } } });
 
-    return created;
+    // G2e Path A: the formal Debit Note document for this return, in the SAME transaction, when
+    // requested. Posts no new journal — journalEntryId points at returnJournalEntry above; no
+    // further supplier-balance movement (already done immediately above). A DebitNote carries
+    // exactly one grnId, so every returned tag must trace back to the same GRN.
+    let debitNote: Awaited<ReturnType<typeof createDebitNoteForPurchaseReturnTx>> | null = null;
+    if (opts.issueDebitNote) {
+      const grnIds = new Set(tags.map((t) => sourceOf(t)!.grnId));
+      if (grnIds.size > 1) {
+        throw new AppError(
+          'This purchase return spans more than one GRN — a debit note can only be issued per GRN. Submit separate returns per GRN to generate one.',
+          400,
+        );
+      }
+      const grnId = [...grnIds][0];
+      const returnItemsForDn = resolvedItems.map((r) => {
+        const t = tags.find((x) => x.id === r.tagId)!;
+        const src = sourceOf(t)!;
+        return {
+          tagId: r.tagId, tagNumber: t.tagNumber, amount: r.amount, cgst: r.cgst, sgst: r.sgst, igst: r.igst,
+          hsnCodeId: src.poItem.hsnCodeId, taxRate: Number(src.poItem.taxRate),
+          grossWeight: Number(t.grossWeight), netWeight: Number(t.netWeight), stoneWeight: Number(t.stoneWeight),
+          karat: t.metalKarat,
+        };
+      });
+      debitNote = await createDebitNoteForPurchaseReturnTx(tx, ctx, userId, {
+        purchaseReturn: created, returnItems: returnItemsForDn, grnId,
+        journalEntryId: returnJournalEntry?.id ?? null, reasonNotes: data.reason ?? null,
+      });
+    }
+
+    return { created, debitNote };
   });
 
-  await createAuditEntry('purchase_returns', purchaseReturn.id, userId, 'CREATE', undefined, undefined, ctx.companyId);
-  return purchaseReturn;
+  await createAuditEntry('purchase_returns', result.created.id, userId, 'CREATE', undefined, undefined, ctx.companyId);
+  if (result.debitNote) {
+    await createAuditEntry(
+      'debit_notes', result.debitNote.id, userId, 'CREATE', undefined,
+      {
+        debitNoteNumber: result.debitNote.debitNoteNumber, grnId: result.debitNote.grnId,
+        purchaseReturnId: result.debitNote.purchaseReturnId, totalAmount: Number(result.debitNote.totalAmount),
+      },
+      ctx.companyId,
+    );
+  }
+  return { ...result.created, debitNote: result.debitNote };
 }
 
 // ─── Supplier payments ─────────────────────────────────────────────────────────

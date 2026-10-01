@@ -6,12 +6,15 @@ import { emit } from '../../shared/websocket';
 import { DEFAULT_HSN_CODE, CREDIT_SETTLEMENT_MODES, PAYMENT_MODE_OLD_GOLD, PAYMENT_MODE_STORE_CREDIT } from '../../shared/constants';
 import { assertPanIfRequired, assertCashLimit } from '../../shared/compliance';
 import { resolveStateCode } from '../../shared/stateMaster';
+import { splitGst } from '../../shared/gstSplit';
+import { normalizeGstUqc } from '../../shared/gstUqc';
+import { createCreditNoteForReturn } from './creditNote.service';
 import { resolveMetalRate } from '../../shared/metalRate';
 import { isValidKarat } from '../../shared/karatMaster';
 import { addMetalStock } from '../inventory/inventory.service';
 import { postAutoJournalEntry } from '../finance/finance.service';
 import { LEDGER_ACCOUNT, cashOrBankAccount } from '../../shared/ledgerAccounts';
-import { nextDocumentNumber } from '../../shared/numberSequence';
+import { nextDocumentNumber, gstFinancialYear } from '../../shared/numberSequence';
 import { TenantContext, tenantTransaction, tenantQuery, tenantBatch } from '../../shared/tenantContext';
 import { assertBranchAccessible, assertOwnedByCompany, assertAllOwned } from '../../middleware/tenant';
 
@@ -222,6 +225,10 @@ type InvoiceItemInput = { productCode: string; description: string; huid?: strin
     Same resolution order as makingCharge: explicit > tag's own saleVaPercent > master's
     saleWastagePercent (C3). */
   hsnCode?: string; /* HSN/GST rate lookup key — defaults to DEFAULT_HSN_CODE (jewellery, 3%) */
+  uqc?: string; /* G2g-3a: statutory GST UQC for this line (e.g. "GMS", "PCS") — omit to use the
+    line's HSN's own defaultUqc (case-insensitive on input; snapshotted at creation time, like
+    hsnCodeId/taxRate — see InvoiceItem.uqc's schema comment). Rejected if not a recognized GST
+    UQC (shared/gstUqc.ts). */
   categoryId?: string; /* ProductCategory — tagged lines default to the tag's own category */
   /* karat (above, near goldRate) doubles as the MakingCharge master's other match key —
     tagged lines default it to the tag's own metalKarat when omitted, same as categoryId. */
@@ -251,7 +258,7 @@ export async function createInvoice(data: {
   // before any pricing/tag work, so a request for an unauthorized branch fails fast.
   await assertBranchAccessible(data.branchId, ctx);
 
-  const { currency, tagIds, items, subtotal, discount, otherCharges, taxableAmount, taxAmount, roundOffExact, totalAmount } =
+  const { currency, tagIds, items, subtotal, discount, otherCharges, taxableAmount, taxAmount, roundOffExact, totalAmount, discountScale } =
     await priceInvoice(data, ctx);
 
   // Estimates being billed: each must exist in this company, still be awaiting billing, and be for a piece
@@ -284,7 +291,7 @@ export async function createInvoice(data: {
   }
 
   const invoice = await tenantTransaction(ctx.companyId, async (tx) => {
-    const invoiceNumber = await nextDocumentNumber(ctx.companyId, 'INV', 'INV', tx, data.invoiceDate.getFullYear());
+    const invoiceNumber = await nextDocumentNumber(ctx.companyId, 'INV', 'INV', tx, gstFinancialYear(data.invoiceDate));
 
     // F3: dealer credit limit — checked first, before any tag is touched, so a sale that's going
     // to be rejected doesn't flip inventory it'll just have to unwind.
@@ -342,6 +349,35 @@ export async function createInvoice(data: {
       cogsAmount = tags.reduce((s, t) => s + Number(t.costPrice), 0);
     }
 
+    // GST record prep — resolved BEFORE the invoice/items are written, so each line's own
+    // cgst/sgst/igst can be embedded directly in the createMany below (G1 Part D) instead of a
+    // second write pass. cgstAmt/sgstAmt/igstAmt default to 0 (non-INR sale, or a
+    // fully-discounted taxableAmount <= 0 sale) and feed the F1 journal entry either way.
+    let cgstAmt = 0, sgstAmt = 0, igstAmt = 0;
+    let isSameState = false;
+    const seller = await resolveSellerRegistration(tx, ctx.companyId, data.branchId);
+    let clientStateCode: string | null = null;
+    if (currency === 'INR') {
+      // A taxable INR sale must never emit an e-invoice claiming zero GST — if this trips, some
+      // future change reintroduced a divergent rate calc; fail loudly rather than filing a bad
+      // TaxInvoice. (A fully-discounted sale with taxableAmount <= 0 legitimately owes no tax.)
+      if (taxableAmount > 0 && taxAmount <= 0) {
+        throw new AppError('Refusing to emit a zero-GST tax invoice on a taxable INR sale', 500);
+      }
+      // B2: client.state is free text (e.g. "Gujarat"), not a GST code — resolve it via the state
+      // master before comparing. No confident match (blank/unrecognized — the common case for a
+      // lightweight walk-in retail Client) is treated as inter-state, same as before this fix.
+      clientStateCode = await resolveStateCode(client.state);
+      isSameState = clientStateCode === seller.stateCode;
+
+      ({ cgst: cgstAmt, sgst: sgstAmt, igst: igstAmt } = splitGst(taxAmount, isSameState));
+    }
+
+    // G1 Part D: each line's own slice of tax/discount, snapshotted alongside its already-snapshotted
+    // taxRate. Zero for a non-INR sale (matches the invoice-level amounts, which are also 0 then).
+    const lineTax = allocateLineTax(items, discountScale, currency === 'INR' && isSameState);
+    const itemsWithTax = items.map((i, idx) => ({ ...i, ...lineTax[idx] }));
+
     const inv = await tx.salesInvoice.create({
       data: {
         companyId: ctx.companyId, branchId: data.branchId,
@@ -355,49 +391,31 @@ export async function createInvoice(data: {
         // denormalized on purpose (see the multi-tenant blueprint's RLS-denormalization rule)
         // so InvoiceItem can carry its own tenant filter/policy without a correlated subquery
         // up to sales_invoices on every row.
-        items: { createMany: { data: items } }, // (no companyId here: this row is written through a COMPOSITE relation, so Prisma fills it from the parent)
+        items: { createMany: { data: itemsWithTax } }, // (no companyId here: this row is written through a COMPOSITE relation, so Prisma fills it from the parent)
       },
       include: { client: true, items: true, salesPerson: { select: { id: true, name: true } } },
     });
 
-    // Create GST tax record if INR invoice. cgstAmt/sgstAmt/igstAmt default to 0 (non-INR sale,
-    // or a fully-discounted taxableAmount <= 0 sale) and feed the F1 journal entry below either way.
-    let cgstAmt = 0, sgstAmt = 0, igstAmt = 0;
+    // Create GST tax record if INR invoice — including the immutable seller/buyer snapshot
+    // (G1 Part E) so a later Client/Company/registration edit never rewrites this invoice's print.
     if (currency === 'INR') {
-      // A taxable INR sale must never emit an e-invoice claiming zero GST — if this trips, some
-      // future change reintroduced a divergent rate calc; fail loudly rather than filing a bad
-      // TaxInvoice. (A fully-discounted sale with taxableAmount <= 0 legitimately owes no tax.)
-      if (taxableAmount > 0 && taxAmount <= 0) {
-        throw new AppError('Refusing to emit a zero-GST tax invoice on a taxable INR sale', 500);
-      }
-
-      // Multi-tenant fix: this used to read process.env.COMPANY_STATE_CODE/GSTIN — a single,
-      // process-wide value that would have been WRONG for every company but one the moment a
-      // second company's invoices ran through this same server process. GSTIN/state now come
-      // from the resolved Company row for the invoice's own companyId, not a global env var.
-      const company = await tx.company.findUniqueOrThrow({ where: { id: ctx.companyId } });
-      const COMPANY_STATE = company.stateCode ?? '';
-      // B2: client.state is free text (e.g. "Gujarat"), not a GST code — resolve it via the state
-      // master before comparing. No confident match (blank/unrecognized — the common case for a
-      // lightweight walk-in retail Client) is treated as inter-state, same as before this fix.
-      const clientStateCode = await resolveStateCode(client.state);
-      const isSameState = clientStateCode === COMPANY_STATE;
-
-      cgstAmt = isSameState ? taxAmount / 2 : 0;
-      sgstAmt = isSameState ? taxAmount / 2 : 0;
-      igstAmt = isSameState ? 0 : taxAmount;
-
       await tx.taxInvoice.create({
         data: {
           companyId: ctx.companyId,
           invoiceId: inv.id,
-          gstin: company.gstin ?? 'N/A',
+          gstin: seller.gstin,
           placeOfSupply: clientStateCode ?? client.state ?? '',
           taxableAmount,
           cgst: cgstAmt,
           sgst: sgstAmt,
           igst: igstAmt,
           totalTax: taxAmount,
+          sellerRegistrationId: seller.registrationId,
+          sellerLegalName: seller.sellerLegalName, sellerTradeName: seller.sellerTradeName,
+          sellerStateCode: seller.sellerStateCode, sellerAddress: seller.sellerAddress,
+          sellerCity: seller.sellerCity, sellerDistrict: seller.sellerDistrict,
+          sellerPincode: seller.sellerPincode, sellerCountry: seller.sellerCountry,
+          ...buyerSnapshot(client, clientStateCode),
         },
       });
     }
@@ -601,7 +619,7 @@ async function priceInvoice(
   }
 
   const items = data.items.map((i) => {
-    const { hsnCode, categoryId, id: _lineId, ...rest } = i; // id never reaches the row data
+    const { hsnCode, categoryId, uqc: uqcInput, id: _lineId, ...rest } = i; // id never reaches the row data
     // rateType 'FIXED': goldRate IS the decided flat unit price (e.g. a tag's own JewelryTag.sellingPrice)
     // — used as-is, no metal-value math. Anything else ('PER_GRAM', the default): goldRate is ₹/gram,
     // either explicit or resolved above from today's MetalRate (C2).
@@ -647,10 +665,21 @@ async function priceInvoice(
       : i.netGoldWeight * goldRate + effectiveMakingCharge + (i.stoneValue ?? 0);
     const totalPrice = unitPrice * i.quantity;
     const hsn = hsnByCode.get(hsnCode ?? DEFAULT_HSN_CODE)!;
+    // G2g-3a: an explicit line uqc is validated (case-insensitive) against the GST UQC catalog and
+    // used as-is; omitted falls back to the line's own HSN's defaultUqc — resolved and snapshotted
+    // here, once, at sale time, never re-derived later (see InvoiceItem.uqc's schema comment).
+    let uqc: string | null;
+    if (uqcInput !== undefined && uqcInput !== null) {
+      const normalized = normalizeGstUqc(uqcInput);
+      if (!normalized) throw new AppError(`Unknown GST UQC: ${uqcInput}`, 400);
+      uqc = normalized;
+    } else {
+      uqc = hsn.defaultUqc ?? null;
+    }
     return {
       ...rest, tagId: i.tagId ?? null, goldRate, makingCharge, wastagePercent,
       stoneWeight: i.stoneWeight ?? 0, stoneValue: i.stoneValue ?? 0, unitPrice, totalPrice,
-      hsnCodeId: hsn.id, taxRate: Number(hsn.gstRate),
+      hsnCodeId: hsn.id, taxRate: Number(hsn.gstRate), uqc,
       categoryId: resolvedCategoryId,
     };
   });
@@ -686,8 +715,75 @@ async function priceInvoice(
 
   return {
     currency, tagIds, items, lineIds: data.items.map((i) => i.id), subtotal, discount, otherCharges, taxableAmount, taxAmount,
-    roundOffExact, totalAmount,
+    roundOffExact, totalAmount, discountScale,
   };
+}
+
+// G1 Part E: resolves which GST registration a sale is invoiced under — the invoice's own branch
+// link, else the company's primary active registration, else (a company with neither — e.g. one
+// that never set up a GSTIN at all) a legacy fallback built straight from the Company row, so the
+// long-standing `company.gstin ?? 'N/A'` behavior for such a company is completely unchanged.
+// companyId/branchId are both already-scoped by the caller (assertBranchAccessible ran first).
+async function resolveSellerRegistration(tx: Prisma.TransactionClient, companyId: string, branchId: string) {
+  const [branch, company] = await Promise.all([
+    tx.branch.findUniqueOrThrow({ where: { id: branchId }, select: { gstRegistrationId: true } }),
+    tx.company.findUniqueOrThrow({ where: { id: companyId } }),
+  ]);
+
+  const reg = branch.gstRegistrationId
+    ? await tx.companyGstRegistration.findFirst({ where: { id: branch.gstRegistrationId, companyId, isActive: true } })
+    : await tx.companyGstRegistration.findFirst({ where: { companyId, isPrimary: true, isActive: true } });
+
+  if (reg) {
+    return {
+      registrationId: reg.id as string | null, gstin: reg.gstin, stateCode: reg.stateCode,
+      sellerLegalName: reg.legalName as string | null, sellerTradeName: reg.tradeName,
+      sellerStateCode: reg.stateCode as string | null, sellerAddress: reg.address,
+      sellerCity: reg.city, sellerDistrict: reg.district, sellerPincode: reg.pincode, sellerCountry: reg.country as string | null,
+    };
+  }
+  return {
+    registrationId: null as string | null, gstin: company.gstin ?? 'N/A', stateCode: company.stateCode ?? '',
+    sellerLegalName: company.name as string | null, sellerTradeName: null as string | null,
+    sellerStateCode: company.stateCode as string | null, sellerAddress: company.address,
+    sellerCity: null as string | null, sellerDistrict: null as string | null, sellerPincode: null as string | null,
+    sellerCountry: 'India' as string | null,
+  };
+}
+
+// G1 Part E: the buyer's immutable snapshot, captured from the Client row exactly as it reads at
+// invoice-creation time. resolvedStateCode is whatever the caller already resolved via
+// resolveStateCode(client.state) (shared across the same-state tax split, so never re-resolved here).
+function buyerSnapshot(
+  client: { name: string; gstNumber: string | null; panNumber: string | null; address: string | null; city: string | null; state: string | null; pincode: string | null; country: string | null },
+  resolvedStateCode: string | null,
+) {
+  return {
+    buyerName: client.name, buyerGstin: client.gstNumber, buyerPan: client.panNumber,
+    buyerAddress: client.address, buyerCity: client.city, buyerState: client.state,
+    buyerStateCode: resolvedStateCode, buyerPincode: client.pincode, buyerCountry: client.country ?? 'India',
+  };
+}
+
+// G1 Part D: each line's own slice of the invoice's discount/tax, split same-state/inter-state
+// exactly like the invoice-level TaxInvoice.cgst/sgst/igst split (createInvoice/amendInvoice/
+// convertMemoToInvoice all compute isSameState once and pass it in here) — never a second,
+// divergent tax calculation, just the same numbers broken out per line for e-invoice readiness.
+function allocateLineTax<T extends { totalPrice: number; taxRate: number }>(
+  items: T[], discountScale: number, isSameState: boolean,
+) {
+  return items.map((i) => {
+    const taxableValue = round2(i.totalPrice * discountScale);
+    const lineTax = round2(taxableValue * Number(i.taxRate));
+    return {
+      taxableValue,
+      lineDiscountAmount: round2(i.totalPrice - taxableValue),
+      cgstAmount: isSameState ? round2(lineTax / 2) : 0,
+      sgstAmount: isSameState ? round2(lineTax / 2) : 0,
+      igstAmount: isSameState ? 0 : lineTax,
+      lineTotalTax: lineTax,
+    };
+  });
 }
 
 // Edit an issued invoice — lines, prices, discount, GST, customer, dates, everything. Gated by `invoice:edit`
@@ -732,7 +828,7 @@ export async function amendInvoice(invoiceId: string, data: {
     invoiceDate, currency: head.currency, discountAmount: data.discountAmount, otherCharges: data.otherCharges,
     roundOff: data.roundOff, items: data.items,
   }, ctx);
-  const { currency, tagIds: newTagIds, items, lineIds, subtotal, discount, otherCharges, taxableAmount, taxAmount, roundOffExact } = priced;
+  const { currency, tagIds: newTagIds, items, lineIds, subtotal, discount, otherCharges, taxableAmount, taxAmount, roundOffExact, discountScale } = priced;
   const newTotal = round2(priced.totalAmount);
 
   const snapshot = (inv: any) => JSON.parse(JSON.stringify({
@@ -756,10 +852,20 @@ export async function amendInvoice(invoiceId: string, data: {
       include: {
         items: true, taxDetails: true, payments: { select: { id: true } },
         returns: { include: { items: { select: { invoiceItemId: true } } } },
+        // G2c: a Credit Note also locks its touched lines (§5.3) — rewriting a line a Credit Note
+        // already referenced would invalidate that document's own immutable snapshot.
+        creditNotes: { select: { items: { select: { invoiceItemId: true } } } },
       },
     });
     // J3 Decision 5: a voided invoice is closed — no further amend, payment, or return against it.
     if (inv.status === 'VOID') throw new AppError('This invoice has been voided and cannot be amended', 409);
+    // G1 Part N: the same IRN guard voidInvoice already has (sales.service.ts's voidInvoice,
+    // below) — an e-invoice with a live IRN can never be silently rewritten in-app; the only
+    // legal corrections after IRN generation are a GST credit/debit note or an IRP cancellation,
+    // neither of which this amend path performs.
+    if (inv.taxDetails?.irn) {
+      throw new AppError('An e-invoice (IRN) has already been generated for this invoice — it cannot be amended in-app; a GST credit/debit note or IRN cancellation must be used instead', 409);
+    }
 
     const newClientId = data.clientId ?? inv.clientId;
     const clientChanged = newClientId !== inv.clientId;
@@ -770,14 +876,19 @@ export async function amendInvoice(invoiceId: string, data: {
     const oldById = new Map(inv.items.map((i) => [i.id, i]));
     for (const id of lineIdsIn) if (!oldById.has(id)) throw new AppError(`Invoice line not found on this invoice: ${id}`, 404);
 
-    // Returned lines are locked — the return has already reversed them (tag back in stock, ledger, customer credit).
-    const returnedIds = new Set(inv.returns.flatMap((r) => r.items.map((x) => x.invoiceItemId)));
-    for (const id of returnedIds) {
+    // Returned or credited lines are locked — the return has already reversed them (tag back in
+    // stock, ledger, customer credit), and a Credit Note's own snapshot must not be invalidated
+    // by a later rewrite of the line it referenced (G2c, §5.3).
+    const lockedIds = new Set([
+      ...inv.returns.flatMap((r) => r.items.map((x) => x.invoiceItemId)),
+      ...inv.creditNotes.flatMap((cn) => cn.items.map((x) => x.invoiceItemId).filter((id): id is string => !!id)),
+    ]);
+    for (const id of lockedIds) {
       const old = oldById.get(id)!;
       const at = lineIds.indexOf(id);
       const now = at >= 0 ? items[at] : undefined;
       if (!now || (now.tagId ?? null) !== old.tagId || now.quantity !== old.quantity || Math.abs(now.totalPrice - Number(old.totalPrice)) > 0.005) {
-        throw new AppError(`Line ${old.productCode} has been returned and cannot be changed or removed`, 409);
+        throw new AppError(`Line ${old.productCode} has been returned or credited and cannot be changed or removed`, 409);
       }
     }
     const removedIds = inv.items.filter((i) => !lineIdsIn.includes(i.id)).map((i) => i.id);
@@ -818,29 +929,41 @@ export async function amendInvoice(invoiceId: string, data: {
     if (currency === 'INR' && (clientChanged || delta > 0.005)) assertPanIfRequired(client, newTotal);
 
     // GST record — same-state vs inter-state is re-resolved from the (possibly new) customer.
-    let cgstAmt = 0, sgstAmt = 0, igstAmt = 0;
+    // Seller snapshot is re-resolved too (G1 Part E): an amendment is a deliberate rewrite of this
+    // invoice's own state, unlike a later, unrelated Client/Company edit — so it legitimately
+    // re-snapshots against whatever the registration/branch/client look like right now.
+    let cgstAmt = 0, sgstAmt = 0, igstAmt = 0, isSameState = false;
+    let clientStateCode: string | null = null;
+    const seller = await resolveSellerRegistration(tx, ctx.companyId, head.branchId);
     if (currency === 'INR') {
       if (taxableAmount > 0 && taxAmount <= 0) throw new AppError('Refusing to emit a zero-GST tax invoice on a taxable INR sale', 500);
-      const company = await tx.company.findUniqueOrThrow({ where: { id: ctx.companyId } });
-      const clientStateCode = await resolveStateCode(client.state);
-      const isSameState = clientStateCode === (company.stateCode ?? '');
-      cgstAmt = isSameState ? taxAmount / 2 : 0;
-      sgstAmt = isSameState ? taxAmount / 2 : 0;
-      igstAmt = isSameState ? 0 : taxAmount;
+      clientStateCode = await resolveStateCode(client.state);
+      isSameState = clientStateCode === seller.stateCode;
+      ({ cgst: cgstAmt, sgst: sgstAmt, igst: igstAmt } = splitGst(taxAmount, isSameState));
       const gst = {
-        gstin: company.gstin ?? 'N/A', placeOfSupply: clientStateCode ?? client.state ?? '',
+        gstin: seller.gstin, placeOfSupply: clientStateCode ?? client.state ?? '',
         taxableAmount, cgst: cgstAmt, sgst: sgstAmt, igst: igstAmt, totalTax: taxAmount,
+        sellerRegistrationId: seller.registrationId,
+        sellerLegalName: seller.sellerLegalName, sellerTradeName: seller.sellerTradeName,
+        sellerStateCode: seller.sellerStateCode, sellerAddress: seller.sellerAddress,
+        sellerCity: seller.sellerCity, sellerDistrict: seller.sellerDistrict,
+        sellerPincode: seller.sellerPincode, sellerCountry: seller.sellerCountry,
+        ...buyerSnapshot(client, clientStateCode),
       };
       if (inv.taxDetails) await tx.taxInvoice.update({ where: { invoiceId }, data: gst });
       else await tx.taxInvoice.create({ data: { companyId: ctx.companyId, invoiceId, ...gst } });
     }
 
+    // G1 Part D: each line's own tax/discount slice, same split as the invoice-level amounts above.
+    const lineTax = allocateLineTax(items, discountScale, currency === 'INR' && isSameState);
+    const itemsWithTax = items.map((it, idx) => ({ ...it, ...lineTax[idx] }));
+
     // Lines: update in place, add, remove.
     if (removedIds.length > 0) await tx.invoiceItem.deleteMany({ where: { id: { in: removedIds }, invoiceId, companyId: ctx.companyId } });
-    const toCreate: typeof items = [];
-    for (let i = 0; i < items.length; i++) {
-      if (lineIds[i]) await tx.invoiceItem.update({ where: { id: lineIds[i]! }, data: items[i] });
-      else toCreate.push(items[i]);
+    const toCreate: typeof itemsWithTax = [];
+    for (let i = 0; i < itemsWithTax.length; i++) {
+      if (lineIds[i]) await tx.invoiceItem.update({ where: { id: lineIds[i]! }, data: itemsWithTax[i] });
+      else toCreate.push(itemsWithTax[i]);
     }
     if (toCreate.length > 0) await tx.invoiceItem.createMany({ data: toCreate.map((i) => ({ ...i, invoiceId, companyId: ctx.companyId })) });
 
@@ -932,7 +1055,11 @@ export async function voidInvoice(invoiceId: string, ctx: TenantContext, userId:
     await tx.$queryRaw`SELECT "id" FROM "sales_invoices" WHERE "id" = ${invoiceId} FOR UPDATE`;
     const invoice = await tx.salesInvoice.findUniqueOrThrow({
       where: { id: invoiceId },
-      include: { items: true, taxDetails: true, payments: { select: { id: true } }, returns: { select: { id: true } } },
+      include: {
+        items: true, taxDetails: true, payments: { select: { id: true } }, returns: { select: { id: true } },
+        // G2c (§5.3): a Credit Note is also an irreversible-enough document to block a void.
+        creditNotes: { select: { id: true } },
+      },
     });
     if (invoice.status === 'VOID') throw new AppError('This invoice has already been voided', 409);
     if (invoice.payments.length > 0) {
@@ -940,6 +1067,9 @@ export async function voidInvoice(invoiceId: string, ctx: TenantContext, userId:
     }
     if (invoice.returns.length > 0) {
       throw new AppError('This invoice already has a return recorded against it — void is only for an untouched invoice', 409);
+    }
+    if (invoice.creditNotes.length > 0) {
+      throw new AppError('This invoice already has a credit note recorded against it — void is only for an untouched invoice', 409);
     }
     if (invoice.taxDetails?.irn) {
       throw new AppError('An e-invoice (IRN) has already been generated for this invoice — it cannot be voided in-app; cancel the IRN with the GST portal first', 409);
@@ -1350,7 +1480,7 @@ export async function createSalesReturn(data: {
   // credit-note reversal (no TaxInvoice counterpart is created; see CLAUDE.md/ROADMAP D1 notes).
   reason?: string;
   notes?: string;
-}, ctx: TenantContext, userId: string) {
+}, ctx: TenantContext, userId: string, opts: { issueCreditNote?: boolean } = {}) {
   if (data.items.length === 0) throw new AppError('At least one item is required', 400);
 
   // Layer 2: the invoice is validated as belonging to ctx.companyId — a Company-B invoiceId
@@ -1445,7 +1575,7 @@ export async function createSalesReturn(data: {
 
     // F1: exact reversal of createInvoice's compound entry, scoped to just the returned lines —
     // Dr Revenue + Dr GST payable + Dr Inventory must equal Cr Accounts Receivable + Cr COGS.
-    await postAutoJournalEntry(tx, ctx.companyId, {
+    const returnJournalEntry = await postAutoJournalEntry(tx, ctx.companyId, {
       date: new Date(), description: `Sales Return ${returnNumber} (Invoice ${invoice.invoiceNumber})`,
       referenceType: 'SalesReturn', referenceId: created.id, userId,
       lines: [
@@ -1465,11 +1595,33 @@ export async function createSalesReturn(data: {
       data: { currentBalance: { decrement: totalAmount } },
     });
 
-    return created;
+    // G2c Path A: the formal GST document for this return, in the SAME transaction, when
+    // requested. Posts no new journal — journalEntryId points at returnJournalEntry above; no
+    // further client-balance movement (already done immediately above).
+    let creditNote: Awaited<ReturnType<typeof createCreditNoteForReturn>> | null = null;
+    if (opts.issueCreditNote) {
+      creditNote = await createCreditNoteForReturn(tx, ctx, userId, {
+        invoice, salesReturnId: created.id,
+        returnItems: resolvedItems.map((r) => ({ invoiceItemId: r.invoiceItemId, amount: r.amount })),
+        isSameState, journalEntryId: returnJournalEntry?.id ?? null, reasonNotes: data.reason ?? null,
+      });
+    }
+
+    return { created, creditNote };
   });
 
-  await createAuditEntry('sales_returns', salesReturn.id, userId, 'CREATE', undefined, undefined, ctx.companyId);
-  return salesReturn;
+  await createAuditEntry('sales_returns', salesReturn.created.id, userId, 'CREATE', undefined, undefined, ctx.companyId);
+  if (salesReturn.creditNote) {
+    await createAuditEntry(
+      'credit_notes', salesReturn.creditNote.id, userId, 'CREATE', undefined,
+      {
+        creditNoteNumber: salesReturn.creditNote.creditNoteNumber, invoiceId: salesReturn.creditNote.invoiceId,
+        salesReturnId: salesReturn.creditNote.salesReturnId, totalAmount: Number(salesReturn.creditNote.totalAmount),
+      },
+      ctx.companyId,
+    );
+  }
+  return { ...salesReturn.created, creditNote: salesReturn.creditNote };
 }
 
 // D4: a customer's old/used gold piece taken in and valued. Credits Client.currentBalance (the
@@ -1700,68 +1852,44 @@ export async function convertMemoToInvoice(
     }
   }
 
-  const subtotal = items.reduce((s, i) => s + i.sellingPrice, 0);
-
-  // Memo conversion doesn't take a per-line HSN from the caller — always the default (B1 gave
-  // createInvoice per-line HSN; the memo path stays single-rate for now, same as before).
-  const defaultHsn = await prisma.hsnCode.findUniqueOrThrow({ where: { code: DEFAULT_HSN_CODE } });
-  const taxRate = Number(defaultHsn.gstRate);
-  const taxAmount = subtotal * taxRate;
-  const totalAmount = subtotal + taxAmount;
+  // G1 Part D: reuse the SAME central tax engine createInvoice/amendInvoice use (priceInvoice) —
+  // no second, divergent flat-rate calculation. Each line stays FIXED-rate (the memo's
+  // already-agreed sellingPrice IS the decided price, exactly as before); HSN is omitted per line
+  // (defaults to DEFAULT_HSN_CODE), matching this path's pre-existing single-rate behavior
+  // numerically exactly when no per-line override is given (every line shares one rate, so the
+  // per-line-then-summed tax below reduces to the old flat subtotal*rate). One side-effect of
+  // reuse, not a bug: a tagged line's own ProductCategory is now attached (createInvoice already
+  // does this; this path silently never had it before), and the automatic round-off this path was
+  // explicitly missing (CLAUDE.md's own noted gap) now applies, booked to LEDGER_ACCOUNT.ROUND_OFF
+  // below exactly like createInvoice's own entry.
+  const invoiceDate = new Date();
+  const mappedItems = items.map((lineItem) => {
+    const memoItem = memoItemByTagId.get(lineItem.tagId)!;
+    const tag = memoItem.tag!;
+    return {
+      productCode: tag.tagNumber,
+      description: lineItem.description ?? memoItem.description ?? tag.name,
+      huid: tag.huid ?? memoItem.huid ?? undefined,
+      karat: tag.metalKarat ?? memoItem.karat ?? undefined,
+      quantity: 1,
+      grossWeight: Number(tag.grossWeight),
+      netGoldWeight: Number(tag.netWeight),
+      stoneWeight: Number(tag.stoneWeight),
+      rateType: 'FIXED',
+      goldRate: lineItem.sellingPrice,
+      tagId: lineItem.tagId,
+    };
+  });
+  const priced = await priceInvoice({ invoiceDate, currency: 'INR', items: mappedItems }, ctx);
+  const { items: pricedItems, subtotal, taxAmount, totalAmount, discountScale, roundOffExact } = priced;
 
   const invoice = await tenantTransaction(ctx.companyId, async (tx) => {
-    const invoiceNumber = await nextDocumentNumber(ctx.companyId, 'INV', 'INV', tx);
+    const invoiceNumber = await nextDocumentNumber(ctx.companyId, 'INV', 'INV', tx, gstFinancialYear(invoiceDate));
 
     // F3: dealer credit limit — same check createInvoice runs, the memo path's client was already
     // loaded above so this is free.
     checkCreditLimit(memo.client, totalAmount);
     assertPanIfRequired(memo.client, totalAmount); // Rule 114B — same check as createInvoice (a GSTIN carries the dealer's PAN)
-
-    // Build invoice items from memo items matched by tagId — every lookup below is guaranteed
-    // to hit (memoItemByTagId/tag were already proven to exist above), so there is no longer a
-    // silent "??" fallback path masking a forged/missing tag.
-    const invoiceItems = items.map((lineItem) => {
-      const memoItem = memoItemByTagId.get(lineItem.tagId)!;
-      const tag = memoItem.tag!;
-      return {
-        productCode: tag.tagNumber,
-        description: lineItem.description ?? memoItem.description ?? tag.name,
-        huid: tag.huid ?? memoItem.huid ?? null,
-        karat: tag.metalKarat ?? memoItem.karat ?? null,
-        quantity: 1,
-        grossWeight: Number(tag.grossWeight),
-        netGoldWeight: Number(tag.netWeight),
-        stoneWeight: Number(tag.stoneWeight),
-        rateType: 'FIXED',
-        goldRate: lineItem.sellingPrice,
-        makingCharge: 0,
-        stoneValue: 0,
-        unitPrice: lineItem.sellingPrice,
-        totalPrice: lineItem.sellingPrice,
-        tagId: lineItem.tagId,
-        hsnCodeId: defaultHsn.id,
-        taxRate,
-      };
-    });
-
-    const inv = await tx.salesInvoice.create({
-      data: {
-        companyId: ctx.companyId, branchId: memo.branchId,
-        invoiceNumber,
-        clientId: memo.clientId,
-        invoiceDate: new Date(),
-        invoiceType: 'APPROVAL_CONVERTED',
-        currency: 'INR',
-        exchangeRate: 1,
-        subtotal,
-        taxAmount,
-        totalAmount,
-        balanceDue: totalAmount,
-        notes: `Converted from approval memo ${memo.memoNumber}`,
-        items: { createMany: { data: invoiceItems } },
-      },
-      include: { client: true, items: true },
-    });
 
     // GST record. Same invariant as createInvoice (A1): a taxable INR sale must never emit an
     // e-invoice claiming zero GST. currency is hardcoded to 'INR' above, so this can't trip today,
@@ -1770,22 +1898,47 @@ export async function convertMemoToInvoice(
       throw new AppError('Refusing to emit a zero-GST tax invoice on a taxable INR sale', 500);
     }
 
-    // Same multi-tenant fix as createInvoice(): read from the resolved Company row, not a
-    // global env var.
-    const company = await tx.company.findUniqueOrThrow({ where: { id: ctx.companyId } });
-    const COMPANY_STATE = company.stateCode ?? '';
+    // G1 Part E: same seller-registration resolution and immutable seller/buyer snapshot as
+    // createInvoice — fixes the hardcoded-seller-identity bug on this path too.
+    const seller = await resolveSellerRegistration(tx, ctx.companyId, memo.branchId);
     // B2: same free-text-to-code resolution as createInvoice.
     const clientStateCode = await resolveStateCode(memo.client.state);
-    const isSameState = clientStateCode === COMPANY_STATE;
+    const isSameState = clientStateCode === seller.stateCode;
+    const { cgst: cgstAmt, sgst: sgstAmt, igst: igstAmt } = splitGst(taxAmount, isSameState);
+
+    // G1 Part D: per-line tax split, same numbers the invoice-level split above uses.
+    const lineTax = allocateLineTax(pricedItems, discountScale, isSameState);
+    const itemsWithTax = pricedItems.map((it, idx) => ({ ...it, ...lineTax[idx] }));
+
+    const inv = await tx.salesInvoice.create({
+      data: {
+        companyId: ctx.companyId, branchId: memo.branchId,
+        invoiceNumber,
+        clientId: memo.clientId,
+        invoiceDate,
+        invoiceType: 'APPROVAL_CONVERTED',
+        currency: 'INR',
+        exchangeRate: 1,
+        subtotal, taxAmount, roundOff: roundOffExact, totalAmount,
+        balanceDue: totalAmount,
+        notes: `Converted from approval memo ${memo.memoNumber}`,
+        items: { createMany: { data: itemsWithTax } },
+      },
+      include: { client: true, items: true },
+    });
+
     await tx.taxInvoice.create({
       data: {
         companyId: ctx.companyId,
-        invoiceId: inv.id, gstin: company.gstin ?? 'N/A',
+        invoiceId: inv.id, gstin: seller.gstin,
         placeOfSupply: clientStateCode ?? memo.client.state ?? '', taxableAmount: subtotal,
-        cgst: isSameState ? taxAmount / 2 : 0,
-        sgst: isSameState ? taxAmount / 2 : 0,
-        igst: isSameState ? 0 : taxAmount,
-        totalTax: taxAmount,
+        cgst: cgstAmt, sgst: sgstAmt, igst: igstAmt, totalTax: taxAmount,
+        sellerRegistrationId: seller.registrationId,
+        sellerLegalName: seller.sellerLegalName, sellerTradeName: seller.sellerTradeName,
+        sellerStateCode: seller.sellerStateCode, sellerAddress: seller.sellerAddress,
+        sellerCity: seller.sellerCity, sellerDistrict: seller.sellerDistrict,
+        sellerPincode: seller.sellerPincode, sellerCountry: seller.sellerCountry,
+        ...buyerSnapshot(memo.client, clientStateCode),
       },
     });
 
@@ -1808,9 +1961,9 @@ export async function convertMemoToInvoice(
 
     // F1 gap closed (Phase 2): this path (wholesale/dealer sales via memo conversion) never
     // posted a JournalEntry — only createInvoice's direct-sale path did, so Trial Balance/P&L
-    // silently excluded every memo-converted sale. Same AR/Revenue/GST/COGS/Inventory shape as
-    // createInvoice's own entry, sized off each converted tag's own costPrice (COGS is always
-    // present here — unlike createInvoice, every line on this path is tag-backed, never free-text).
+    // silently excluded every memo-converted sale. Same AR/Revenue/GST/COGS/Inventory/Round-off
+    // shape as createInvoice's own entry, sized off each converted tag's own costPrice (COGS is
+    // always present here — unlike createInvoice, every line on this path is tag-backed, never free-text).
     const cogsAmount = tagIds.reduce((s, tagId) => s + Number(memoItemByTagId.get(tagId)!.tag!.costPrice), 0);
     await postAutoJournalEntry(tx, ctx.companyId, {
       date: inv.invoiceDate, description: `Memo Conversion ${invoiceNumber}`,
@@ -1818,9 +1971,10 @@ export async function convertMemoToInvoice(
       lines: [
         { accountCode: LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE, debit: totalAmount },
         { accountCode: LEDGER_ACCOUNT.SALES_REVENUE, credit: subtotal },
-        { accountCode: LEDGER_ACCOUNT.CGST_PAYABLE, credit: isSameState ? taxAmount / 2 : 0 },
-        { accountCode: LEDGER_ACCOUNT.SGST_PAYABLE, credit: isSameState ? taxAmount / 2 : 0 },
-        { accountCode: LEDGER_ACCOUNT.IGST_PAYABLE, credit: isSameState ? 0 : taxAmount },
+        { accountCode: LEDGER_ACCOUNT.CGST_PAYABLE, credit: cgstAmt },
+        { accountCode: LEDGER_ACCOUNT.SGST_PAYABLE, credit: sgstAmt },
+        { accountCode: LEDGER_ACCOUNT.IGST_PAYABLE, credit: igstAmt },
+        { accountCode: LEDGER_ACCOUNT.ROUND_OFF, credit: roundOffExact > 0 ? roundOffExact : 0, debit: roundOffExact < 0 ? -roundOffExact : 0 },
         { accountCode: LEDGER_ACCOUNT.COST_OF_GOODS, debit: cogsAmount },
         { accountCode: LEDGER_ACCOUNT.INVENTORY, credit: cogsAmount },
       ],

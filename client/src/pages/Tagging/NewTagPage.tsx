@@ -906,6 +906,8 @@ export function NewTagPage() {
                         size="small"
                         label={agentStatusQuery.data.online
                           ? `Printer online: ${agentStatusQuery.data.printerName}`
+                          : !agentStatusQuery.data.configured
+                          ? 'Print agent needs setup — open Hardware page'
                           : `Printer offline (${agentStatusQuery.data.printerName})`}
                         color={agentStatusQuery.data.online ? 'success' : 'error'}
                       />

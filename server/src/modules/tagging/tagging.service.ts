@@ -75,9 +75,13 @@ export async function updateBranch(id: string, companyId: string, data: {
   name?: string; address?: string; city?: string; state?: string;
   phone?: string; email?: string; managerName?: string;
   isHeadOffice?: boolean; isActive?: boolean;
+  // G1 Part B/K: which GST registration this branch invoices under — null clears it (falls back
+  // to the company's primary registration at invoice time, see sales.service.ts:resolveSellerRegistration).
+  gstRegistrationId?: string | null;
 }) {
   const existing = await tenantQuery(companyId, (_tx) => _tx.branch.findUnique({ where: { id }, select: { companyId: true } }));
   if (!existing || existing.companyId !== companyId) throw new AppError('Branch not found', 404);
+  await assertOwnedIfPresent('companyGstRegistration', data.gstRegistrationId, companyId, 'GST registration');
   return tenantQuery(companyId, (_tx) => _tx.branch.update({ where: { id }, data }));
 }
 

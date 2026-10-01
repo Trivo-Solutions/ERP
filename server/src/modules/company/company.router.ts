@@ -47,3 +47,48 @@ companyRouter.delete(
     res.json({ success: true, message: 'Branch access revoked' });
   }
 );
+
+// G1 Part K — GST Registration admin.
+const gstRegistrationSchema = z.object({
+  gstin: z.string().length(15), legalName: z.string().min(1), tradeName: z.string().optional().nullable(),
+  stateCode: z.string().min(1).max(2), address: z.string().optional().nullable(), city: z.string().optional().nullable(),
+  district: z.string().optional().nullable(), pincode: z.string().optional().nullable(), country: z.string().optional(),
+  isPrimary: z.boolean().optional(), isActive: z.boolean().optional(),
+});
+
+companyRouter.get(
+  '/gst-registrations', requirePermission('gst:registration_view'),
+  async (req: Request, res: Response) => {
+    res.json({ success: true, data: await companyService.listGstRegistrations(req.tenant!.companyId) });
+  }
+);
+
+companyRouter.post(
+  '/gst-registrations', rejectClientTenantSelectors,
+  requirePermission('gst:registration_create'), validate(gstRegistrationSchema),
+  async (req: Request, res: Response) => {
+    const reg = await companyService.createGstRegistration(req.tenant!, req.body);
+    res.status(201).json({ success: true, data: reg });
+  }
+);
+
+companyRouter.put(
+  '/gst-registrations/:id', rejectClientTenantSelectors,
+  requirePermission('gst:registration_edit'), validate(gstRegistrationSchema.partial()),
+  async (req: Request, res: Response) => {
+    const reg = await companyService.updateGstRegistration(req.tenant!, req.params.id, req.body);
+    res.json({ success: true, data: reg });
+  }
+);
+
+// A registration's active/primary status is a distinct, higher-stakes action than an ordinary
+// field edit (it changes which registration new invoices are issued under) — gated on
+// gst:registration_manage, following the same "manage" precedent as repair:manage/karigar:issue.
+companyRouter.patch(
+  '/gst-registrations/:id/status', rejectClientTenantSelectors,
+  requirePermission('gst:registration_manage'), validate(z.object({ isActive: z.boolean().optional(), isPrimary: z.boolean().optional() })),
+  async (req: Request, res: Response) => {
+    const reg = await companyService.updateGstRegistration(req.tenant!, req.params.id, req.body);
+    res.json({ success: true, data: reg });
+  }
+);

@@ -8,20 +8,19 @@ import { useQuery } from '@tanstack/react-query';
 import { apiGet } from '../../api/client';
 import { PageHeader, PageActions } from '../../components/common/PageHeader';
 import { exportToCsv } from '../../utils/exportToCsv';
+import { defaultGstFrom, defaultGstTo } from '../../utils/date';
 
 function money(n: number) {
   return '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 });
 }
-
-const currentYear = new Date().getFullYear();
 
 // H1: every invoice (retail + wholesale, together — invoiceType is just a label on the row) in a
 // date range, filterable by salesperson. Branch filtering is approximate (SalesInvoice has no
 // branchId — CLAUDE.md's B2 note); left out of this screen rather than shipping a filter whose
 // results would be silently incomplete for free-text-only invoices.
 export function SalesRegister() {
-  const [from, setFrom] = useState(`${currentYear}-04-01`);
-  const [to, setTo] = useState(new Date().toISOString().split('T')[0]);
+  const [from, setFrom] = useState(defaultGstFrom);
+  const [to, setTo] = useState(defaultGstTo);
   const [salesPersonId, setSalesPersonId] = useState('');
 
   const { data: staff } = useQuery({ queryKey: ['staff'], queryFn: () => apiGet<any[]>('/sales/staff') });

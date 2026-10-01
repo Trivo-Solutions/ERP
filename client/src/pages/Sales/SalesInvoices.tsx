@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   Box, Card, Table, TableHead, TableBody, TableRow, TableCell, Typography, Chip, Button,
   Grid, MenuItem, TextField, Drawer, Stack, Divider, IconButton, CircularProgress, Checkbox, Tooltip,
+  FormControlLabel,
 } from '@mui/material';
 import { Add, Close, Edit as EditIcon, Payment as PaymentIcon, Print, Undo } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -14,6 +15,7 @@ import { StatusChip } from '../../components/common/StatusChip';
 import { DataTable } from '../../components/common/DataTable';
 import { DateField } from '../../components/fields/DateField';
 import { printInvoice } from '../../utils/printInvoice';
+import { printCreditNote } from '../../utils/printCreditNote';
 import { useAuthStore } from '../../store/auth.store';
 import { PermissionGate } from '../../components/auth/PermissionGate';
 
@@ -98,19 +100,29 @@ function ReturnItemsForm({ invoiceId, items, alreadyReturnedIds }: {
     setSelected((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
   };
 
+  const canIssueCreditNote = useAuthStore((s) => s.hasPermission('creditNote:create'));
+  const [issueCreditNote, setIssueCreditNote] = useState(true);
+
   const mutation = useMutation({
     mutationFn: () => apiPost('/sales/returns', {
       invoiceId,
       items: selected.map((invoiceItemId) => ({ invoiceItemId })),
       reason: reason || undefined,
+      issueCreditNote: canIssueCreditNote && issueCreditNote,
     }),
-    onSuccess: () => {
+    onSuccess: (res: any) => {
       qc.invalidateQueries({ queryKey: ['invoice-detail', invoiceId] });
       qc.invalidateQueries({ queryKey: ['sales-invoices'] });
       qc.invalidateQueries({ queryKey: ['invoice-returns', invoiceId] });
+      qc.invalidateQueries({ queryKey: ['invoice-credit-notes', invoiceId] });
+      qc.invalidateQueries({ queryKey: ['sales-credit-notes'] });
       setSelected([]);
       setReason('');
-      enqueueSnackbar('Return recorded — tag(s) back in stock', { variant: 'success' });
+      const hasCn = !!(res?.data?.creditNote || res?.creditNote);
+      enqueueSnackbar(
+        hasCn ? 'Return recorded and formal GST Credit Note issued' : 'Return recorded — tag(s) back in stock',
+        { variant: 'success' },
+      );
     },
     onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed to record return', { variant: 'error' }),
   });
@@ -128,7 +140,24 @@ function ReturnItemsForm({ invoiceId, items, alreadyReturnedIds }: {
             <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{fmt(Number(item.totalPrice))}</Typography>
           </Stack>
         ))}
-        <Stack direction="row" spacing={1} alignItems="flex-start" sx={{ pt: 1 }}>
+        {canIssueCreditNote && (
+          <FormControlLabel
+            control={
+              <Checkbox
+                size="small"
+                checked={issueCreditNote}
+                onChange={(e) => setIssueCreditNote(e.target.checked)}
+              />
+            }
+            label={
+              <Typography variant="body2" sx={{ fontSize: 12, fontWeight: 600, color: 'text.secondary' }}>
+                Also issue formal GST Credit Note
+              </Typography>
+            }
+            sx={{ m: 0, pt: 0.5 }}
+          />
+        )}
+        <Stack direction="row" spacing={1} alignItems="flex-start" sx={{ pt: 0.5 }}>
           <TextField size="small" label="Reason (optional)" value={reason}
             onChange={(e) => setReason(e.target.value)} sx={{ flex: 1 }} />
           <Button variant="contained" color="warning" size="small" startIcon={<Undo />}
@@ -143,6 +172,10 @@ function ReturnItemsForm({ invoiceId, items, alreadyReturnedIds }: {
 }
 
 function InvoiceDrawer({ invoiceId, onClose, onEdit }: { invoiceId: string; onClose: () => void; onEdit?: () => void }) {
+  const { enqueueSnackbar } = useSnackbar();
+  const qc = useQueryClient();
+  const canCreateCN = useAuthStore((s) => s.hasPermission('creditNote:create'));
+
   const { data, isLoading } = useQuery({
     queryKey: ['invoice-detail', invoiceId],
     queryFn: () => apiGet<any>(`/sales/invoices/${invoiceId}`),
@@ -157,6 +190,25 @@ function InvoiceDrawer({ invoiceId, onClose, onEdit }: { invoiceId: string; onCl
   });
   const returns: any[] = returnsData ?? [];
   const returnedItemIds = new Set(returns.flatMap((r) => r.items.map((i: any) => i.invoiceItemId)));
+
+  const { data: creditNotesData } = useQuery({
+    queryKey: ['invoice-credit-notes', invoiceId],
+    queryFn: () => apiGet<any[]>('/sales/credit-notes', { invoiceId }),
+    enabled: !!invoiceId,
+  });
+  const creditNotes: any[] = creditNotesData ?? [];
+
+  const issueCnForReturnMutation = useMutation({
+    mutationFn: (returnId: string) => apiPost(`/sales/returns/${returnId}/credit-note`, {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['invoice-credit-notes', invoiceId] });
+      qc.invalidateQueries({ queryKey: ['sales-credit-notes'] });
+      enqueueSnackbar('GST Credit Note issued for return', { variant: 'success' });
+    },
+    onError: (err: any) => {
+      enqueueSnackbar(err.response?.data?.error ?? 'Failed to issue credit note', { variant: 'error' });
+    },
+  });
 
   return (
     <Drawer anchor="right" open={!!invoiceId} onClose={onClose} PaperProps={{ sx: { width: 640 } }}>
@@ -252,13 +304,62 @@ function InvoiceDrawer({ invoiceId, onClose, onEdit }: { invoiceId: string; onCl
                 <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1 }}>Returns</Typography>
                 <Table size="small">
                   <TableBody>
-                    {returns.map((r: any) => (
-                      <TableRow key={r.id}>
-                        <TableCell sx={{ fontFamily: 'monospace', fontSize: 12 }}>{r.returnNumber}</TableCell>
-                        <TableCell sx={{ fontSize: 12 }}>{new Date(r.returnDate).toLocaleDateString('en-IN')}</TableCell>
-                        <TableCell sx={{ fontSize: 12 }}>{r.reason || '—'}</TableCell>
-                        <TableCell align="right" sx={{ fontFamily: 'monospace', color: 'warning.main' }}>
-                          {fmt(Number(r.totalAmount))}
+                    {returns.map((r: any) => {
+                      const hasCn = creditNotes.some((cn: any) => cn.salesReturnId === r.id);
+                      return (
+                        <TableRow key={r.id}>
+                          <TableCell sx={{ fontFamily: 'monospace', fontSize: 12 }}>{r.returnNumber}</TableCell>
+                          <TableCell sx={{ fontSize: 12 }}>{new Date(r.returnDate).toLocaleDateString('en-IN')}</TableCell>
+                          <TableCell sx={{ fontSize: 12 }}>{r.reason || '—'}</TableCell>
+                          <TableCell align="right" sx={{ fontFamily: 'monospace', color: 'warning.main' }}>
+                            {fmt(Number(r.totalAmount))}
+                          </TableCell>
+                          <TableCell align="right" sx={{ width: 95 }}>
+                            {hasCn ? (
+                              <Chip label="CN Issued" size="small" color="success" variant="outlined" sx={{ height: 20, fontSize: 10 }} />
+                            ) : canCreateCN ? (
+                              <Button
+                                size="small"
+                                variant="outlined"
+                                sx={{ fontSize: 10, py: 0.2, height: 22 }}
+                                disabled={issueCnForReturnMutation.isPending}
+                                onClick={() => issueCnForReturnMutation.mutate(r.id)}
+                              >
+                                Issue CN
+                              </Button>
+                            ) : null}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </Box>
+            )}
+
+            {creditNotes.length > 0 && (
+              <Box sx={{ mt: 2, mb: 2 }}>
+                <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1 }}>Credit Notes</Typography>
+                <Table size="small">
+                  <TableBody>
+                    {creditNotes.map((cn: any) => (
+                      <TableRow key={cn.id}>
+                        <TableCell sx={{ fontFamily: 'monospace', fontSize: 12, fontWeight: 700, color: cn.status === 'CANCELLED' ? 'text.secondary' : '#44C47A' }}>
+                          {cn.creditNoteNumber}
+                          {cn.status === 'CANCELLED' && (
+                            <Chip label="Cancelled" size="small" color="error" sx={{ ml: 0.5, height: 16, fontSize: 9 }} />
+                          )}
+                        </TableCell>
+                        <TableCell sx={{ fontSize: 12 }}>{new Date(cn.creditNoteDate).toLocaleDateString('en-IN')}</TableCell>
+                        <TableCell align="right" sx={{ fontFamily: 'monospace', color: cn.status === 'CANCELLED' ? 'text.secondary' : 'error.main' }}>
+                          - {fmt(Number(cn.totalAmount))}
+                        </TableCell>
+                        <TableCell align="right" sx={{ width: 40 }}>
+                          <Tooltip title="Print / PDF">
+                            <IconButton size="small" onClick={() => printCreditNote(cn)}>
+                              <Print fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
                         </TableCell>
                       </TableRow>
                     ))}

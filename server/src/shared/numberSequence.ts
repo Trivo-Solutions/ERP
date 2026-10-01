@@ -27,6 +27,24 @@ import { tenantTransaction } from './tenantContext';
 // long-held-lock problem this design avoids).
 // ═══════════════════════════════════════════════════
 
+// G1 Part C: the Indian GST financial year runs Apr–Mar, not Jan–Dec. Returns the calendar year
+// the FY STARTS in (e.g. 2026-03-31 -> 2025, meaning "FY 2025-26"; 2026-04-01 -> 2026, "FY
+// 2026-27"). getMonth() is 0-indexed, so Jan/Feb/Mar are months 0-2 — before April, the FY
+// started the PREVIOUS calendar year.
+//
+// No backfill was needed for the cutover to this from the old (calendar-year) key: for any
+// invoice dated April-December, the FY-start year and the calendar year are IDENTICAL, so every
+// existing number_sequences row keyed by a plain calendar year already reads as the correct FY
+// key today. Only a January-March invoice would have used the "wrong" (next) sequence under the
+// old scheme — and one keyed collision away, the FIRST such invoice after this ships correctly
+// resumes the FY's own already-running counter (the one Apr-Dec of that FY used), rather than
+// starting a fresh "new year" counter at 1, which is the actual bug this fixes.
+export function gstFinancialYear(date: Date): number {
+  const year = date.getFullYear();
+  const month = date.getMonth();
+  return month < 3 ? year - 1 : year;
+}
+
 export interface NumberSequenceKey {
   companyId: string;
   documentType: string;
@@ -71,7 +89,7 @@ export async function nextDocumentNumber(
   documentType: string,
   prefix: string,
   tx?: Prisma.TransactionClient | typeof prisma,
-  year: number = new Date().getFullYear()
+  year: number = gstFinancialYear(new Date())
 ): Promise<string> {
   const value = await nextSequenceValue({ companyId, documentType, financialYear: year }, tx);
   return `${prefix}-${year}-${String(value).padStart(6, '0')}`;

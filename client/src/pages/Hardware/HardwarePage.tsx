@@ -1,17 +1,17 @@
 import { useState } from 'react';
 import {
   Box, Grid, Card, CardContent, Typography, Chip, Button, TextField, MenuItem,
-  Alert, Table, TableHead, TableBody, TableRow, TableCell, Divider, Tooltip,
+  Alert, Table, TableHead, TableBody, TableRow, TableCell, Divider, Tooltip, Link,
 } from '@mui/material';
 import { useQuery, useMutation } from '@tanstack/react-query';
-import { Scale, QrCode, Nfc, Link as LinkIcon, LinkOff, Usb, Print, Download } from '@mui/icons-material';
+import { Scale, QrCode, Nfc, Link as LinkIcon, LinkOff, Usb, Print, Download, Settings } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost } from '../../api/client';
 import { PageHeader } from '../../components/common/PageHeader';
 import { useScaleReading } from '../../hooks/useSocket';
 import { useWebSerial } from '../../hooks/useWebSerial';
 import { useUiStore } from '../../store/ui.store';
-import { getPrintAgentStatus, PRINT_AGENT_DOWNLOAD_URL } from '../../utils/printAgent';
+import { getPrintAgentStatus, PRINT_AGENT_DOWNLOAD_URL, PRINT_AGENT_INSTALLER_URL, PRINT_AGENT_SETUP_URL } from '../../utils/printAgent';
 
 export function HardwarePage() {
   const { enqueueSnackbar } = useSnackbar();
@@ -270,9 +270,18 @@ export function HardwarePage() {
                 <Print color="primary" />
                 <Typography variant="subtitle1" fontWeight={700}>Label Printer Agent</Typography>
                 <Chip
-                  label={printAgentStatus?.online ? 'ONLINE' : printAgentOffline ? 'NOT RUNNING' : 'CHECKING...'}
+                  label={
+                    printAgentStatus?.online ? 'ONLINE'
+                      : printAgentStatus && !printAgentStatus.configured ? 'NEEDS SETUP'
+                      : printAgentStatus ? 'OFFLINE'
+                      : printAgentOffline ? 'NOT RUNNING' : 'CHECKING...'
+                  }
                   size="small"
-                  color={printAgentStatus?.online ? 'success' : printAgentOffline ? 'error' : 'default'}
+                  color={
+                    printAgentStatus?.online ? 'success'
+                      : printAgentStatus ? 'warning'
+                      : printAgentOffline ? 'error' : 'default'
+                  }
                 />
               </Box>
 
@@ -283,7 +292,7 @@ export function HardwarePage() {
 
               {printAgentStatus && (
                 <Typography variant="body2" sx={{ mb: 2 }}>
-                  {printAgentStatus.printerName} — {printAgentStatus.statusText}
+                  {printAgentStatus.configured ? printAgentStatus.printerName : 'Not configured'} — {printAgentStatus.statusText}
                 </Typography>
               )}
 
@@ -291,17 +300,36 @@ export function HardwarePage() {
                 fullWidth
                 variant="contained"
                 startIcon={<Download />}
-                href={PRINT_AGENT_DOWNLOAD_URL}
+                href={PRINT_AGENT_INSTALLER_URL}
                 download
                 sx={{ mb: 1 }}
               >
-                Download Print Agent
+                Download Print Agent (Installer)
               </Button>
 
+              {printAgentStatus && (
+                <Button
+                  fullWidth
+                  variant="outlined"
+                  startIcon={<Settings />}
+                  href={PRINT_AGENT_SETUP_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  sx={{ mb: 1 }}
+                >
+                  {printAgentStatus.configured ? 'Change Printer / Autostart' : 'Open Setup'}
+                </Button>
+              )}
+
               <Typography variant="caption" color="text.secondary" component="div">
-                Extract the zip, copy <code>.env.example</code> to <code>.env</code> and set your
-                printer's exact Windows name, then run <code>printer-agent.exe</code>. No Node or
-                other setup needed. Full steps are in the zip's README.
+                Run <code>TRIVO Print Agent Setup.exe</code> — it installs, starts automatically at
+                login, and auto-detects your printer (or opens a setup page to pick it from a
+                list). Nothing to copy or edit by hand, no admin rights needed.
+              </Typography>
+              <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 1 }}>
+                Prefer the manual route instead? <Link href={PRINT_AGENT_DOWNLOAD_URL} download>Download the .zip</Link> and
+                run <code>printer-agent.exe</code> directly — same auto-detect/setup behavior, but
+                no install step or autostart.
               </Typography>
             </CardContent>
           </Card>

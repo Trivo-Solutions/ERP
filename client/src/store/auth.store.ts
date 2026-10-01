@@ -12,6 +12,10 @@ interface User {
   permissions: string[];
   department?: string;
   companyUserId?: string;
+  branchAccess?: {
+    allBranches: boolean;
+    branchIds: string[];
+  };
 }
 
 // Display-only — which tenant this session's JWT was issued for. The backend embeds companyId

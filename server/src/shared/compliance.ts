@@ -15,7 +15,9 @@ export const PAN_REQUIRED_ABOVE = 200_000;
 
 export const PAN_REGEX = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
 
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+// Exported for shared/istDate.ts (GST report date-boundary hardening) — same fixed offset, India
+// has no DST so a constant is always correct, not just an approximation.
+export const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 const inr = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 

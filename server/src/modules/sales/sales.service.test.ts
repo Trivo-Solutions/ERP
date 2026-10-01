@@ -757,6 +757,67 @@ describe('createInvoice (tag-aware direct invoicing)', () => {
     });
   });
 
+  // G2g-3a: statutory GST UQC snapshot on InvoiceItem — resolved once at sale time from an
+  // explicit line value or the line's own HSN's defaultUqc, validated against the GST UQC catalog,
+  // never re-derived later.
+  describe('UQC snapshot (G2g-3a)', () => {
+    let noDefaultHsnId: string;
+    const NO_DEFAULT_UQC_HSN_CODE = `TSTHSNNOUQC-${suffix}`;
+
+    beforeAll(async () => {
+      const hsn = await prisma.hsnCode.create({
+        data: { code: NO_DEFAULT_UQC_HSN_CODE, description: 'Test HSN, no default UQC', gstRate: 0.03 },
+      });
+      noDefaultHsnId = hsn.id;
+    });
+
+    afterAll(async () => {
+      await prisma.hsnCode.delete({ where: { id: noDefaultHsnId } });
+    });
+
+    it('resolves an omitted line uqc to its HSN\'s defaultUqc (7113 -> GMS)', async () => {
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+      expect(invoice.items[0].uqc).toBe('GMS');
+    });
+
+    it('stamps an explicit line uqc, normalized to upper case, instead of the HSN default', async () => {
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ uqc: 'pcs' })] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+      expect(invoice.items[0].uqc).toBe('PCS');
+    });
+
+    it('rejects an unrecognized uqc without creating an invoice', async () => {
+      const invoiceCountBefore = await prisma.salesInvoice.count({ where: { clientId } });
+      await expect(
+        createInvoice(
+          { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ uqc: 'GRAMS' })] },
+          userId
+        )
+      ).rejects.toThrow(/Unknown GST UQC/);
+      const invoiceCountAfter = await prisma.salesInvoice.count({ where: { clientId } });
+      expect(invoiceCountAfter).toBe(invoiceCountBefore);
+    });
+
+    it('leaves uqc null when the line omits it and its HSN has no defaultUqc set', async () => {
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          items: [baseItem({ hsnCode: NO_DEFAULT_UQC_HSN_CODE })],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+      expect(invoice.items[0].uqc).toBeNull();
+    });
+  });
+
   // B2: client.state (free text) vs COMPANY_STATE_CODE (numeric) never matched, so every sale
   // priced as inter-state IGST regardless of the client's actual state. These prove a same-state
   // client now correctly nets CGST+SGST (by canonical name and by alias), a genuinely different
@@ -2205,8 +2266,8 @@ describe('amendInvoice (edit an issued invoice)', () => {
       const lineA = inv.items.find((i) => i.tagId === a.id)!;
       const lineB = inv.items.find((i) => i.tagId === b.id)!;
 
-      await expect(amend(inv.id, { items: [keep(lineA, { goldRate: 9000 }), keep(lineB)] })).rejects.toThrow(/has been returned and cannot be changed/);
-      await expect(amend(inv.id, { items: [keep(lineB)] })).rejects.toThrow(/has been returned and cannot be changed or removed/);
+      await expect(amend(inv.id, { items: [keep(lineA, { goldRate: 9000 }), keep(lineB)] })).rejects.toThrow(/has been returned or credited and cannot be changed/);
+      await expect(amend(inv.id, { items: [keep(lineB)] })).rejects.toThrow(/has been returned or credited and cannot be changed or removed/);
 
       const ok = await amend(inv.id, { items: [keep(lineA), keep(lineB, { goldRate: 6000 })] });
       expect(ok.items).toHaveLength(2);

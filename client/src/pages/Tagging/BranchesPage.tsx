@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
   Box, Card, Table, TableHead, TableBody, TableRow, TableCell, Typography,
   Button, Grid, Dialog, DialogTitle, DialogContent, DialogActions,
-  TextField, Chip, Switch, FormControlLabel, IconButton,
+  TextField, Chip, Switch, FormControlLabel, IconButton, MenuItem,
 } from '@mui/material';
 import { Add, Edit } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -29,12 +29,25 @@ function BranchDialog({
       managerName: branch?.managerName ?? '',
       isHeadOffice: branch?.isHeadOffice ?? false,
       isActive: branch?.isActive ?? true,
+      gstRegistrationId: branch?.gstRegistrationId ?? '',
     },
   });
 
+  // G1 Part B: which GST registration this branch invoices under — only meaningful once at least
+  // one registration exists (see the GST Registrations page); left blank falls back to the
+  // company's primary registration at invoice time (sales.service.ts:resolveSellerRegistration).
+  const { data: regData } = useQuery({
+    queryKey: ['gst-registrations'],
+    queryFn: () => apiGet<any>('/company/gst-registrations'),
+    enabled: isEdit,
+  });
+  const registrations: any[] = (regData as any)?.data ?? regData ?? [];
+
   const mutation = useMutation({
     mutationFn: (data: any) =>
-      isEdit ? apiPatch(`/tagging/branches/${branch.id}`, data) : apiPost('/tagging/branches', data),
+      isEdit
+        ? apiPatch(`/tagging/branches/${branch.id}`, { ...data, gstRegistrationId: data.gstRegistrationId || null })
+        : apiPost('/tagging/branches', data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['branches'] });
       enqueueSnackbar(isEdit ? 'Branch updated' : 'Branch created', { variant: 'success' });
@@ -93,6 +106,19 @@ function BranchDialog({
                   render={({ field }) => (
                     <FormControlLabel control={<Switch checked={field.value} onChange={(e) => field.onChange(e.target.checked)} />}
                       label="Active" />
+                  )} />
+              </Grid>
+            )}
+            {isEdit && (
+              <Grid item xs={12}>
+                <Controller name="gstRegistrationId" control={control}
+                  render={({ field }) => (
+                    <TextField {...field} select fullWidth label="GST Registration">
+                      <MenuItem value="">Company's primary registration (default)</MenuItem>
+                      {registrations.map((r: any) => (
+                        <MenuItem key={r.id} value={r.id}>{r.gstin} — {r.legalName}</MenuItem>
+                      ))}
+                    </TextField>
                   )} />
               </Grid>
             )}

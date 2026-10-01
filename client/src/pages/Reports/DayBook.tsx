@@ -13,7 +13,8 @@ function money(n: number) {
 
 // H4: one day's company-wide rollup — sales issued, payments received (the actual cash/bank
 // movement, by mode, for till reconciliation), returns and exchanges (accounting credits, kept
-// separate from payments since neither is same-day cash paid out).
+// separate from payments since neither is same-day cash paid out), and standalone credit notes
+// (customer-balance credits, excluding return-linked which are under returns, and cancelled notes).
 export function DayBook() {
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
 
@@ -131,6 +132,32 @@ export function DayBook() {
                 <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                   <Typography fontWeight={700}>Total</Typography>
                   <Typography fontWeight={700} sx={{ fontFamily: 'monospace' }}>{money(data.exchanges.totalAmount)}</Typography>
+                </Box>
+              </CardContent>
+            </Card>
+          </Grid>
+
+          <Grid item xs={12} md={6}>
+            <Card>
+              <CardContent>
+                <Typography variant="subtitle1" fontWeight={700} gutterBottom>Credit Notes ({data.creditNotes?.count ?? 0})</Typography>
+                <Table size="small">
+                  <TableBody>
+                    {(data.creditNotes?.rows ?? []).map((r: any) => (
+                      <TableRow key={r.creditNoteNumber}>
+                        <TableCell sx={{ fontFamily: 'monospace', fontSize: 12 }}>{r.creditNoteNumber}</TableCell>
+                        <TableCell align="right" sx={{ fontFamily: 'monospace' }}>{money(r.amount)}</TableCell>
+                      </TableRow>
+                    ))}
+                    {(data.creditNotes?.rows ?? []).length === 0 && (
+                      <TableRow><TableCell colSpan={2} align="center" sx={{ py: 2, color: 'text.secondary' }}>No credit notes</TableCell></TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+                <Divider sx={{ my: 1 }} />
+                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <Typography fontWeight={700}>Total</Typography>
+                  <Typography fontWeight={700} sx={{ fontFamily: 'monospace' }}>{money(data.creditNotes?.totalAmount ?? 0)}</Typography>
                 </Box>
               </CardContent>
             </Card>

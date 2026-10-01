@@ -19,10 +19,14 @@ const ACTION_LABELS: Record<string, string> = {
   adjust: 'Adjust', approve: 'Approve', split: 'Split', issue: 'Issue', return: 'Return',
   verify: 'Verify', inspect: 'Inspect', post: 'Post', transfer: 'Transfer', doc: 'Export',
   config: 'Configure', estimate: 'Estimate', invoice: 'Invoice',
-  deactivate: 'Deactivate/Reactivate', void: 'Void', reverse: 'Reverse',
+  deactivate: 'Deactivate/Reactivate', void: 'Void', reverse: 'Reverse', cancel: 'Cancel',
   // J4: split out of a broader existing action (report:view, po:approve) — kept as its own label
   // rather than folded into the existing one so the Role Editor shows it as a distinct grant.
   financial_view: 'View (Financial Detail)', approve_high_value: 'Approve (High Value, >₹5,00,000)',
+  // G1: GST registration is its own resource (gst:registration_*) — the action segment carries an
+  // underscore, which starterPackage/validate.ts's permission-string regex already accommodates
+  // (widened for J4-D1's report:financial_view/po:approve_high_value, same shape here).
+  registration_view: 'View', registration_create: 'Create', registration_edit: 'Edit', registration_manage: 'Manage (Activate/Assign to Branch)',
 };
 
 function cap(permission: string): PermissionCapability {
@@ -150,6 +154,53 @@ export const PERMISSION_CATALOG: PermissionCatalogGroup[] = [
       { key: 'finance', label: 'Finance & Ledgers', capabilities: [cap('finance:view')] },
       { key: 'journal', label: 'Journal Entries', capabilities: [cap('journal:create'), cap('journal:post')] },
       { key: 'tax', label: 'Tax', capabilities: [cap('tax:manage')] },
+    ],
+  },
+  {
+    label: 'GST & Compliance', items: [
+      // G1 Part K: a company's GST registration(s) — separate from ordinary masters (masters:*)
+      // since a GSTIN is a statutory identity record, not a rate/category master.
+      {
+        key: 'gstRegistration', label: 'GST Registrations',
+        capabilities: [cap('gst:registration_view'), cap('gst:registration_create'), cap('gst:registration_edit'), cap('gst:registration_manage')],
+      },
+      // G1 Part L: mirrors tagTemplate:view/create/edit and estimateTemplate:view/create/edit's
+      // exact 3-verb convention — printing an invoice only needs to READ the resolved template,
+      // so view is separate from the write actions, same reasoning as estimateTemplate's split.
+      {
+        key: 'taxInvoiceTemplate', label: 'Tax Invoice Templates',
+        capabilities: [cap('taxInvoiceTemplate:view'), cap('taxInvoiceTemplate:create'), cap('taxInvoiceTemplate:edit')],
+      },
+      // G2a: schema/RLS foundation only (CLAUDE.md's G2a entry) — no creation/cancellation service
+      // exists yet. Cataloged now (ungrantable-but-known, same posture as J4-D3's SUPER_ADMIN-only
+      // admin permissions) so the Role Editor can grant them the moment G2b ships the capability,
+      // with no further permission-catalog change needed. Not assigned to any starter role.
+      {
+        key: 'creditNote', label: 'GST Credit Notes',
+        capabilities: [cap('creditNote:view'), cap('creditNote:create'), cap('creditNote:cancel')],
+      },
+      {
+        key: 'debitNote', label: 'GST Debit Notes',
+        capabilities: [cap('debitNote:view'), cap('debitNote:create'), cap('debitNote:cancel')],
+      },
+      // G2g-4b: sell-side (outward) Debit Note — a wholly separate permission family from
+      // 'debitNote' above (procurement/purchase-side). Cataloged but, per the approved G2g-4b.2
+      // execution plan, deliberately NOT assigned to any starter role in this pass — same
+      // "ungrantable-but-known, Role Editor can grant the moment it's needed" posture the
+      // creditNote/debitNote entries above already documented when THEY shipped ahead of any
+      // starter-role grant.
+      {
+        key: 'salesDebitNote', label: 'GST Sales Debit Notes',
+        capabilities: [cap('salesDebitNote:view'), cap('salesDebitNote:create'), cap('salesDebitNote:cancel')],
+      },
+      {
+        key: 'creditNoteTemplate', label: 'Credit Note Templates',
+        capabilities: [cap('creditNoteTemplate:view'), cap('creditNoteTemplate:create'), cap('creditNoteTemplate:edit')],
+      },
+      {
+        key: 'debitNoteTemplate', label: 'Debit Note Templates',
+        capabilities: [cap('debitNoteTemplate:view'), cap('debitNoteTemplate:create'), cap('debitNoteTemplate:edit')],
+      },
     ],
   },
   {

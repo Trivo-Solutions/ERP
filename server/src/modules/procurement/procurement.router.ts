@@ -5,6 +5,8 @@ import { resolveTenantContext } from '../../middleware/tenant';
 import { AppError } from '../../middleware/error';
 import { prisma } from '../../config/database';
 import * as svc from './procurement.service';
+import * as debitNoteSvc from './debitNote.service';
+import * as debitNoteTemplateSvc from './debitNoteTemplate.service';
 import { tenantQuery } from '../../shared/tenantContext';
 import { parseDate, parseOptionalDate } from '../../shared/parseDate';
 import { hasPermission } from '../../middleware/rbac';
@@ -196,6 +198,75 @@ procurementRouter.get('/returns', requirePermission('po:view'), async (req: Requ
 });
 
 procurementRouter.post('/returns', requirePermission('po:approve'), async (req: Request, res: Response) => {
-  const purchaseReturn = await svc.createPurchaseReturn(req.body, req.tenant!, req.user!.userId);
+  // G2e: issueDebitNote is additive and opt-in — omitted (the existing default), behavior is
+  // completely unchanged for every current caller (mirrors sales.router.ts's issueCreditNote flag).
+  const { issueDebitNote, ...body } = req.body ?? {};
+  const purchaseReturn = await svc.createPurchaseReturn(body, req.tenant!, req.user!.userId, { issueDebitNote: !!issueDebitNote });
   res.status(201).json({ success: true, data: purchaseReturn });
+});
+
+// G2e — Debit Notes (purchase-side mirror of Credit Notes; see PHASE_G2_GST_DOCUMENTS_LIFECYCLE_DESIGN.md §4/§19).
+procurementRouter.get('/debit-notes', requirePermission('debitNote:view'), async (req: Request, res: Response) => {
+  const notes = await debitNoteSvc.listDebitNotes(req.tenant!, {
+    supplierId: req.query.supplierId as string | undefined,
+    grnId: req.query.grnId as string | undefined,
+    status: req.query.status as string | undefined,
+    from: parseOptionalDate(req.query.from, 'From date'),
+    to: parseOptionalDate(req.query.to, 'To date'),
+  });
+  res.json({ success: true, data: notes });
+});
+
+procurementRouter.get('/debit-notes/:id', requirePermission('debitNote:view'), async (req: Request, res: Response) => {
+  const note = await debitNoteSvc.getDebitNoteById(req.tenant!, req.params.id);
+  const printTemplate = await debitNoteTemplateSvc.resolveDebitNoteTemplate(req.tenant!.companyId);
+  res.json({ success: true, data: { ...note, printTemplate } });
+});
+
+// Path B — standalone, value-only debit note against a GRN with no physical return.
+procurementRouter.post('/debit-notes', requirePermission('debitNote:create'), async (req: Request, res: Response) => {
+  const body = { ...req.body, debitNoteDate: parseOptionalDate(req.body?.debitNoteDate, 'Debit note date') };
+  const note = await debitNoteSvc.createStandaloneDebitNote(body, req.tenant!, req.user!.userId);
+  res.status(201).json({ success: true, data: note });
+});
+
+// Path A — wraps an existing Purchase Return with no Debit Note yet, a deliberate, separate,
+// auditable action taken after the return itself succeeds (mirrors sales.router.ts's own note).
+procurementRouter.post('/returns/:returnId/debit-note', requirePermission('debitNote:create'), async (req: Request, res: Response) => {
+  const note = await debitNoteSvc.createDebitNoteForExistingReturn(req.params.returnId, req.tenant!, req.user!.userId, { reasonNotes: req.body?.reasonNotes });
+  res.status(201).json({ success: true, data: note });
+});
+
+// SUPER_ADMIN-only initially — same posture as creditNote:cancel (not granted to any starter role).
+procurementRouter.post('/debit-notes/:id/cancel', requirePermission('debitNote:cancel'), async (req: Request, res: Response) => {
+  const result = await debitNoteSvc.cancelDebitNote(req.params.id, req.tenant!, req.user!.userId, req.body?.reason);
+  res.json({ success: true, data: result });
+});
+
+// G2e — Debit Note Templates (mirrors Credit Note Templates)
+procurementRouter.get('/debit-note-templates', requirePermission('debitNoteTemplate:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await debitNoteTemplateSvc.listDebitNoteTemplates(req.tenant!.companyId) });
+});
+
+procurementRouter.get('/debit-note-templates/default-layout', requirePermission('debitNoteTemplate:view'), async (_req: Request, res: Response) => {
+  res.json({ success: true, data: debitNoteTemplateSvc.buildDefaultDebitNoteLayout() });
+});
+
+procurementRouter.get('/debit-note-templates/:id', requirePermission('debitNoteTemplate:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await debitNoteTemplateSvc.getDebitNoteTemplateById(req.tenant!.companyId, req.params.id) });
+});
+
+procurementRouter.post('/debit-note-templates', requirePermission('debitNoteTemplate:create'), async (req: Request, res: Response) => {
+  const t = await debitNoteTemplateSvc.createDebitNoteTemplate(req.tenant!.companyId, req.body, req.user!.userId);
+  res.status(201).json({ success: true, data: t });
+});
+
+procurementRouter.put('/debit-note-templates/:id', requirePermission('debitNoteTemplate:edit'), async (req: Request, res: Response) => {
+  const t = await debitNoteTemplateSvc.updateDebitNoteTemplate(req.tenant!.companyId, req.params.id, req.body);
+  res.json({ success: true, data: t });
+});
+
+procurementRouter.post('/debit-note-templates/:id/duplicate', requirePermission('debitNoteTemplate:create'), async (req: Request, res: Response) => {
+  const t = await debitNoteTemplateSvc.duplicateDebitNoteTemplate(req.tenant!.companyId, req.params.id, req.user!.userId);
+  res.status(201).json({ success: true, data: t });
 });

@@ -2,10 +2,12 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../../config/database';
 import { AppError } from '../../middleware/error';
 import { nextDocumentNumber } from '../../shared/numberSequence';
-import { tenantQuery, tenantBatch, tenantTransaction, TenantContext } from '../../shared/tenantContext';
+import { tenantQuery, tenantBatch, tenantTransaction, TenantContext, BranchAccess } from '../../shared/tenantContext';
 import { assertOwnedByCompany, assertAllOwned } from '../../middleware/tenant';
 import { CREDIT_SETTLEMENT_MODES } from '../../shared/constants';
 import { getStarterPackage, type StarterAccount } from '../platform/starterPackage';
+import { splitGst } from '../../shared/gstSplit';
+import { round2 } from '../../shared/inputGst';
 
 // ═══════════════════════════════════════════════════
 // Phase 2 of the multi-tenant migration: every report/query in this file is now company-scoped.
@@ -300,7 +302,7 @@ export async function getClientLedger(ctx: TenantContext, clientId: string, from
     })
   );
 
-  const [invoices, payments, returns, exchanges] = await tenantBatch(ctx.companyId, (tx) => [
+  const [invoices, payments, returns, exchanges, creditNotes, salesDebitNotes] = await tenantBatch(ctx.companyId, (tx) => [
     tx.salesInvoice.findMany({
       // J3.5 Finding 1: a VOID invoice's debit is reversed the moment it's voided (client.currentBalance
       // is decremented in the same transaction) — including it here with no offsetting entry would make
@@ -329,6 +331,30 @@ export async function getClientLedger(ctx: TenantContext, clientId: string, from
       where: { companyId: ctx.companyId, clientId },
       select: { id: true, exchangeNumber: true, exchangeDate: true, valuedAmount: true, createdAt: true },
     }),
+    // G2c follow-up: a standalone (Path B) Credit Note moves currentBalance exactly like a
+    // SalesReturn/OldGoldExchange and must appear here for the same reason. A Path A (return-linked)
+    // one — salesReturnId set — is excluded: its balance movement is the SalesReturn row above; the
+    // CreditNote itself posted no separate currentBalance change (creditNote.service.ts), so listing
+    // it too would double-count. CANCELLED is excluded the same way a reversed payment is above — its
+    // balance effect was undone at cancellation, so the active statement should not show it at all.
+    tx.creditNote.findMany({
+      where: { companyId: ctx.companyId, clientId, salesReturnId: null, status: { not: 'CANCELLED' } },
+      select: {
+        id: true, creditNoteNumber: true, creditNoteDate: true, totalAmount: true, createdAt: true,
+        originalInvoiceNumber: true,
+      },
+    }),
+    // G2g-4b: a Sales Debit Note moves currentBalance exactly like a SalesInvoice — a debit,
+    // increasing what the customer owes — and must appear here for the same reason. CANCELLED is
+    // excluded the same way a CANCELLED CreditNote is above — its balance effect was undone at
+    // cancellation.
+    tx.salesDebitNote.findMany({
+      where: { companyId: ctx.companyId, clientId, status: { not: 'CANCELLED' } },
+      select: {
+        id: true, debitNoteNumber: true, debitNoteDate: true, totalAmount: true, createdAt: true,
+        originalInvoiceNumber: true,
+      },
+    }),
   ]);
 
   type Entry = {
@@ -354,6 +380,16 @@ export async function getClientLedger(ctx: TenantContext, clientId: string, from
     ...exchanges.map((e): Entry => ({
       date: e.exchangeDate, createdAt: e.createdAt, type: 'EXCHANGE', refNumber: e.exchangeNumber,
       description: `Old gold exchange ${e.exchangeNumber}`, debit: 0, credit: Number(e.valuedAmount),
+    })),
+    ...creditNotes.map((cn): Entry => ({
+      date: cn.creditNoteDate, createdAt: cn.createdAt, type: 'CREDIT_NOTE', refNumber: cn.creditNoteNumber,
+      description: `Credit note ${cn.creditNoteNumber} against ${cn.originalInvoiceNumber}`,
+      debit: 0, credit: Number(cn.totalAmount),
+    })),
+    ...salesDebitNotes.map((dn): Entry => ({
+      date: dn.debitNoteDate, createdAt: dn.createdAt, type: 'SALES_DEBIT_NOTE', refNumber: dn.debitNoteNumber,
+      description: `Sales debit note ${dn.debitNoteNumber} against ${dn.originalInvoiceNumber}`,
+      debit: Number(dn.totalAmount), credit: 0,
     })),
   ].sort((a, b) => a.date.getTime() - b.date.getTime() || a.createdAt.getTime() - b.createdAt.getTime());
 
@@ -395,7 +431,7 @@ export async function getSupplierLedger(ctx: TenantContext, supplierId: string, 
     })
   );
 
-  const [bought, returns, payments] = await tenantBatch(ctx.companyId, (tx) => [
+  const [bought, returns, payments, debitNotes] = await tenantBatch(ctx.companyId, (tx) => [
     tx.grnItem.findMany({
       where: { companyId: ctx.companyId, OR: [{ jewelryTag: { isNot: null } }, { purchaseLot: { isNot: null } }], poItem: { po: { supplierId } } },
       select: {
@@ -412,6 +448,17 @@ export async function getSupplierLedger(ctx: TenantContext, supplierId: string, 
     tx.supplierPayment.findMany({
       where: { companyId: ctx.companyId, supplierId },
       select: { paymentNumber: true, paymentDate: true, amount: true, mode: true, createdAt: true },
+    }),
+    // G2e: a standalone (Path B) Debit Note moves Supplier.currentDue exactly like a
+    // PurchaseReturn/SupplierPayment and must appear here for the same reason. A Path A
+    // (return-linked) one — purchaseReturnId set — is excluded: its balance movement is the
+    // PurchaseReturn row above; the DebitNote itself posted no separate currentDue change
+    // (debitNote.service.ts), so listing it too would double-count. CANCELLED is excluded the same
+    // way a reversed InvoicePayment is on the sell side — its balance effect was undone at
+    // cancellation, so the active statement should not show it at all.
+    tx.debitNote.findMany({
+      where: { companyId: ctx.companyId, supplierId, purchaseReturnId: null, status: { not: 'CANCELLED' } },
+      select: { debitNoteNumber: true, debitNoteDate: true, totalAmount: true, createdAt: true },
     }),
   ]);
 
@@ -433,6 +480,10 @@ export async function getSupplierLedger(ctx: TenantContext, supplierId: string, 
     ...payments.map((p): Entry => ({
       date: p.paymentDate, createdAt: p.createdAt, type: 'PAYMENT', refNumber: p.paymentNumber,
       description: `Payment ${p.paymentNumber} (${p.mode})`, debit: Number(p.amount), credit: 0,
+    })),
+    ...debitNotes.map((d): Entry => ({
+      date: d.debitNoteDate, createdAt: d.createdAt, type: 'DEBIT_NOTE', refNumber: d.debitNoteNumber,
+      description: `Debit note ${d.debitNoteNumber}`, debit: Number(d.totalAmount), credit: 0,
     })),
   ].sort((a, b) => a.date.getTime() - b.date.getTime() || a.createdAt.getTime() - b.createdAt.getTime());
 
@@ -461,7 +512,7 @@ export async function getDayBook(companyId: string, date: Date) {
   const start = new Date(date); start.setHours(0, 0, 0, 0);
   const end = new Date(date); end.setHours(23, 59, 59, 999);
 
-  const [invoices, payments, returns, exchanges] = await tenantBatch(companyId, (tx) => [
+  const [invoices, payments, returns, exchanges, creditNotes, debitNotes, salesDebitNotes] = await tenantBatch(companyId, (tx) => [
     tx.salesInvoice.findMany({
       // J3.5 Finding 1: a voided invoice keeps its original invoiceDate — without this exclusion it
       // would inflate that day's sales total forever, however long after that day it was voided.
@@ -481,6 +532,28 @@ export async function getDayBook(companyId: string, date: Date) {
     tx.oldGoldExchange.findMany({
       where: { companyId, exchangeDate: { gte: start, lte: end } },
       select: { exchangeNumber: true, valuedAmount: true },
+    }),
+    // G2c follow-up: same reporting gap as getClientLedger — a standalone Credit Note moves money
+    // (a customer-balance credit) on the day it's issued and belongs in this rollup; a return-linked
+    // one is excluded so it isn't counted twice alongside its own SalesReturn row above.
+    tx.creditNote.findMany({
+      where: { companyId, creditNoteDate: { gte: start, lte: end }, salesReturnId: null, status: { not: 'CANCELLED' } },
+      select: { creditNoteNumber: true, totalAmount: true },
+    }),
+    // G2e: same reporting shape as creditNotes above, purchase side — only active standalone
+    // (Path B) Debit Notes; a Path A one is excluded since it carries no accounting movement of
+    // its own (the PurchaseReturn it wraps has none in this rollup either — this function never
+    // reads PurchaseReturn's money movement, only SalesReturn's, on the sell side).
+    tx.debitNote.findMany({
+      where: { companyId, debitNoteDate: { gte: start, lte: end }, purchaseReturnId: null, status: { not: 'CANCELLED' } },
+      select: { debitNoteNumber: true, totalAmount: true },
+    }),
+    // G2g-4b: sell-side mirror of the procurement debitNotes query above — kept as its own
+    // `salesDebitNotes` property (never renaming the existing `debitNotes` key, which stays the
+    // procurement-side figure).
+    tx.salesDebitNote.findMany({
+      where: { companyId, debitNoteDate: { gte: start, lte: end }, status: { not: 'CANCELLED' } },
+      select: { debitNoteNumber: true, totalAmount: true },
     }),
   ]);
 
@@ -509,46 +582,235 @@ export async function getDayBook(companyId: string, date: Date) {
       totalAmount: exchanges.reduce((s, e) => s + Number(e.valuedAmount), 0),
       rows: exchanges.map((e) => ({ exchangeNumber: e.exchangeNumber, amount: Number(e.valuedAmount) })),
     },
+    creditNotes: {
+      count: creditNotes.length,
+      totalAmount: creditNotes.reduce((s, cn) => s + Number(cn.totalAmount), 0),
+      rows: creditNotes.map((cn) => ({ creditNoteNumber: cn.creditNoteNumber, amount: Number(cn.totalAmount) })),
+    },
+    debitNotes: {
+      count: debitNotes.length,
+      totalAmount: debitNotes.reduce((s, d) => s + Number(d.totalAmount), 0),
+      rows: debitNotes.map((d) => ({ debitNoteNumber: d.debitNoteNumber, amount: Number(d.totalAmount) })),
+    },
+    // G2g-4b: sell-side Sales Debit Notes — a separate property from `debitNotes` (procurement),
+    // per the instruction not to rename or repurpose that existing key.
+    salesDebitNotes: {
+      count: salesDebitNotes.length,
+      totalAmount: salesDebitNotes.reduce((s, d) => s + Number(d.totalAmount), 0),
+      rows: salesDebitNotes.map((d) => ({ debitNoteNumber: d.debitNoteNumber, amount: Number(d.totalAmount) })),
+    },
   };
 }
 
 // H5: GST HSN-wise summary. InvoiceItem already carries its own companyId (Phase 1) so this
 // scopes directly on the line, not just through a join to the invoice.
-export async function getGstSummary(companyId: string, from: Date, to: Date) {
-  const items = await tenantQuery(companyId, (tx) =>
-    tx.invoiceItem.findMany({
-      // J3.5 Finding 1: a voided invoice's lines were never actually a taxable sale — exclude them
-      // from GST prep (already documented in the UI as prep, not filing-ready, but still wrong to
-      // include a reversed sale's lines at all).
-      where: { companyId, invoice: { invoiceDate: { gte: from, lte: to }, currency: 'INR', status: { not: 'VOID' } } },
-      select: {
-        totalPrice: true, taxRate: true,
-        hsnCode: { select: { code: true, description: true } },
-        invoice: { select: { taxDetails: { select: { igst: true } } } },
-      },
-    })
-  );
+// G2g-1: reconciles with the actual sales GST accounting movement rather than independently
+// recalculating GST from gross InvoiceItem.totalPrice. Four tax-moving sources, netted by HSN+rate
+// exactly like getPurchaseGstSummary's own add(..., sign, ...) pattern (G2g-4b added #4):
+//   1. InvoiceItem — uses its own persisted taxableValue/cgstAmount/sgstAmount/igstAmount (G1 Part D
+//      snapshot), never totalPrice * taxRate — so an invoice-level discount, already folded into
+//      that snapshot at sale time, is never double-counted or ignored here.
+//   2. SalesReturnItem — has no persisted tax breakdown of its own (unlike PurchaseReturnItem), so
+//      its tax-inclusive `amount` is split by the linked InvoiceItem's own snapshotted taxRate using
+//      the exact same revenuePortion/taxPortion formula createSalesReturn() and
+//      creditNote.service.ts's buildLineFromInvoiceItem() already use — not a new formula, the same
+//      one, reapplied on the read side. Same-state/inter-state is read off that InvoiceItem's own
+//      persisted cgstAmount (not re-resolved from the client's state), then split via the shared
+//      splitGst(). A SalesReturn's own (Path A) CreditNote is never separately deducted below — its
+//      GST was already reversed here, via the return.
+//   3. CreditNoteItem — only a standalone (Path B — salesReturnId null) ISSUED note; its own
+//      persisted taxableValue/cgstAmount/sgstAmount/igstAmount are used directly, same as InvoiceItem.
+//      A CANCELLED note (its effect was already reversed at cancellation) and a Path A note (already
+//      counted via its SalesReturn, #2 above) are both excluded.
+//   4. SalesDebitNoteItem (G2g-4b) — an active (ISSUED) Sales Debit Note's own persisted
+//      taxableValue/cgstAmount/sgstAmount/igstAmount, used directly like #3, but added with a
+//      POSITIVE sign — it increases what was billed, the opposite of a Credit Note. A CANCELLED
+//      note is excluded (its effect was undone at cancellation). This is an internal GST prep
+//      enhancement only (CLAUDE.md note on this phase) — not the GSTR-1 reporting implementation.
+// G2g-2: `opts` is additive and optional — every existing caller that passes only
+// (companyId, from, to) keeps its prior company-wide, unfiltered behavior unchanged.
+//   - branchId: caller has already verified (assertBranchAccessible) this branch belongs to the
+//     company AND the caller may access it — this function trusts it as a plain filter.
+//   - branchAccess: applied only when branchId is absent, and only when the caller is actually
+//     restricted (allBranches: false) — an unrestricted caller with no explicit branchId still
+//     sees the whole company, same as today.
+//   - gstRegistrationId: caller has already verified (assertOwnedIfPresent) it belongs to the
+//     company. Matched against TaxInvoice.sellerRegistrationId / CreditNote.sellerRegistrationId
+//     — the persisted snapshot stamped at document-creation time (G1 Part E), never re-resolved.
+//     A SalesReturn has no registration field of its own (CLAUDE.md/task instruction: do not add
+//     one) — it derives its registration from the original invoice's own TaxInvoice instead.
+export async function getGstSummary(
+  companyId: string, from: Date, to: Date,
+  opts?: { branchAccess?: BranchAccess; branchId?: string; gstRegistrationId?: string },
+) {
+  const allowedBranchIds = opts?.branchId
+    ? [opts.branchId]
+    : (opts?.branchAccess && !opts.branchAccess.allBranches ? opts.branchAccess.branchIds : undefined);
+  const gstRegistrationId = opts?.gstRegistrationId;
+
+  const [items, returnItems, creditNoteItems, salesDebitNoteItems, otherChargesInvoices] = await Promise.all([
+    tenantQuery(companyId, (tx) =>
+      tx.invoiceItem.findMany({
+        // J3.5 Finding 1: a voided invoice's lines were never actually a taxable sale — exclude them
+        // from GST prep (already documented in the UI as prep, not filing-ready, but still wrong to
+        // include a reversed sale's lines at all).
+        where: {
+          companyId,
+          invoice: {
+            invoiceDate: { gte: from, lte: to }, currency: 'INR', status: { not: 'VOID' },
+            ...(allowedBranchIds && { branchId: { in: allowedBranchIds } }),
+            ...(gstRegistrationId && { taxDetails: { sellerRegistrationId: gstRegistrationId } }),
+          },
+        },
+        select: {
+          taxableValue: true, cgstAmount: true, sgstAmount: true, igstAmount: true, taxRate: true,
+          hsnCode: { select: { code: true, description: true } },
+          invoice: { select: { taxDetails: { select: { id: true } } } },
+        },
+      })
+    ),
+    // Netted by returnDate, the period a return's own GST reversal actually happened in — not the
+    // original invoiceDate. Only against a taxable INR sale (a return on a non-INR/non-taxable
+    // invoice has no GST to reverse — createSalesReturn itself forces taxRate to 0 in that case).
+    tenantQuery(companyId, (tx) =>
+      tx.salesReturnItem.findMany({
+        where: {
+          companyId,
+          return: {
+            returnDate: { gte: from, lte: to },
+            invoice: {
+              currency: 'INR',
+              // A gstRegistrationId filter already implies "taxDetails exists and matches" — no
+              // separate isNot: null needed alongside it (see istDate.ts-adjacent reasoning: a
+              // field filter on a null relation naturally fails to match).
+              taxDetails: gstRegistrationId ? { sellerRegistrationId: gstRegistrationId } : { isNot: null },
+              ...(allowedBranchIds && { branchId: { in: allowedBranchIds } }),
+            },
+          },
+        },
+        select: {
+          amount: true,
+          invoiceItem: { select: { taxRate: true, cgstAmount: true, hsnCode: { select: { code: true, description: true } } } },
+        },
+      })
+    ),
+    tenantQuery(companyId, (tx) =>
+      tx.creditNoteItem.findMany({
+        where: {
+          companyId,
+          creditNote: {
+            salesReturnId: null, status: 'ISSUED', creditNoteDate: { gte: from, lte: to },
+            ...(gstRegistrationId && { sellerRegistrationId: gstRegistrationId }),
+            ...(allowedBranchIds && { invoice: { branchId: { in: allowedBranchIds } } }),
+          },
+        },
+        select: {
+          taxableValue: true, cgstAmount: true, sgstAmount: true, igstAmount: true, taxRate: true,
+          hsnCode: { select: { code: true, description: true } },
+        },
+      })
+    ),
+    // G2g-4b: an active (ISSUED, never CANCELLED) Sales Debit Note's own persisted
+    // taxableValue/cgstAmount/sgstAmount/igstAmount, used directly like InvoiceItem/CreditNoteItem
+    // above — a POSITIVE outward adjustment (it increases what was billed), the opposite sign of
+    // creditNoteItems above. Branch is scoped via the debit note's own `branchId` column (it
+    // carries one directly, unlike CreditNote).
+    tenantQuery(companyId, (tx) =>
+      tx.salesDebitNoteItem.findMany({
+        where: {
+          companyId,
+          salesDebitNote: {
+            status: 'ISSUED', debitNoteDate: { gte: from, lte: to },
+            ...(gstRegistrationId && { sellerRegistrationId: gstRegistrationId }),
+            ...(allowedBranchIds && { branchId: { in: allowedBranchIds } }),
+          },
+        },
+        select: {
+          taxableValue: true, cgstAmount: true, sgstAmount: true, igstAmount: true, taxRate: true,
+          hsnCode: { select: { code: true, description: true } },
+        },
+      })
+    ),
+    // G2g-4a.2: SalesInvoice.otherCharges (shipping/packing/misc — priceInvoice()'s "Add & Less")
+    // is taxable and folds into this same invoice's taxAmount/totalAmount, but has no InvoiceItem
+    // row of its own (see priceInvoice()'s own comment — it is taxed at the default HSN rate,
+    // invoice-wide, never attributed to any one line). The `items` query above therefore silently
+    // excludes it from every HSN/rate row and from `totals` below — this query exists only to
+    // surface that gap explicitly (see the `reconciliation` field on the return value), never to
+    // fabricate an HSN-wise row for it. Same period/currency/status/branch/registration scope as
+    // `items`' own nested `invoice: {...}` filter, applied directly here at the invoice level.
+    tenantQuery(companyId, (tx) =>
+      tx.salesInvoice.findMany({
+        where: {
+          companyId, invoiceDate: { gte: from, lte: to }, currency: 'INR', status: { not: 'VOID' },
+          otherCharges: { not: 0 },
+          ...(allowedBranchIds && { branchId: { in: allowedBranchIds } }),
+          ...(gstRegistrationId && { taxDetails: { sellerRegistrationId: gstRegistrationId } }),
+        },
+        select: {
+          id: true, otherCharges: true, taxAmount: true,
+          items: { select: { lineTotalTax: true } },
+        },
+      })
+    ),
+  ]);
 
   type Row = { hsnCode: string; description: string | null; taxRate: number; taxableValue: number; cgst: number; sgst: number; igst: number };
   const byKey = new Map<string, Row>();
+  const add = (hsn: { code: string; description: string | null } | null | undefined, rate: number, sign: 1 | -1,
+    taxable: number, cgst: number, sgst: number, igst: number) => {
+    const hsnCode = hsn?.code ?? 'UNKNOWN';
+    const key = `${hsnCode}:${rate}`;
+    const row = byKey.get(key) ?? { hsnCode, description: hsn?.description ?? null, taxRate: rate, taxableValue: 0, cgst: 0, sgst: 0, igst: 0 };
+    row.taxableValue += sign * taxable; row.cgst += sign * cgst; row.sgst += sign * sgst; row.igst += sign * igst;
+    byKey.set(key, row);
+  };
 
   for (const item of items) {
     if (!item.invoice.taxDetails) continue; // no TaxInvoice = not a taxable INR sale (A1 invariant)
-    const hsnCode = item.hsnCode?.code ?? 'UNKNOWN';
-    const taxRate = Number(item.taxRate);
-    const key = `${hsnCode}:${taxRate}`;
-    const taxableValue = Number(item.totalPrice);
-    const taxAmount = taxableValue * taxRate;
-    const isInterState = Number(item.invoice.taxDetails.igst) > 0;
+    add(item.hsnCode, Number(item.taxRate), 1, Number(item.taxableValue), Number(item.cgstAmount), Number(item.sgstAmount), Number(item.igstAmount));
+  }
 
-    const row = byKey.get(key) ?? { hsnCode, description: item.hsnCode?.description ?? null, taxRate, taxableValue: 0, cgst: 0, sgst: 0, igst: 0 };
-    row.taxableValue += taxableValue;
-    if (isInterState) row.igst += taxAmount;
-    else { row.cgst += taxAmount / 2; row.sgst += taxAmount / 2; }
-    byKey.set(key, row);
+  for (const ri of returnItems) {
+    const taxRate = Number(ri.invoiceItem.taxRate);
+    const amount = Number(ri.amount);
+    const taxableValue = amount / (1 + taxRate);
+    const taxPortion = amount - taxableValue;
+    const isSameState = Number(ri.invoiceItem.cgstAmount) > 0;
+    const { cgst, sgst, igst } = splitGst(taxPortion, isSameState);
+    add(ri.invoiceItem.hsnCode, taxRate, -1, taxableValue, cgst, sgst, igst);
+  }
+
+  for (const ci of creditNoteItems) {
+    add(ci.hsnCode, Number(ci.taxRate), -1, Number(ci.taxableValue), Number(ci.cgstAmount), Number(ci.sgstAmount), Number(ci.igstAmount));
+  }
+
+  for (const di of salesDebitNoteItems) {
+    add(di.hsnCode, Number(di.taxRate), 1, Number(di.taxableValue), Number(di.cgstAmount), Number(di.sgstAmount), Number(di.igstAmount));
   }
 
   const rows = Array.from(byKey.values()).sort((a, b) => a.hsnCode.localeCompare(b.hsnCode) || a.taxRate - b.taxRate);
+
+  // G2g-4a.2: otherChargesTax is derived, not re-priced — invoice.taxAmount (persisted, the real
+  // amount actually charged/posted) minus the sum of that same invoice's own InvoiceItem.lineTotalTax
+  // (also persisted) is exactly the tax portion `items` above had no line to attribute to. This
+  // never re-runs priceInvoice()'s own rate math (which could drift from what was actually billed)
+  // and never guesses an HSN for otherCharges — it only reports that a real, non-zero gap exists.
+  const otherChargesTaxableValue = round2(otherChargesInvoices.reduce((s, inv) => s + Number(inv.otherCharges), 0));
+  const otherChargesTax = round2(otherChargesInvoices.reduce(
+    (s, inv) => s + (Number(inv.taxAmount) - inv.items.reduce((ls, it) => ls + Number(it.lineTotalTax), 0)),
+    0,
+  ));
+  const reconciliation = otherChargesInvoices.length > 0
+    ? {
+        diagnostic: 'OTHER_CHARGES_NOT_REPRESENTED' as const,
+        invoiceCount: otherChargesInvoices.length,
+        otherChargesTaxableValue,
+        otherChargesTax,
+        note: 'SalesInvoice.otherCharges (shipping/packing/misc) is taxable and included in these invoices\' own totals, but has no InvoiceItem/HSN representation, so it is excluded from the rows/totals above — never fabricated as an HSN-wise line. See CLAUDE.md G2g-4a.2.',
+      }
+    : null;
+
   return {
     from, to, rows,
     totals: {
@@ -558,6 +820,7 @@ export async function getGstSummary(companyId: string, from: Date, to: Date) {
       igst: rows.reduce((s, r) => s + r.igst, 0),
       totalTax: rows.reduce((s, r) => s + r.cgst + r.sgst + r.igst, 0),
     },
+    reconciliation,
   };
 }
 
@@ -565,10 +828,28 @@ export async function getGstSummary(companyId: string, from: Date, to: Date) {
 // stamped on each GrnItem when it was tagged into stock (never recomputed from today's rates) and
 // nets off purchase returns by the tax they reversed. `bills` groups by supplier invoice (the GRN's
 // invoiceNumber) for matching against the supplier's filed GSTR-1 / your GSTR-2B. Prep, not a return.
-export async function getPurchaseGstSummary(companyId: string, from: Date, to: Date) {
-  const [grnItems, returnItems] = await Promise.all([
+// G2g-2: branch access only — no gstRegistrationId filter on this side. Every purchase document
+// (GoodsReceiptNote/PoItem/DebitNote) persists a receiving BRANCH but no GST-registration identity
+// of its own; the only authoritative registration relationship in the schema is Branch.gstRegistrationId,
+// and it is itself optional (falls back to the company's primary registration at SALE time via
+// resolveSellerRegistration — a resolution this purchase-side function has never run and that has no
+// natural "as of GRN date" meaning here). Deriving a purchase-side registration filter from that would mean
+// inventing a new resolution behavior in a phase explicitly scoped to reuse only what already exists —
+// see the G2g-2 final report's Deviations section for the full reasoning.
+export async function getPurchaseGstSummary(
+  companyId: string, from: Date, to: Date,
+  opts?: { branchAccess?: BranchAccess; branchId?: string },
+) {
+  const allowedBranchIds = opts?.branchId
+    ? [opts.branchId]
+    : (opts?.branchAccess && !opts.branchAccess.allBranches ? opts.branchAccess.branchIds : undefined);
+
+  const [grnItems, returnItems, debitNoteItems] = await Promise.all([
     tenantQuery(companyId, (tx) => tx.grnItem.findMany({
-      where: { companyId, taxableValue: { not: null }, grn: { receivedDate: { gte: from, lte: to } } },
+      where: {
+        companyId, taxableValue: { not: null },
+        grn: { receivedDate: { gte: from, lte: to }, ...(allowedBranchIds && { branchId: { in: allowedBranchIds } }) },
+      },
       select: {
         taxableValue: true, inputCgst: true, inputSgst: true, inputIgst: true,
         grn: { select: { id: true, grnNumber: true, invoiceNumber: true, invoiceDate: true, receivedDate: true } },
@@ -576,13 +857,44 @@ export async function getPurchaseGstSummary(companyId: string, from: Date, to: D
       },
     })),
     tenantQuery(companyId, (tx) => tx.purchaseReturnItem.findMany({
-      where: { companyId, return: { returnDate: { gte: from, lte: to } } },
+      where: {
+        companyId, return: { returnDate: { gte: from, lte: to } },
+        // Same dual GRN-vs-lot path the select below already reads from (a returned tag may have
+        // come from a direct FINISHED_GOODS GRN line or from a FINISHED_LOT bag) — branch-scoped
+        // by the intake GRN's own branch, consistent with how grnItems/debitNoteItems are scoped.
+        ...(allowedBranchIds && {
+          tag: {
+            OR: [
+              { grnItem: { grn: { branchId: { in: allowedBranchIds } } } },
+              { purchaseLot: { grnItem: { grn: { branchId: { in: allowedBranchIds } } } } },
+            ],
+          },
+        }),
+      },
       select: {
         amount: true, cgst: true, sgst: true, igst: true,
         tag: { select: {
           grnItem: { select: { poItem: { select: { taxRate: true, hsnCode: { select: { code: true, description: true } } } } } },
           purchaseLot: { select: { grnItem: { select: { poItem: { select: { taxRate: true, hsnCode: { select: { code: true, description: true } } } } } } } },
         } },
+      },
+    })),
+    // G2e (§7 point 2 of the design doc): a standalone (Path B) Debit Note moves ITC exactly like a
+    // PurchaseReturnItem and must be netted off the same way. A Path A one is excluded
+    // (purchaseReturnId: null below) — its ITC reversal is already counted via the PurchaseReturnItem
+    // rows above; the DebitNote itself is only that return's document representation. Cancelled
+    // notes are excluded — their ITC effect was undone at cancellation.
+    tenantQuery(companyId, (tx) => tx.debitNoteItem.findMany({
+      where: {
+        companyId,
+        debitNote: {
+          purchaseReturnId: null, status: 'ISSUED', debitNoteDate: { gte: from, lte: to },
+          ...(allowedBranchIds && { grn: { branchId: { in: allowedBranchIds } } }),
+        },
+      },
+      select: {
+        taxableValue: true, cgstAmount: true, sgstAmount: true, igstAmount: true, taxRate: true,
+        hsnCode: { select: { code: true, description: true } },
       },
     })),
   ]);
@@ -616,6 +928,12 @@ export async function getPurchaseGstSummary(companyId: string, from: Date, to: D
   for (const r of returnItems) {
     const po = (r.tag.grnItem ?? r.tag.purchaseLot?.grnItem)?.poItem;
     add(po?.hsnCode, Number(po?.taxRate ?? 0), -1, Number(r.amount), Number(r.cgst), Number(r.sgst), Number(r.igst));
+  }
+  // G2e: standalone Debit Notes net off the same way — same `add(..., -1, ...)` pattern, own
+  // stamped hsnCode/taxRate (never re-looked-up), no `bills` entry (they have no GRN line of their
+  // own to attribute a bill-grouping row to; §16 of the task deliberately doesn't ask for one).
+  for (const d of debitNoteItems) {
+    add(d.hsnCode, Number(d.taxRate), -1, Number(d.taxableValue), Number(d.cgstAmount), Number(d.sgstAmount), Number(d.igstAmount));
   }
 
   const rows = Array.from(byKey.values()).sort((a, b) => a.hsnCode.localeCompare(b.hsnCode) || a.taxRate - b.taxRate);
