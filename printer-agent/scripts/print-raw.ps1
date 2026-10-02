@@ -70,23 +70,15 @@ public class RawPrinterHelper
             if (StartDocPrinter(hPrinter, 1, di) == 0)
                 throw new Exception("StartDocPrinter failed. Win32 error: " + Marshal.GetLastWin32Error());
 
-            try
-            {
-                if (!StartPagePrinter(hPrinter))
-                    throw new Exception("StartPagePrinter failed. Win32 error: " + Marshal.GetLastWin32Error());
+            // No StartPagePrinter/EndPagePrinter: those frame a drawn page, and TSC's "Dynamic Print
+            // Monitor" port can lock the printer up when a raw TSPL stream is wrapped in them.
+            bSuccess = WritePrinter(hPrinter, pBytes, pBytes.Length, out dwWritten);
+            EndDocPrinter(hPrinter);
 
-                bSuccess = WritePrinter(hPrinter, pBytes, pBytes.Length, out dwWritten);
-                EndPagePrinter(hPrinter);
-
-                if (!bSuccess)
-                    throw new Exception("WritePrinter failed. Win32 error: " + Marshal.GetLastWin32Error());
-                if (dwWritten != pBytes.Length)
-                    throw new Exception("WritePrinter wrote " + dwWritten + " of " + pBytes.Length + " bytes.");
-            }
-            finally
-            {
-                EndDocPrinter(hPrinter);
-            }
+            if (!bSuccess)
+                throw new Exception("WritePrinter failed. Win32 error: " + Marshal.GetLastWin32Error());
+            if (dwWritten != pBytes.Length)
+                throw new Exception("WritePrinter wrote " + dwWritten + " of " + pBytes.Length + " bytes.");
         }
         finally
         {

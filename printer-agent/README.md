@@ -2,9 +2,10 @@
 
 Runs on a branch counter PC that has a TSC TTP-244 Pro attached over USB. Listens on
 `127.0.0.1:9101` only — nothing outside this PC can reach it — and receives TSPL from the SEA ERP
-web app running in the browser on the same machine, writing it straight to the Windows printer
-queue as raw bytes (`scripts/print-raw.ps1`, bypassing the driver's normal GDI rendering so TSPL
-commands reach the printer unmodified).
+web app running in the browser on the same machine, draws the label (text, boxes, Code 128, QR) and
+prints it through the Windows printer driver (`scripts/print-gdi.ps1`), the same way ordinary Windows
+programs do. The old raw-bytes route (`scripts/print-raw.ps1`, `PRINT_MODE=raw`) locked the TTP-244 Pro
+up after each job, so it is no longer the default.
 
 ## Setup (once per counter PC) — no files to copy or edit
 

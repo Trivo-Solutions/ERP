@@ -3,6 +3,7 @@ import { exec } from 'child_process';
 import express from 'express';
 import cors from 'cors';
 import { printTspl, getPrinterStatus } from './rawPrint';
+import { printViaDriver } from './gdiPrint';
 import { readConfig, writeConfig } from './config';
 import { listRealPrinters } from './printers';
 import { isAutostartEnabled, isAutostartSupported, setAutostart } from './autostart';
@@ -21,6 +22,7 @@ const state: { printerName: string | null; port: number } = {
   printerName: process.env.PRINTER_NAME || fileConfig.printerName || null,
   port: Number(process.env.PRINT_AGENT_PORT) || fileConfig.port || 9101,
 };
+const PRINT_MODE = (process.env.PRINT_MODE || 'driver').toLowerCase();
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*';
 
 const app = express();
@@ -51,8 +53,11 @@ app.post('/print', async (req, res) => {
   const count = Math.min(Math.max(Number(copies) || 1, 1), MAX_COPIES);
 
   try {
+    // Default: draw the label and print it through the Windows driver (what Gati does). Raw TSPL
+    // through the port monitor locked the TTP-244 Pro up; PRINT_MODE=raw restores the old route.
     for (let i = 0; i < count; i++) {
-      await printTspl(state.printerName, tspl);
+      if (PRINT_MODE === 'raw') await printTspl(state.printerName, tspl);
+      else await printViaDriver(state.printerName, tspl);
     }
     res.json({ ok: true, copies: count });
   } catch (err) {
