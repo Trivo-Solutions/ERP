@@ -15,14 +15,32 @@ export function mmToDots(mm: number): number {
 }
 
 const KNOWN_BOUND_FIELDS = [
-  'tagNumber', 'name', 'metalKarat', 'grossWeight', 'netWeight',
-  'stoneWeight', 'huid', 'sellingPrice', 'branchName',
+  'tagNumber', 'name', 'makeType', 'metalType', 'metalKarat',
+  'grossWeight', 'netWeight', 'stoneWeight', 'diamondWeight', 'colorStoneWeight', 'stonePieces',
+  'huid', 'settingType',
+  'categoryName', 'subCategoryName', 'collectionName', 'stockTypeName', 'manufacturerName',
+  'sellingPrice', 'saleMcRate', 'saleVaPercent', 'costPrice',
+  'notes', 'taggedDate', 'branchName', 'branchCode',
 ] as const;
 export type BoundField = typeof KNOWN_BOUND_FIELDS[number];
 
+type NamedRef = { name: string } | null | undefined;
+
+// Only the first eight are guaranteed; every other column is optional so a caller that loaded a
+// lighter tag (or a test) still type-checks — an absent value just prints as an empty string.
 export type TagForPrint = Pick<JewelryTag,
   'tagNumber' | 'name' | 'metalKarat' | 'grossWeight' | 'netWeight' | 'stoneWeight' | 'huid' | 'sellingPrice'
-> & { branch?: { name: string } | null };
+> & Partial<Pick<JewelryTag,
+  'makeType' | 'metalType' | 'settingType' | 'costPrice' | 'saleMcRate' | 'saleVaPercent' | 'notes' | 'createdAt'
+>> & {
+  branch?: { name: string; branchCode?: string | null } | null;
+  category?: NamedRef;
+  subCategory?: NamedRef;
+  collection?: NamedRef;
+  stockType?: NamedRef;
+  manufacturer?: NamedRef;
+  materials?: { materialType: string; weight: NumericInput; pieces?: number | null }[];
+};
 
 export interface TagTemplateElement {
   id: string;
@@ -41,6 +59,9 @@ export interface TagTemplateElement {
 
 export interface TagTemplateLayout {
   elements: TagTemplateElement[];
+  // Designer-only: where the folded tag creases. The printer ignores it (the whole strip prints in
+  // one pass); the designer uses it to split elements into front/back.
+  fold?: { orientation: 'none' | 'vertical' | 'horizontal'; positionMm: number };
 }
 
 export interface TagTemplateForPrint {
@@ -50,6 +71,20 @@ export interface TagTemplateForPrint {
   layout: TagTemplateLayout;
 }
 
+const rupees = (v: NumericInput) => `Rs.${Number(v).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+
+// Same split the Stock Book uses: DIAMOND rows are diamonds, every other non-metal row counts as
+// colour stone (weights already carats).
+function stoneTotals(tag: TagForPrint) {
+  let dia = 0; let cs = 0; let pieces = 0;
+  for (const m of tag.materials ?? []) {
+    if (m.materialType === 'METAL') continue;
+    if (m.materialType === 'DIAMOND') dia += Number(m.weight); else cs += Number(m.weight);
+    pieces += m.pieces ?? 0;
+  }
+  return { dia, cs, pieces };
+}
+
 // Throws on an unrecognized field name (a stale/typo'd template shouldn't silently print a blank
 // label) but returns '' for a legitimately empty optional value (e.g. no HUID on this piece).
 function resolveBoundField(tag: TagForPrint, field: string): string {
@@ -57,15 +92,32 @@ function resolveBoundField(tag: TagForPrint, field: string): string {
     throw new AppError(`Unknown tag template bound field: ${field}`, 400);
   }
   switch (field as BoundField) {
-    case 'tagNumber':    return tag.tagNumber;
-    case 'name':          return tag.name;
-    case 'metalKarat':    return tag.metalKarat ?? '';
-    case 'grossWeight':   return `${Number(tag.grossWeight).toFixed(3)}g`;
-    case 'netWeight':     return `${Number(tag.netWeight).toFixed(3)}g`;
-    case 'stoneWeight':   return `${Number(tag.stoneWeight).toFixed(3)}ct`;
-    case 'huid':          return tag.huid ?? '';
-    case 'sellingPrice':  return `Rs.${Number(tag.sellingPrice).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
-    case 'branchName':    return tag.branch?.name ?? '';
+    case 'tagNumber':        return tag.tagNumber;
+    case 'name':             return tag.name;
+    case 'makeType':         return tag.makeType ?? '';
+    case 'metalType':        return tag.metalType ?? '';
+    case 'metalKarat':       return tag.metalKarat ?? '';
+    case 'grossWeight':      return `${Number(tag.grossWeight).toFixed(3)}g`;
+    case 'netWeight':        return `${Number(tag.netWeight).toFixed(3)}g`;
+    case 'stoneWeight':      return `${Number(tag.stoneWeight).toFixed(3)}ct`;
+    case 'diamondWeight':    return `${stoneTotals(tag).dia.toFixed(3)}ct`;
+    case 'colorStoneWeight': return `${stoneTotals(tag).cs.toFixed(3)}ct`;
+    case 'stonePieces':      return String(stoneTotals(tag).pieces);
+    case 'huid':             return tag.huid ?? '';
+    case 'settingType':      return tag.settingType ?? '';
+    case 'categoryName':     return tag.category?.name ?? '';
+    case 'subCategoryName':  return tag.subCategory?.name ?? '';
+    case 'collectionName':   return tag.collection?.name ?? '';
+    case 'stockTypeName':    return tag.stockType?.name ?? '';
+    case 'manufacturerName': return tag.manufacturer?.name ?? '';
+    case 'sellingPrice':     return rupees(tag.sellingPrice);
+    case 'saleMcRate':       return tag.saleMcRate == null ? '' : `${Number(tag.saleMcRate).toFixed(2)}/g`;
+    case 'saleVaPercent':    return tag.saleVaPercent == null ? '' : `${Number(tag.saleVaPercent).toFixed(2)}%`;
+    case 'costPrice':        return tag.costPrice == null ? '' : rupees(tag.costPrice);
+    case 'notes':            return tag.notes ?? '';
+    case 'taggedDate':       return tag.createdAt ? tag.createdAt.toLocaleDateString('en-GB').replace(/\//g, '-') : '';
+    case 'branchName':       return tag.branch?.name ?? '';
+    case 'branchCode':       return tag.branch?.branchCode ?? '';
   }
 }
 

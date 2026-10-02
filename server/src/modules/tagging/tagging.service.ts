@@ -917,7 +917,15 @@ export async function retireTag(id: string, ctx: TenantContext, userId: string) 
 export async function getTagPrintTspl(ctx: TenantContext, tagId: string, templateId?: string) {
   const tag = await tenantQuery(ctx.companyId, (_tx) => _tx.jewelryTag.findUnique({
     where: { id: tagId },
-    include: { branch: { select: { name: true } } },
+    include: {
+      branch: { select: { name: true, branchCode: true } },
+      category: { select: { name: true } },
+      subCategory: { select: { name: true } },
+      collection: { select: { name: true } },
+      stockType: { select: { name: true } },
+      manufacturer: { select: { name: true } },
+      materials: { select: { materialType: true, weight: true, pieces: true } },
+    },
   }));
   if (!tag || tag.companyId !== ctx.companyId || !canAccessBranch(ctx, tag.branchId)) {
     throw new AppError('Tag not found', 404);

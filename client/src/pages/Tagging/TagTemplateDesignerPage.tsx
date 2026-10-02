@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Box, Card, Grid, Typography, Button, Stack, Divider, Alert,
-  Tabs, Tab, Checkbox, FormControlLabel, TextField,
+  Checkbox, FormControlLabel, TextField,
 } from '@mui/material';
 import { ArrowBack, Print, Delete, Save, ZoomIn, ZoomOut, QrCode2 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
@@ -17,23 +17,51 @@ import { printAgentSnackbarAction } from '../../utils/printAgentSnackbarAction';
 // Must match server/src/shared/tsplGenerator.ts's KNOWN_BOUND_FIELDS exactly — this is the
 // contract between what a template element can point at and what generateTsplForTag can resolve.
 type BoundField =
-  | 'tagNumber' | 'name' | 'metalKarat' | 'grossWeight' | 'netWeight'
-  | 'stoneWeight' | 'huid' | 'sellingPrice' | 'branchName';
+  | 'tagNumber' | 'name' | 'makeType' | 'metalType' | 'metalKarat'
+  | 'grossWeight' | 'netWeight' | 'stoneWeight' | 'diamondWeight' | 'colorStoneWeight' | 'stonePieces'
+  | 'huid' | 'settingType'
+  | 'categoryName' | 'subCategoryName' | 'collectionName' | 'stockTypeName' | 'manufacturerName'
+  | 'sellingPrice' | 'saleMcRate' | 'saleVaPercent' | 'costPrice'
+  | 'notes' | 'taggedDate' | 'branchName' | 'branchCode';
 
 const BOUND_FIELD_OPTIONS: { value: BoundField; label: string }[] = [
   { value: 'tagNumber', label: 'Tag Number' },
   { value: 'name', label: 'Item Name' },
+  { value: 'makeType', label: 'Make Type' },
+  { value: 'metalType', label: 'Metal Type' },
   { value: 'metalKarat', label: 'Metal Karat' },
   { value: 'grossWeight', label: 'Gross Weight' },
   { value: 'netWeight', label: 'Net Weight' },
-  { value: 'stoneWeight', label: 'Stone Weight' },
+  { value: 'stoneWeight', label: 'Stone Weight (total)' },
+  { value: 'diamondWeight', label: 'Diamond Weight' },
+  { value: 'colorStoneWeight', label: 'Colour Stone Weight' },
+  { value: 'stonePieces', label: 'Stone Pieces' },
   { value: 'huid', label: 'HUID' },
+  { value: 'settingType', label: 'Setting Type' },
+  { value: 'categoryName', label: 'Category' },
+  { value: 'subCategoryName', label: 'Sub-Category' },
+  { value: 'collectionName', label: 'Collection' },
+  { value: 'stockTypeName', label: 'Stock Type' },
+  { value: 'manufacturerName', label: 'Manufacturer' },
   { value: 'sellingPrice', label: 'Selling Price' },
+  { value: 'saleMcRate', label: 'Making Charge Rate (per g)' },
+  { value: 'saleVaPercent', label: 'Wastage / VA %' },
+  { value: 'costPrice', label: 'Cost Price (internal - customer will see it)' },
+  { value: 'notes', label: 'Notes' },
+  { value: 'taggedDate', label: 'Tagged Date' },
   { value: 'branchName', label: 'Branch Name' },
+  { value: 'branchCode', label: 'Branch Code' },
 ];
 
 type ElementType = 'text' | 'barcode' | 'qrcode' | 'box' | 'line';
 type Wing = 'front' | 'back';
+type FoldOrientation = 'none' | 'vertical' | 'horizontal';
+
+// The fold line is what splits a folded tag into its front and back halves, so there are no
+// separate Front/Back tabs: one canvas, and each element's wing is derived from which side of the
+// fold it sits on when the template is saved (the printer itself ignores wing - it prints the
+// whole strip in one pass).
+interface FoldSetting { orientation: FoldOrientation; positionMm: number }
 
 interface TemplateElement {
   id: string;
@@ -57,10 +85,20 @@ interface TemplateForm {
   heightMm: number;
   gapMm: number;
   isDefault: boolean;
+  fold: FoldSetting;
   elements: TemplateElement[];
 }
 
-const BLANK_TEMPLATE: TemplateForm = { name: '', widthMm: 50, heightMm: 30, gapMm: 2, isDefault: false, elements: [] };
+const BLANK_TEMPLATE: TemplateForm = {
+  name: '', widthMm: 50, heightMm: 30, gapMm: 2, isDefault: false,
+  fold: { orientation: 'vertical', positionMm: 25 }, elements: [],
+};
+
+function wingFor(el: TemplateElement, fold: FoldSetting): Wing {
+  if (fold.orientation === 'vertical') return el.xMm < fold.positionMm ? 'front' : 'back';
+  if (fold.orientation === 'horizontal') return el.yMm < fold.positionMm ? 'front' : 'back';
+  return 'front';
+}
 
 const ROTATION_OPTIONS = [
   { value: '0', label: '0°' }, { value: '90', label: '90°' },
@@ -122,6 +160,17 @@ function ElementPreview({ el, zoom }: { el: TemplateElement; zoom: number }) {
   return <Box sx={{ width: (el.widthMm ?? 10) * zoom, height: Math.max(2, (el.heightMm ?? 0.3) * zoom), bgcolor: '#000' }} />;
 }
 
+// Faint label showing which half of the folded tag a region becomes.
+function SideCaption({ text, sx }: { text: string; sx: object }) {
+  return (
+    <Typography variant="caption" sx={{
+      position: 'absolute', pointerEvents: 'none', color: 'error.main', opacity: 0.6, fontWeight: 600, fontSize: 10, ...sx,
+    }}>
+      {text}
+    </Typography>
+  );
+}
+
 export function TagTemplateDesignerPage() {
   const navigate = useNavigate();
   const { enqueueSnackbar } = useSnackbar();
@@ -129,13 +178,8 @@ export function TagTemplateDesignerPage() {
 
   const [selectedId, setSelectedId] = useState('');
   const [form, setForm] = useState<TemplateForm>(BLANK_TEMPLATE);
-  const [activeWing, setActiveWing] = useState<Wing>('front');
   const [selectedElId, setSelectedElId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(6); // px per mm — purely an on-screen editing scale
-  // Purely a visual guide for a folded two-wing tag — never sent to the printer or saved. Which
-  // side ends up "front" after folding still depends on which way the fold goes, so this just
-  // marks where the midpoint is, not which half is which.
-  const [foldLine, setFoldLine] = useState<'none' | 'vertical' | 'horizontal'>('vertical');
   const [testTagQuery, setTestTagQuery] = useState('');
   const [testTagId, setTestTagId] = useState('');
 
@@ -154,9 +198,15 @@ export function TagTemplateDesignerPage() {
     if (!selectedId) { setForm(BLANK_TEMPLATE); setSelectedElId(null); return; }
     const t = templateDetailQuery.data;
     if (!t) return;
+    const w = Number(t.widthMm); const h = Number(t.heightMm);
+    const savedFold = t.layout?.fold;
+    // A template saved before the fold became configurable has none - it was a vertical midline.
+    const fold: FoldSetting = savedFold && ['none', 'vertical', 'horizontal'].includes(savedFold.orientation)
+      ? { orientation: savedFold.orientation, positionMm: Number(savedFold.positionMm) || 0 }
+      : { orientation: 'vertical', positionMm: w / 2 };
     setForm({
-      id: t.id, name: t.name, widthMm: Number(t.widthMm), heightMm: Number(t.heightMm), gapMm: Number(t.gapMm),
-      isDefault: t.isDefault, elements: (t.layout?.elements ?? []) as TemplateElement[],
+      id: t.id, name: t.name, widthMm: w, heightMm: h, gapMm: Number(t.gapMm),
+      isDefault: t.isDefault, fold, elements: (t.layout?.elements ?? []) as TemplateElement[],
     });
     setSelectedElId(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -170,7 +220,7 @@ export function TagTemplateDesignerPage() {
 
   function addElement(type: ElementType) {
     const id = `el_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-    const base: TemplateElement = { id, wing: activeWing, type, xMm: 5, yMm: 5 };
+    const base: TemplateElement = { id, wing: 'front', type, xMm: 5, yMm: 5 };
     if (type === 'text') Object.assign(base, { literalText: 'Text', fontSize: 8 });
     if (type === 'barcode') Object.assign(base, { boundField: 'tagNumber' as BoundField, heightMm: 10, humanReadable: true });
     if (type === 'qrcode') Object.assign(base, { boundField: 'tagNumber' as BoundField });
@@ -214,7 +264,8 @@ export function TagTemplateDesignerPage() {
       if (!form.name.trim()) throw new Error('Template name is required');
       const payload = {
         name: form.name, widthMm: form.widthMm, heightMm: form.heightMm, gapMm: form.gapMm,
-        isDefault: form.isDefault, layout: { elements: form.elements },
+        isDefault: form.isDefault,
+        layout: { fold: form.fold, elements: form.elements.map((el) => ({ ...el, wing: wingFor(el, form.fold) })) },
       };
       return form.id ? apiPut<any>(`/tagging/templates/${form.id}`, payload) : apiPost<any>('/tagging/templates', payload);
     },
@@ -281,7 +332,7 @@ export function TagTemplateDesignerPage() {
 
               <Divider />
 
-              <Typography variant="subtitle2">Add Element ({activeWing})</Typography>
+              <Typography variant="subtitle2">Add Element</Typography>
               <Stack direction="row" flexWrap="wrap" gap={1}>
                 <Button size="small" variant="outlined" onClick={() => addElement('text')}>+ Text</Button>
                 <Button size="small" variant="outlined" onClick={() => addElement('barcode')}>+ Barcode</Button>
@@ -297,18 +348,37 @@ export function TagTemplateDesignerPage() {
              this flex column wider than its share, which would push the right panel off-screen. ── */}
         <Grid item xs={12} md={6} sx={{ minWidth: 0 }}>
           <Card sx={{ p: 2 }}>
-            <Tabs value={activeWing} onChange={(_, v) => { setActiveWing(v); setSelectedElId(null); }} sx={{ mb: 1 }}>
-              <Tab value="front" label="Front" />
-              <Tab value="back" label="Back" />
-            </Tabs>
             <Stack direction="row" alignItems="center" justifyContent="space-between" flexWrap="wrap" gap={1} sx={{ mb: 1 }}>
-              <SelectField label="Fold Line" value={foldLine} size="small" sx={{ width: 170 }}
-                options={[
-                  { value: 'vertical', label: 'Vertical (width)' },
-                  { value: 'horizontal', label: 'Horizontal (height)' },
-                  { value: 'none', label: 'None' },
-                ]}
-                onChange={(e) => setFoldLine(e.target.value as 'none' | 'vertical' | 'horizontal')} />
+              <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap">
+                <SelectField label="Fold Line" value={form.fold.orientation} size="small" sx={{ width: 170 }}
+                  options={[
+                    { value: 'vertical', label: 'Vertical (left | right)' },
+                    { value: 'horizontal', label: 'Horizontal (top / bottom)' },
+                    { value: 'none', label: 'None (single side)' },
+                  ]}
+                  onChange={(e) => {
+                    const orientation = e.target.value as FoldOrientation;
+                    setForm((f) => ({
+                      ...f,
+                      fold: { orientation, positionMm: orientation === 'horizontal' ? f.heightMm / 2 : f.widthMm / 2 },
+                    }));
+                  }} />
+                {form.fold.orientation !== 'none' && (
+                  <>
+                    <NumberField label={form.fold.orientation === 'vertical' ? 'Fold at X (mm)' : 'Fold at Y (mm)'}
+                      value={form.fold.positionMm} size="small" sx={{ width: 130 }}
+                      onChange={(e) => {
+                        const max = form.fold.orientation === 'vertical' ? form.widthMm : form.heightMm;
+                        const v = Math.max(0, Math.min(max, Number(e.target.value) || 0));
+                        setForm((f) => ({ ...f, fold: { ...f.fold, positionMm: v } }));
+                      }} />
+                    <Button size="small" onClick={() => setForm((f) => ({
+                      ...f,
+                      fold: { ...f.fold, positionMm: (f.fold.orientation === 'vertical' ? f.widthMm : f.heightMm) / 2 },
+                    }))}>Centre</Button>
+                  </>
+                )}
+              </Stack>
               <Stack direction="row" alignItems="center" spacing={1}>
                 <Button size="small" onClick={() => setZoom((z) => Math.max(3, z - 1))} startIcon={<ZoomOut />}>Zoom</Button>
                 <Typography variant="caption" sx={{ minWidth: 48, textAlign: 'center' }}>{zoom} px/mm</Typography>
@@ -326,19 +396,27 @@ export function TagTemplateDesignerPage() {
                   bgcolor: '#fff', border: '2px solid', borderColor: 'divider', boxShadow: 1, mx: 'auto',
                 }}
               >
-                {foldLine === 'vertical' && (
-                  <Box sx={{
-                    position: 'absolute', top: 0, bottom: 0, left: (form.widthMm / 2) * zoom,
-                    borderLeft: '2px dashed', borderColor: 'error.main', pointerEvents: 'none',
-                  }} />
+                {form.fold.orientation === 'vertical' && (
+                  <>
+                    <Box sx={{
+                      position: 'absolute', top: 0, bottom: 0, left: form.fold.positionMm * zoom,
+                      borderLeft: '2px dashed', borderColor: 'error.main', pointerEvents: 'none',
+                    }} />
+                    <SideCaption text="FRONT" sx={{ left: 4, top: 2 }} />
+                    <SideCaption text="BACK" sx={{ left: form.fold.positionMm * zoom + 4, top: 2 }} />
+                  </>
                 )}
-                {foldLine === 'horizontal' && (
-                  <Box sx={{
-                    position: 'absolute', left: 0, right: 0, top: (form.heightMm / 2) * zoom,
-                    borderTop: '2px dashed', borderColor: 'error.main', pointerEvents: 'none',
-                  }} />
+                {form.fold.orientation === 'horizontal' && (
+                  <>
+                    <Box sx={{
+                      position: 'absolute', left: 0, right: 0, top: form.fold.positionMm * zoom,
+                      borderTop: '2px dashed', borderColor: 'error.main', pointerEvents: 'none',
+                    }} />
+                    <SideCaption text="FRONT" sx={{ left: 4, top: 2 }} />
+                    <SideCaption text="BACK" sx={{ left: 4, top: form.fold.positionMm * zoom + 2 }} />
+                  </>
                 )}
-                {form.elements.filter((el) => el.wing === activeWing).map((el) => (
+                {form.elements.map((el) => (
                   <Box
                     key={el.id}
                     onPointerDown={(e) => onElementPointerDown(e, el)}
@@ -356,7 +434,8 @@ export function TagTemplateDesignerPage() {
               </Box>
             </Box>
             <Typography variant="caption" color="text.secondary">
-              Drag an element to reposition it, or edit X/Y precisely in the panel on the right. This is a layout
+              Drag an element to reposition it, or edit X/Y precisely in the panel on the right. The dashed fold line
+              splits the tag into front and back; move it with "Fold at". This is a layout
               preview, not the exact thermal-printer render — always confirm alignment with a real test print.
             </Typography>
           </Card>

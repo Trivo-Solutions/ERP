@@ -100,3 +100,42 @@ describe('generateTsplForTag', () => {
     expect(() => generateTsplForTag(bad, tag)).toThrow(/Unknown tag template element type/);
   });
 });
+
+describe('extended bound fields', () => {
+  const full: TagForPrint = {
+    ...tag,
+    makeType: 'GOLD', metalType: 'GOLD', settingType: 'PRONG', costPrice: 30000 as any,
+    saleMcRate: 450 as any, saleVaPercent: 12 as any, notes: 'Gift box', createdAt: new Date(2026, 9, 2),
+    branch: { name: 'Main Branch', branchCode: 'MB01' },
+    category: { name: 'Rings' }, subCategory: { name: 'Solitaire' }, collection: { name: 'Bridal' },
+    stockType: { name: 'Regular' }, manufacturer: { name: 'ABC Gold' },
+    materials: [
+      { materialType: 'METAL', weight: 4.9 as any, pieces: null },
+      { materialType: 'DIAMOND', weight: 0.2 as any, pieces: 3 },
+      { materialType: 'STONE', weight: 0.134 as any, pieces: 2 },
+    ],
+  };
+  const one = (boundField: string) => generateTsplForTag(
+    { ...template, layout: { elements: [{ id: 'e', wing: 'front', type: 'text', xMm: 0, yMm: 0, boundField: boundField as any }] } },
+    full,
+  );
+
+  it.each([
+    ['makeType', 'GOLD'], ['metalType', 'GOLD'], ['settingType', 'PRONG'],
+    ['categoryName', 'Rings'], ['subCategoryName', 'Solitaire'], ['collectionName', 'Bridal'],
+    ['stockTypeName', 'Regular'], ['manufacturerName', 'ABC Gold'], ['branchCode', 'MB01'],
+    ['diamondWeight', '0.200ct'], ['colorStoneWeight', '0.134ct'], ['stonePieces', '5'],
+    ['saleMcRate', '450.00/g'], ['saleVaPercent', '12.00%'], ['costPrice', 'Rs.30,000'],
+    ['notes', 'Gift box'], ['taggedDate', '02-10-2026'],
+  ])('resolves %s', (field, expected) => {
+    expect(one(field)).toContain(`"${expected}"`);
+  });
+
+  it('prints an absent optional value as empty rather than throwing', () => {
+    const lean = generateTsplForTag(
+      { ...template, layout: { elements: [{ id: 'e', wing: 'front', type: 'text', xMm: 0, yMm: 0, boundField: 'categoryName' }] } },
+      tag,
+    );
+    expect(lean).toContain(',""');
+  });
+});
