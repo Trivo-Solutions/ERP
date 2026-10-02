@@ -174,6 +174,10 @@ model Company {
   // G2g-7e: GSTR-2B ingestion.
   gst2bStatements       Gst2bStatement[]
   gst2bDocuments        Gst2bDocument[]
+  // G8a: GST integration foundation.
+  gstIntegrationConfigs      GstIntegrationConfig[]
+  gstIntegrationCredentials  GstIntegrationCredential[]
+  gstIntegrationRequestLogs  GstIntegrationRequestLog[]
 
   @@map("companies")
 }
@@ -218,6 +222,8 @@ model CompanyGstRegistration {
   selfInvoices   SelfInvoice[]
   // G2g-7e: every GSTR-2B statement imported for this registration.
   gst2bStatements Gst2bStatement[]
+  // G8a: every GST integration config (provider × environment) scoped to this registration.
+  integrationConfigs GstIntegrationConfig[]
 
   @@unique([companyId, gstin])
   // composite-FK target: lets the database refuse a Branch pointing at another company's registration
@@ -732,6 +738,10 @@ model User {
   gstReturnPeriodsLocked     GstReturnPeriod[]     @relation("GstReturnPeriodLockedBy")
   // G2g-7e: GSTR-2B ingestion.
   gst2bStatementsImported    Gst2bStatement[]      @relation("Gst2bStatementImportedBy")
+  // G8a: GST integration foundation (config admin only — no provider/network action is ever
+  // attributed to a user in this phase, since none is performed).
+  gstIntegrationConfigsCreated GstIntegrationConfig[] @relation("GstIntegrationConfigCreatedBy")
+  gstIntegrationConfigsUpdated GstIntegrationConfig[] @relation("GstIntegrationConfigUpdatedBy")
 
   @@map("users")
 }
@@ -1551,6 +1561,144 @@ model Gst2bDocument {
   @@index([companyId, supplierGstin])
   @@index([companyId, section])
   @@map("gst2b_documents")
+}
+
+// ═══════════════════════════════════════════════════
+// G8a — GST Integration Foundation. Provider-neutral infrastructure for a FUTURE e-invoice/IRP,
+// GSTIN-lookup, and E-Way Bill integration (G8b+). This phase builds ONLY the boundary: config
+// storage, encrypted credentials, an auth/session cache, a controlled HTTP client, error
+// normalization, idempotency, and request/response tracking — see
+// server/src/modules/gst/integration/. No real provider is implemented (the only concrete
+// GstIntegrationProvider shipped here is UnconfiguredProvider — deterministic
+// NOT_CONFIGURED/UNSUPPORTED_PROVIDER_OPERATION for every capability). No IRN generation, no
+// GSTIN lookup (see shared/gstProvider.ts for the UNRELATED, pre-existing Phase-C GSTIN-registry
+// lookup — this is not that), no E-Way Bill, no GST filing changes. See
+// PHASE_G8A_IMPLEMENTATION.md.
+// ═══════════════════════════════════════════════════
+
+// One configured integration "slot": a specific GST registration × provider × environment. A
+// company with GSTIN A and GSTIN B, each needing separate sandbox/production credentials with
+// (possibly) different providers, gets up to 4 rows. Never a Company-wide credential — a GST
+// registration is the correct ownership unit (G8a brief §6).
+model GstIntegrationConfig {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+
+  gstRegistration   CompanyGstRegistration @relation(fields: [gstRegistrationId, companyId], references: [id, companyId])
+  gstRegistrationId String
+
+  // GST_PROVIDER: IRIS_IRP | NIC_IRP | CYGNET_IRP | CLEAR_IRP | OTHER — see
+  // modules/gst/integration/types.ts. Free string, same "fixed by this phase's own constant list,
+  // not a DB enum" convention as taxCategory/rcmCategory elsewhere in this schema.
+  provider String
+  // SANDBOX | PRODUCTION — structurally separate; never inferred from a URL (brief §9/§10).
+  environment String
+
+  label    String?
+  isActive Boolean @default(true)
+
+  // Last POST .../test result — a read-only service-level health probe, never an IRN/EWB mutation.
+  lastTestedAt   DateTime?
+  lastTestStatus String? // AVAILABLE | UNAVAILABLE | NOT_CONFIGURED | AUTH_FAILED | UNKNOWN
+
+  credentials GstIntegrationCredential[]
+  requestLogs GstIntegrationRequestLog[]
+
+  createdById String?
+  createdBy   User?    @relation("GstIntegrationConfigCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedById String?
+  updatedBy   User?    @relation("GstIntegrationConfigUpdatedBy", fields: [updatedById], references: [id])
+  updatedAt   DateTime @updatedAt
+
+  // One config per (registration, provider, environment) — never two active sandbox configs for
+  // the same provider on the same registration.
+  @@unique([gstRegistrationId, provider, environment])
+  // composite-FK target
+  @@unique([id, companyId])
+  @@index([companyId])
+  @@index([gstRegistrationId])
+  @@map("gst_integration_configs")
+}
+
+// A single encrypted credential field on a config (clientId, clientSecret, username, password,
+// portalId, apiKey, ...). Deliberately a generic key/value row, not fixed columns — different
+// providers need different credential combinations and this must never need a schema migration
+// per provider (G8a brief §8). The value is ALWAYS encrypted at rest
+// (modules/gst/integration/encryption.ts); no service or route may select/return the plaintext —
+// only the provider-adapter call path decrypts it, at the moment of use, never logged.
+model GstIntegrationCredential {
+  id        String               @id @default(cuid())
+  companyId String
+  company   Company              @relation(fields: [companyId], references: [id])
+  config    GstIntegrationConfig @relation(fields: [configId, companyId], references: [id, companyId], onDelete: Cascade)
+  configId  String
+
+  // e.g. 'clientId' | 'clientSecret' | 'username' | 'password' | 'portalId' | 'apiKey' —
+  // provider-defined, never validated against a fixed enum (brief §8's "no migration per
+  // provider" requirement).
+  credentialKey String
+  // AES-256-GCM ciphertext: "<iv>:<authTag>:<ciphertext>", each base64. Never selected into an
+  // API response body.
+  encryptedValue String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([configId, credentialKey])
+  @@index([companyId])
+  @@index([configId])
+  @@map("gst_integration_credentials")
+}
+
+// Metadata-only record of one outbound (or locally-resolved) integration operation attempt —
+// authenticate / health / future IRN-ish calls. No payload body is stored by default (brief
+// §14) — only enough to trace, de-duplicate, and diagnose. The (companyId, idempotencyKey)
+// unique constraint on non-null keys IS the idempotency mechanism (brief §13): a repeated key for
+// the same company resolves to the existing row (requestTracking.service.ts), never a second one
+// — Postgres treats NULLs as distinct, so operations with no idempotency key (most health checks)
+// never collide with each other.
+model GstIntegrationRequestLog {
+  id        String               @id @default(cuid())
+  companyId String
+  company   Company              @relation(fields: [companyId], references: [id])
+  config    GstIntegrationConfig @relation(fields: [configId, companyId], references: [id, companyId], onDelete: Cascade)
+  configId  String
+
+  // Denormalized snapshot of the config at request time — a later config edit (e.g. a provider
+  // switch) must never rewrite the meaning of a past log row.
+  provider    String
+  environment String
+
+  // AUTHENTICATE | HEALTH_CHECK | GET_GSTIN_DETAILS | GENERATE_IRN | CANCEL_IRN | GET_IRN |
+  // GET_IRN_BY_DOCUMENT | GENERATE_EWAYBILL | CANCEL_EWAYBILL | OTHER — free string, future-proof.
+  // Only AUTHENTICATE/HEALTH_CHECK are ever actually produced in this phase.
+  operation String
+
+  correlationId  String
+  idempotencyKey String?
+
+  requestStartedAt DateTime
+  completedAt      DateTime?
+  // PENDING | SUCCESS | FAILED
+  status              String  @default("PENDING")
+  httpStatus          Int?
+  providerReferenceId String?
+
+  // AUTHENTICATION | AUTHORIZATION | VALIDATION | RATE_LIMIT | TIMEOUT | NETWORK | PROVIDER |
+  // DUPLICATE | UNSUPPORTED | UNKNOWN — see errors.ts. Never a raw stack trace or raw provider body.
+  errorCategory String?
+  errorCode     String?
+  errorMessage  String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([companyId, idempotencyKey])
+  @@index([companyId])
+  @@index([configId])
+  @@index([correlationId])
+  @@map("gst_integration_request_logs")
 }
 
 // companyId direct — Phase 2b. purchaseRequisitionId may point at a PR from the same company
