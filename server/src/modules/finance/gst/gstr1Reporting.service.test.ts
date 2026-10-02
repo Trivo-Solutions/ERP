@@ -4,12 +4,20 @@ import { platformPrisma as prisma } from '../../../config/database';
 import { createInvoice as _createInvoice, voidInvoice } from '../../sales/sales.service';
 import { createStandaloneCreditNote, cancelCreditNote } from '../../sales/creditNote.service';
 import { createSalesReturn } from '../../sales/sales.service';
+import { createSalesDebitNote, cancelSalesDebitNote } from '../../sales/salesDebitNote.service';
 import { createGstRegistration } from '../../company/company.service';
+import { createPO, createGRN } from '../../procurement/procurement.service';
+import { createStandaloneDebitNote } from '../../procurement/debitNote.service';
 import { createTestTenant, cleanupTestTenant, addBranch, TestTenant } from '../../../test/fixtures';
 import { cleanupJournalEntries } from '../../../test/ledger';
 import { tenantQuery } from '../../../shared/tenantContext';
-import { getGstr1OutwardReport, getGstr1CreditNoteReport } from './gstr1Reporting.service';
+import {
+  getGstr1OutwardReport, getGstr1CreditNoteReport,
+  getGstr1SalesDebitNoteReport, getGstr1OutwardReportWithSalesDebitNotes,
+  getGstr1Table12ReportWithSalesDebitNotes, getGstr1Table13Report,
+} from './gstr1Reporting.service';
 import { parseIstRangeStart, parseIstRangeEnd } from '../../../shared/istDate';
+import { FINISHED_GOODS_MATERIAL_TYPE } from '../../../shared/constants';
 
 // G2g-3e — proves the SERVICE integration (Prisma loading + shape adaptation) correctly wires real
 // database rows into the two FROZEN, pure aggregators. It deliberately does not re-test any
@@ -24,11 +32,16 @@ describe('GSTR-1 reporting integration (G2g-3e)', () => {
   let branchB: string;
   let intraClientId: string; // Gujarat, unregistered -> same-state -> always B2CS
   let interClientId: string; // Maharashtra, unregistered -> inter-state -> B2CL/B2CS by value
+  let b2bClientId: string; // carries a buyer GSTIN -> always B2B regardless of state/value
   let primaryRegId: string;
   let secondaryRegId: string;
+  let dnSupplierId: string; // G2g-4b.3: procurement-side isolation fixture
   const invoiceIds: string[] = [];
   const salesReturnIds: string[] = [];
   const creditNoteIds: string[] = [];
+  const debitNoteIds: string[] = []; // G2g-4b.3: Sales (outward) Debit Notes
+  const procurementDebitNoteIds: string[] = []; // G2g-4b.3: procurement-side DebitNote, kept isolated
+  const poIds: string[] = [];
   const tagIds: string[] = [];
   const regRows: string[] = [];
 
@@ -60,7 +73,10 @@ describe('GSTR-1 reporting integration (G2g-3e)', () => {
   }
 
   beforeAll(async () => {
-    tenant = await createTestTenant(suffix, ['invoice:create', 'invoice:void', 'return:create', 'creditNote:create', 'creditNote:cancel']);
+    tenant = await createTestTenant(suffix, [
+      'invoice:create', 'invoice:void', 'return:create', 'creditNote:create', 'creditNote:cancel',
+      'salesDebitNote:create', 'salesDebitNote:cancel', 'po:create', 'grn:create', 'debitNote:create',
+    ]);
     userId = tenant.user.id;
     branchA = tenant.branch.id;
     const b = await addBranch(tenant.company.id, suffix);
@@ -71,12 +87,20 @@ describe('GSTR-1 reporting integration (G2g-3e)', () => {
     const reg2 = await createGstRegistration(tenant.ctx, { gstin: '24BBBBB1111B1Z5', legalName: 'Secondary Reg', stateCode: '24', isPrimary: false, isActive: true });
     secondaryRegId = reg2.id; regRows.push(reg2.id);
 
-    const [intra, inter] = await Promise.all([
+    const [intra, inter, b2b] = await Promise.all([
       prisma.client.create({ data: { companyId: tenant.company.id, clientCode: `TSTCL-G3EA-${suffix}`, name: 'Intra Client', type: 'RETAIL', state: 'Gujarat' } }),
       prisma.client.create({ data: { companyId: tenant.company.id, clientCode: `TSTCL-G3EB-${suffix}`, name: 'Inter Client', type: 'RETAIL', state: 'Maharashtra' } }),
+      prisma.client.create({ data: { companyId: tenant.company.id, clientCode: `TSTCL-G3EC-${suffix}`, name: 'B2B Client', type: 'WHOLESALE', state: 'Gujarat', gstNumber: '27AAAAA0000A1Z5' } }),
     ]);
     intraClientId = intra.id;
     interClientId = inter.id;
+    b2bClientId = b2b.id;
+
+    // G2g-4b.3: a real procurement-side Supplier, used only by the "procurement DebitNote excluded"
+    // regression below — isolated entirely from every Sales Debit Note fixture above.
+    dnSupplierId = (await prisma.supplier.create({
+      data: { companyId: tenant.company.id, supplierCode: `TSTSUP-G3E-${suffix}`, name: 'DN Supplier', type: 'OTHER', gstNumber: '24ZZZZZ9999Z1Z5' },
+    })).id;
   });
 
   afterAll(async () => {
@@ -84,13 +108,18 @@ describe('GSTR-1 reporting integration (G2g-3e)', () => {
     // http.gstReportSecurity.test.ts) — deletion must go through tenantQuery.
     await tenantQuery(tenant.company.id, (tx) => tx.companyGstRegistration.deleteMany({ where: { id: { in: regRows } } }));
     await tenantQuery(tenant.company.id, (tx) => tx.creditNote.deleteMany({ where: { companyId: tenant.company.id } }));
-    await cleanupJournalEntries([...invoiceIds, ...salesReturnIds, ...creditNoteIds]);
+    await tenantQuery(tenant.company.id, (tx) => tx.salesDebitNote.deleteMany({ where: { companyId: tenant.company.id } }));
+    await tenantQuery(tenant.company.id, (tx) => tx.debitNote.deleteMany({ where: { companyId: tenant.company.id } }));
+    await cleanupJournalEntries([...invoiceIds, ...salesReturnIds, ...creditNoteIds, ...debitNoteIds, ...procurementDebitNoteIds]);
     await prisma.salesReturn.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.invoicePayment.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.salesInvoice.deleteMany({ where: { id: { in: invoiceIds } } });
     await prisma.jewelryTag.deleteMany({ where: { id: { in: tagIds } } });
-    await prisma.client.deleteMany({ where: { id: { in: [intraClientId, interClientId] } } });
+    await prisma.client.deleteMany({ where: { id: { in: [intraClientId, interClientId, b2bClientId] } } });
+    await prisma.goodsReceiptNote.deleteMany({ where: { poId: { in: poIds } } });
+    await prisma.purchaseOrder.deleteMany({ where: { id: { in: poIds } } });
+    await prisma.supplier.deleteMany({ where: { id: dnSupplierId } });
     await cleanupTestTenant(tenant); // also removes branchB
     await prisma.$disconnect();
   });
@@ -318,6 +347,218 @@ describe('GSTR-1 reporting integration (G2g-3e)', () => {
       expect(cnReport.b2csNetOff.documents.some((d) => d.creditNoteId === cn.id)).toBe(true);
       expect(cnReport.cdnur.b2cl.documents.some((d) => d.creditNoteId === cn.id)).toBe(false);
       expect(cnReport.cdnr.documents.some((d) => d.creditNoteId === cn.id)).toBe(false);
+    });
+  });
+
+  // G2g-4b.3 — proves the SERVICE/ROUTER wiring actually carries real, persisted SalesDebitNote
+  // rows into the existing GSTR-1 report responses via `gstr1SalesDebitNoteAdapter.ts` (itself
+  // unmodified by this phase). Deliberately does not re-test any classification/normalization/
+  // aggregation RULE the adapter's own frozen-style unit suite
+  // (gstr1SalesDebitNoteAdapter.test.ts) already covers — only that this loading/mapping layer
+  // hands the adapter the right data, end to end, against a real database.
+  describe('Sales Debit Note wiring into GSTR-1 reports (G2g-4b.3)', () => {
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+    const from = new Date('2020-01-01'), to = new Date('2035-12-31');
+
+    it('a B2B-origin Sales Debit Note appears exactly once, under CDNR (Table 9B)', async () => {
+      const invoice = await makeInvoice(b2bClientId, 8000);
+      const dn = await createSalesDebitNote(
+        { invoiceId: invoice.id, items: [{ invoiceItemId: invoice.items[0].id, amount: 515 }], reasonCode: 'PRICE_INCREASE' },
+        tenant.ctx, userId,
+      );
+      debitNoteIds.push(dn.id);
+
+      const report = await getGstr1SalesDebitNoteReport(tenant.company.id, primaryRegId, from, to);
+      const occurrences = [
+        ...report.cdnr.documents, ...report.cdnur.b2cl.documents, ...report.cdnur.export.documents, ...report.b2csAddOn.documents,
+      ].filter((d) => d.debitNoteId === dn.id);
+      expect(occurrences).toHaveLength(1);
+      expect(report.cdnr.documents.some((d) => d.debitNoteId === dn.id)).toBe(true);
+    });
+
+    it('a B2CL-origin Sales Debit Note appears in CDNUR (unregistered, inter-state), never in CDNR', async () => {
+      // interClientId: Maharashtra, unregistered. ₹1,50,000 is well over the current (post Aug
+      // 2024) ₹1,00,000 B2CL threshold, so the ORIGINAL invoice classifies B2CL.
+      const invoice = await makeInvoice(interClientId, 150_000);
+      const dn = await createSalesDebitNote(
+        { invoiceId: invoice.id, items: [{ invoiceItemId: invoice.items[0].id, amount: 2060 }], reasonCode: 'PRICE_INCREASE' },
+        tenant.ctx, userId,
+      );
+      debitNoteIds.push(dn.id);
+
+      const report = await getGstr1SalesDebitNoteReport(tenant.company.id, primaryRegId, from, to);
+      expect(report.cdnur.b2cl.documents.some((d) => d.debitNoteId === dn.id)).toBe(true);
+      expect(report.cdnr.documents.some((d) => d.debitNoteId === dn.id)).toBe(false);
+      expect(report.b2csAddOn.documents.some((d) => d.debitNoteId === dn.id)).toBe(false);
+    });
+
+    it('a B2CS-origin Sales Debit Note contributes positively to Table 7, and a B2CL-origin one never bleeds into B2CS', async () => {
+      const before = await getGstr1OutwardReportWithSalesDebitNotes(tenant.company.id, primaryRegId, from, to);
+      const beforeAddition = before.b2cs.filter((g) => !g.isInterState).reduce((s, g) => s + g.debitNoteTaxableAddition, 0);
+
+      // B2CS-origin: intraClientId, same-state as the seller.
+      const intraInvoice = await makeInvoice(intraClientId, 9000);
+      const b2csDn = await createSalesDebitNote(
+        { invoiceId: intraInvoice.id, items: [{ invoiceItemId: intraInvoice.items[0].id, amount: 515 }], reasonCode: 'PRICE_INCREASE' }, // taxable = 500.00
+        tenant.ctx, userId,
+      );
+      debitNoteIds.push(b2csDn.id);
+
+      // B2CL-origin: interClientId, over the B2CL threshold — must never land in any b2cs bucket.
+      const interInvoice = await makeInvoice(interClientId, 150_000);
+      const b2clDn = await createSalesDebitNote(
+        { invoiceId: interInvoice.id, items: [{ invoiceItemId: interInvoice.items[0].id, amount: 2060 }], reasonCode: 'PRICE_INCREASE' }, // taxable = 2000.00
+        tenant.ctx, userId,
+      );
+      debitNoteIds.push(b2clDn.id);
+
+      const after = await getGstr1OutwardReportWithSalesDebitNotes(tenant.company.id, primaryRegId, from, to);
+      const afterAddition = after.b2cs.filter((g) => !g.isInterState).reduce((s, g) => s + g.debitNoteTaxableAddition, 0);
+      // Only the B2CS-origin note's taxable value (500.00) was added — the B2CL-origin note's
+      // 2000.00 is nowhere in this delta, proving it never bled into Table 7 B2CS.
+      expect(round2(afterAddition - beforeAddition)).toBeCloseTo(500, 2);
+      expect(after.meta.salesDebitNotesConsideredForAddOn).toBeGreaterThan(before.meta.salesDebitNotesConsideredForAddOn);
+      // b2b/b2cl stay the base aggregation's own untouched arrays — never carry a debit-note addition field.
+      expect(after.b2cl.some((r: any) => 'debitNoteTaxableAddition' in r)).toBe(false);
+    });
+
+    it('Table 12 receives Sales Debit Note contributions into the matching B2B_SUPPLIES / B2C_SUPPLIES bucket, without corrupting the base recordCount', async () => {
+      const sumBy = (rows: { reportingTab: string; debitNoteTaxableAddition: number }[], tab: string) =>
+        rows.filter((r) => r.reportingTab === tab).reduce((s, r) => s + r.debitNoteTaxableAddition, 0);
+      const recordCountBy = (rows: { reportingTab: string; recordCount: number }[], tab: string) =>
+        rows.filter((r) => r.reportingTab === tab).reduce((s, r) => s + r.recordCount, 0);
+
+      // Create the INVOICES first and snapshot "before" only after that — an invoice's own line is
+      // itself a real taxable supply that legitimately changes the base recordCount; isolating the
+      // debit note's own effect means comparing before/after the DEBIT NOTE only, not before/after
+      // the invoice too.
+      const b2bInvoice = await makeInvoice(b2bClientId, 7000);
+      const intraInvoice = await makeInvoice(intraClientId, 6000);
+
+      const before = await getGstr1Table12ReportWithSalesDebitNotes(tenant.company.id, primaryRegId, from, to);
+      const beforeB2b = sumBy(before.rows, 'B2B_SUPPLIES');
+      const beforeB2c = sumBy(before.rows, 'B2C_SUPPLIES');
+      const beforeB2bRecordCount = recordCountBy(before.rows, 'B2B_SUPPLIES');
+
+      const b2bDn = await createSalesDebitNote(
+        { invoiceId: b2bInvoice.id, items: [{ invoiceItemId: b2bInvoice.items[0].id, amount: 309 }], reasonCode: 'PRICE_INCREASE' }, // taxable = 300.00
+        tenant.ctx, userId,
+      );
+      debitNoteIds.push(b2bDn.id);
+
+      const b2csDn = await createSalesDebitNote(
+        { invoiceId: intraInvoice.id, items: [{ invoiceItemId: intraInvoice.items[0].id, amount: 206 }], reasonCode: 'PRICE_INCREASE' }, // taxable = 200.00
+        tenant.ctx, userId,
+      );
+      debitNoteIds.push(b2csDn.id);
+
+      const after = await getGstr1Table12ReportWithSalesDebitNotes(tenant.company.id, primaryRegId, from, to);
+      const afterB2b = sumBy(after.rows, 'B2B_SUPPLIES');
+      const afterB2c = sumBy(after.rows, 'B2C_SUPPLIES');
+      const afterB2bRecordCount = recordCountBy(after.rows, 'B2B_SUPPLIES');
+
+      expect(round2(afterB2b - beforeB2b)).toBeCloseTo(300, 2);
+      expect(round2(afterB2c - beforeB2c)).toBeCloseTo(200, 2);
+      expect(afterB2bRecordCount).toBe(beforeB2bRecordCount); // invoice-line recordCount is never touched by a debit note
+    });
+
+    it('Table 13 receives the Sales Debit Note as OUTWARD_DEBIT_NOTE, and a cancelled one is reported cancelled, never a gap', async () => {
+      const before = await getGstr1Table13Report(tenant.ctx, { gstRegistrationId: primaryRegId, from, to });
+      const beforeSeries = before.series.find((s) => s.category === 'OUTWARD_DEBIT_NOTE');
+      const beforeTotal = beforeSeries?.totalDocuments ?? 0;
+      const beforeCancelled = beforeSeries?.cancelledDocuments ?? 0;
+
+      const invoice = await makeInvoice(intraClientId, 5000);
+      const dn = await createSalesDebitNote(
+        { invoiceId: invoice.id, items: [{ invoiceItemId: invoice.items[0].id, amount: 515 }], reasonCode: 'PRICE_INCREASE' },
+        tenant.ctx, userId,
+      );
+      debitNoteIds.push(dn.id);
+      await cancelSalesDebitNote(dn.id, tenant.ctx, userId, 'G2g-4b.3 Table 13 wiring test');
+
+      const after = await getGstr1Table13Report(tenant.ctx, { gstRegistrationId: primaryRegId, from, to });
+      const afterSeries = after.series.find((s) => s.category === 'OUTWARD_DEBIT_NOTE')!;
+      expect(afterSeries.totalDocuments).toBe(beforeTotal + 1);
+      expect(afterSeries.cancelledDocuments).toBe(beforeCancelled + 1);
+      expect(after.meta.salesDebitNotesConsidered).toBeGreaterThan(before.meta.salesDebitNotesConsidered);
+    });
+
+    it('a cancelled Sales Debit Note is excluded from Table 9B active tax totals (never contributes a positive CDNR line)', async () => {
+      const invoice = await makeInvoice(b2bClientId, 4000);
+      const dn = await createSalesDebitNote(
+        { invoiceId: invoice.id, items: [{ invoiceItemId: invoice.items[0].id, amount: 412 }], reasonCode: 'PRICE_INCREASE' },
+        tenant.ctx, userId,
+      );
+      debitNoteIds.push(dn.id);
+      await cancelSalesDebitNote(dn.id, tenant.ctx, userId, 'G2g-4b.3 cancellation exclusion test');
+
+      const report = await getGstr1SalesDebitNoteReport(tenant.company.id, primaryRegId, from, to);
+      expect(report.cdnr.documents.some((d) => d.debitNoteId === dn.id)).toBe(false);
+      const excluded = report.excluded.find((e) => e.debitNoteId === dn.id);
+      expect(excluded).toBeTruthy();
+      expect(excluded!.exclusionReason).toBe('CANCELLED');
+    });
+
+    it('a different registration id puts the Sales Debit Note silently out of scope', async () => {
+      const invoice = await makeInvoice(b2bClientId, 3000);
+      const dn = await createSalesDebitNote(
+        { invoiceId: invoice.id, items: [{ invoiceItemId: invoice.items[0].id, amount: 103 }], reasonCode: 'PRICE_INCREASE' },
+        tenant.ctx, userId,
+      );
+      debitNoteIds.push(dn.id);
+
+      const report = await getGstr1SalesDebitNoteReport(tenant.company.id, secondaryRegId, from, to);
+      const occurrences = [...report.cdnr.documents, ...report.cdnur.b2cl.documents, ...report.b2csAddOn.documents].filter((d) => d.debitNoteId === dn.id);
+      expect(occurrences).toHaveLength(0);
+    });
+
+    it('date-period filtering is preserved — a Sales Debit Note dated outside the requested window is excluded', async () => {
+      const invoice = await makeInvoice(b2bClientId, 2000);
+      const pastDate = new Date('2021-06-15T00:00:00.000Z');
+      const dn = await createSalesDebitNote(
+        { invoiceId: invoice.id, items: [{ invoiceItemId: invoice.items[0].id, amount: 103 }], reasonCode: 'PRICE_INCREASE', debitNoteDate: pastDate },
+        tenant.ctx, userId,
+      );
+      debitNoteIds.push(dn.id);
+
+      const narrowWindow = await getGstr1SalesDebitNoteReport(tenant.company.id, primaryRegId, new Date('2026-01-01'), new Date('2026-12-31'));
+      const inNarrow = [...narrowWindow.cdnr.documents, ...narrowWindow.cdnur.b2cl.documents, ...narrowWindow.b2csAddOn.documents].some((d) => d.debitNoteId === dn.id);
+      expect(inNarrow).toBe(false);
+
+      const wideWindow = await getGstr1SalesDebitNoteReport(tenant.company.id, primaryRegId, from, to);
+      const inWide = [...wideWindow.cdnr.documents, ...wideWindow.cdnur.b2cl.documents, ...wideWindow.b2csAddOn.documents].some((d) => d.debitNoteId === dn.id);
+      expect(inWide).toBe(true);
+    });
+
+    it('a procurement-side (purchase) DebitNote never appears in any Sales-Debit-Note-driven GSTR-1 report', async () => {
+      const po = await createPO({
+        supplierId: dnSupplierId, poType: 'OUTRIGHT', orderDate: new Date(),
+        items: [{ materialCode: 'RING-G3E-DN', materialName: 'G3E DN ring', materialType: FINISHED_GOODS_MATERIAL_TYPE, quantity: 1, weight: 8, unit: 'PC', karat: '22K', ratePerUnit: 10000 }],
+      }, tenant.ctx, userId);
+      poIds.push(po.id);
+      const grn = await createGRN({
+        poId: po.id, receivedDate: new Date(), branchId: branchA, invoiceNumber: `SUP-INV-G3E-${suffix}`, invoiceDate: new Date(),
+        items: [{ poItemId: po.poItems[0].id, invoiceQty: 1, invoiceWeight: 8, scaleWeight: 8 }],
+      }, tenant.ctx, userId);
+
+      const beforeSdn = await getGstr1SalesDebitNoteReport(tenant.company.id, primaryRegId, from, to);
+      const beforeTable13 = await getGstr1Table13Report(tenant.ctx, { gstRegistrationId: primaryRegId, from, to });
+
+      const procDn = await createStandaloneDebitNote(
+        { grnId: grn.id, items: [{ description: 'G3E procurement DN', taxableValue: 500 }], reasonCode: 'PRICE_VARIANCE' },
+        tenant.ctx, userId,
+      );
+      procurementDebitNoteIds.push(procDn.id);
+
+      const afterSdn = await getGstr1SalesDebitNoteReport(tenant.company.id, primaryRegId, from, to);
+      const afterTable13 = await getGstr1Table13Report(tenant.ctx, { gstRegistrationId: primaryRegId, from, to });
+
+      // The procurement DebitNote never counts toward the Sales Debit Note loader/aggregator at all.
+      expect(afterSdn.meta.notesConsidered).toBe(beforeSdn.meta.notesConsidered);
+      expect(afterTable13.meta.salesDebitNotesConsidered).toBe(beforeTable13.meta.salesDebitNotesConsidered);
+      const beforeOutwardDnCount = beforeTable13.series.find((s) => s.category === 'OUTWARD_DEBIT_NOTE')?.totalDocuments ?? 0;
+      const afterOutwardDnCount = afterTable13.series.find((s) => s.category === 'OUTWARD_DEBIT_NOTE')?.totalDocuments ?? 0;
+      expect(afterOutwardDnCount).toBe(beforeOutwardDnCount);
     });
   });
 });

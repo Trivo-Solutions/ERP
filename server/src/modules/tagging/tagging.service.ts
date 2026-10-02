@@ -5,11 +5,13 @@ import { createAuditEntry } from '../../middleware/audit';
 import { FINISHED_GOODS_MATERIAL_TYPE } from '../../shared/constants';
 import { isValidKarat } from '../../shared/karatMaster';
 import { resolveMetalRate } from '../../shared/metalRate';
-import { resolveSupplierStateCode, splitInputGst, round2 } from '../../shared/inputGst';
+import { resolveSupplierStateCode, splitInputGst, round2, resolveBuyerRegistration } from '../../shared/inputGst';
 import { resolvePriceMaster } from '../../shared/priceMaster';
 import { allocateFromLot } from '../../shared/purchaseLot';
 import { postAutoJournalEntry } from '../finance/finance.service';
 import { LEDGER_ACCOUNT } from '../../shared/ledgerAccounts';
+import { bookRcmLiabilityIfApplicable } from '../finance/gst/gstr3bRcmBooking.service';
+import { assertGstr3bPeriodMutable } from '../finance/gst/gstr3bFilingProtection';
 import { generateTsplForTag, TagTemplateLayout } from '../../shared/tsplGenerator';
 import { nextSimpleCode, nextTagNumber, nextDocumentNumber } from '../../shared/numberSequence';
 import { TenantContext, canAccessBranch, tenantTransaction, tenantBatch, tenantQuery } from '../../shared/tenantContext';
@@ -732,7 +734,7 @@ export async function createTagFromGrnItem(data: {
   // a tag be created against another company's GRN line.
   const grnItem = await tenantQuery(ctx.companyId, (_tx) => _tx.grnItem.findUnique({
     where: { id: data.grnItemId },
-    include: { poItem: { include: { po: { include: { supplier: { select: { gstNumber: true, state: true } } } } } }, grn: true },
+    include: { poItem: { include: { po: { include: { supplier: { select: { id: true, gstNumber: true, state: true } } } } } }, grn: true },
   }));
   if (!grnItem || grnItem.companyId !== ctx.companyId) throw new AppError('GRN item not found', 404);
 
@@ -802,6 +804,18 @@ export async function createTagFromGrnItem(data: {
       const tagNumber = await nextTagNumber(ctx.companyId, stockType.code, category.code, tx);
       const company = await tx.company.findUniqueOrThrow({ where: { id: ctx.companyId }, select: { stateCode: true } });
       const gst = splitInputGst(costPrice, Number(grnItem.poItem.taxRate), supplierStateCode, company.stateCode);
+      // G2g-7a: which of the company's own GST registrations this inward supply is attributed
+      // to — resolved from the GRN's own receiving branch (never the tag's own, possibly
+      // overridden, branchId above), stamped alongside the tax amounts below.
+      const buyerRegistrationId = await resolveBuyerRegistration(tx, ctx.companyId, grnItem.grn.branchId);
+      // G2g-7g: this is the exact point this GRN line's input GST is booked (GrnItem.taxableValue/
+      // inputCgst/Sgst/Igst below, read by gstr3bItcReporting.service.ts's loader by GRN
+      // receivedDate) — reject before it is booked if that period is already FILED/LOCKED. Runs
+      // before bookRcmLiabilityIfApplicable too, which is called later in this same transaction.
+      await assertGstr3bPeriodMutable(tx, ctx.companyId, {
+        documentType: 'GRN_ITEM', documentId: data.grnItemId,
+        gstRegistrationId: buyerRegistrationId, documentDate: grnItem.grn.receivedDate, action: 'received',
+      });
 
       const created = await tx.jewelryTag.create({
         data: {
@@ -850,11 +864,26 @@ export async function createTagFromGrnItem(data: {
       // a purchase return reverses), and put the full bill — goods + GST — on the supplier's account.
       await tx.grnItem.update({
         where: { id: data.grnItemId },
-        data: { taxableValue: costPrice, inputCgst: gst.cgst, inputSgst: gst.sgst, inputIgst: gst.igst },
+        data: { taxableValue: costPrice, inputCgst: gst.cgst, inputSgst: gst.sgst, inputIgst: gst.igst, buyerRegistrationId },
       });
       await tx.supplier.update({
         where: { id: grnItem.poItem.po.supplierId },
         data: { currentDue: { increment: round2(costPrice + gst.total) } },
+      });
+
+      // G2g-7d: a no-op for the overwhelming majority of lines (PoItem.rcmCategory NONE) — only
+      // creates an RcmLiability (+ journal, + self-invoice) when this line was explicitly flagged
+      // with a notified reverse-charge category. See PHASE_G2G7D_AUDIT.md.
+      await bookRcmLiabilityIfApplicable(tx, {
+        ctx, userId,
+        grn: { grnNumber: grnItem.grn.grnNumber, receivedDate: grnItem.grn.receivedDate },
+        grnItemId: data.grnItemId,
+        poItem: {
+          rcmCategory: grnItem.poItem.rcmCategory, taxCategory: grnItem.poItem.taxCategory,
+          hsnCodeId: grnItem.poItem.hsnCodeId, totalAmount: grnItem.poItem.totalAmount,
+        },
+        supplier: { id: grnItem.poItem.po.supplier.id, gstNumber: grnItem.poItem.po.supplier.gstNumber },
+        supplierStateCode, companyStateCode: company.stateCode, buyerRegistrationId,
       });
 
       return created;

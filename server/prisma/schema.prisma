@@ -157,12 +157,23 @@ model Company {
   debitNoteItems        DebitNoteItem[]
   // G2g-4b — Sales (outward) Debit Note. Wholly separate from the procurement-side DebitNote above.
   salesDebitNotes       SalesDebitNote[]
+  // G2g-7d — inward RCM foundation.
+  rcmLiabilities        RcmLiability[]
+  selfInvoices          SelfInvoice[]
   salesDebitNoteItems   SalesDebitNoteItem[]
   creditNoteTemplates   CreditNoteTemplate[]
   debitNoteTemplates    DebitNoteTemplate[]
   // Phase D: GST AATO
   gstAatos              CompanyGstAato[]
   gstAatoHistories      CompanyGstAatoHistory[]
+  // G2g-6a: statutory filing-period persistence foundation (schema + RLS only — no builder/filing
+  // service exists yet; see GstReturnPeriod's own comment).
+  gstReturnPeriods      GstReturnPeriod[]
+  gstFilingSnapshots    GstFilingSnapshot[]
+  gstFilingAttempts     GstFilingAttempt[]
+  // G2g-7e: GSTR-2B ingestion.
+  gst2bStatements       Gst2bStatement[]
+  gst2bDocuments        Gst2bDocument[]
 
   @@map("companies")
 }
@@ -194,10 +205,19 @@ model CompanyGstRegistration {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  branches      Branch[]
+  branches       Branch[]
   // Phase D: AATO records for this registration
-  aatoRecords   CompanyGstAato[]
-  aatoHistories CompanyGstAatoHistory[]
+  aatoRecords    CompanyGstAato[]
+  aatoHistories  CompanyGstAatoHistory[]
+  // G2g-6a: every statutory return period filed under this registration.
+  returnPeriods  GstReturnPeriod[]
+  // G2g-7a: every inward GRN line attributed to this registration as the buyer.
+  buyerGrnItems  GrnItem[]
+  // G2g-7d: inward RCM foundation.
+  rcmLiabilities RcmLiability[]
+  selfInvoices   SelfInvoice[]
+  // G2g-7e: every GSTR-2B statement imported for this registration.
+  gst2bStatements Gst2bStatement[]
 
   @@unique([companyId, gstin])
   // composite-FK target: lets the database refuse a Branch pointing at another company's registration
@@ -209,23 +229,23 @@ model CompanyGstRegistration {
 // Phase D — GST AATO (Annual Aggregate Turnover) management. Associated with Company -> GST Registration -> Financial Year.
 // Reuses the existing company/GST-registration architecture.
 model CompanyGstAato {
-  id                  String                  @id @default(cuid())
-  companyId           String
-  company             Company                 @relation(fields: [companyId], references: [id])
-  gstRegistrationId   String
-  gstRegistration     CompanyGstRegistration  @relation(fields: [gstRegistrationId], references: [id])
-  financialYear       String                  // Indian FY format "YYYY-YY", e.g. "2024-25"
-  turnover            Decimal                 @db.Decimal(15, 2)
-  precedingTurnover   Decimal?                @db.Decimal(15, 2)
-  source              String                  @default("MANUAL") // MANUAL | GST_PORTAL | IMPORT | SYSTEM_CALCULATED | OTHER
-  verificationStatus  String                  @default("UNVERIFIED") // UNVERIFIED | VERIFIED
-  verifiedDate        DateTime?
-  verifiedBy          String?
-  notes               String?
-  createdAt           DateTime                @default(now())
-  updatedAt           DateTime                @updatedAt
+  id                 String                 @id @default(cuid())
+  companyId          String
+  company            Company                @relation(fields: [companyId], references: [id])
+  gstRegistrationId  String
+  gstRegistration    CompanyGstRegistration @relation(fields: [gstRegistrationId], references: [id])
+  financialYear      String // Indian FY format "YYYY-YY", e.g. "2024-25"
+  turnover           Decimal                @db.Decimal(15, 2)
+  precedingTurnover  Decimal?               @db.Decimal(15, 2)
+  source             String                 @default("MANUAL") // MANUAL | GST_PORTAL | IMPORT | SYSTEM_CALCULATED | OTHER
+  verificationStatus String                 @default("UNVERIFIED") // UNVERIFIED | VERIFIED
+  verifiedDate       DateTime?
+  verifiedBy         String?
+  notes              String?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
 
-  histories           CompanyGstAatoHistory[]
+  histories CompanyGstAatoHistory[]
 
   @@unique([companyId, gstRegistrationId, financialYear])
   @@unique([id, companyId])
@@ -236,28 +256,250 @@ model CompanyGstAato {
 
 // Phase D — GST AATO History. Records all creations, updates, and verification status transitions for auditability.
 model CompanyGstAatoHistory {
-  id                  String                  @id @default(cuid())
-  companyId           String
-  company             Company                 @relation(fields: [companyId], references: [id])
-  aatoId              String
-  aato                CompanyGstAato          @relation(fields: [aatoId], references: [id], onDelete: Cascade)
-  gstRegistrationId   String
-  gstRegistration     CompanyGstRegistration  @relation(fields: [gstRegistrationId], references: [id])
-  financialYear       String
-  turnover            Decimal                 @db.Decimal(15, 2)
-  precedingTurnover   Decimal?                @db.Decimal(15, 2)
-  source              String
-  verificationStatus  String
-  verifiedDate        DateTime?
-  notes               String?
-  action              String                  // CREATE | UPDATE | VERIFY
-  changedBy           String?
-  createdAt           DateTime                @default(now())
+  id                 String                 @id @default(cuid())
+  companyId          String
+  company            Company                @relation(fields: [companyId], references: [id])
+  aatoId             String
+  aato               CompanyGstAato         @relation(fields: [aatoId], references: [id], onDelete: Cascade)
+  gstRegistrationId  String
+  gstRegistration    CompanyGstRegistration @relation(fields: [gstRegistrationId], references: [id])
+  financialYear      String
+  turnover           Decimal                @db.Decimal(15, 2)
+  precedingTurnover  Decimal?               @db.Decimal(15, 2)
+  source             String
+  verificationStatus String
+  verifiedDate       DateTime?
+  notes              String?
+  action             String // CREATE | UPDATE | VERIFY
+  changedBy          String?
+  createdAt          DateTime               @default(now())
 
   @@index([companyId])
   @@index([aatoId])
   @@index([gstRegistrationId, financialYear])
   @@map("company_gst_aato_histories")
+}
+
+// G2g-6a — statutory filing-period PERSISTENCE FOUNDATION (schema + RLS + permissions), since built
+// out by G2g-6b (snapshot builder, gstr1FilingSnapshot.service.ts), G2g-6c (filing-attempt history,
+// gstr1FilingAttempt.service.ts), G2g-6d (mutation guard, gstr1FilingProtection.ts), and G2g-6e (the
+// authoritative FILED/LOCKED transition, gstr1FilingPeriod.service.ts) — see CLAUDE.md's entries for
+// each. The approved architecture:
+//
+//   Company -> CompanyGstRegistration -> GstReturnPeriod -> { GstFilingSnapshot, GstFilingAttempt }
+//
+// There is deliberately NO separate "GstPeriodLock" model — GstReturnPeriod itself owns the
+// lifecycle/status and the filing/lock metadata below. Only GSTR1 is supported today; returnType
+// stays a plain String (this codebase's convention for every other status/type field, e.g.
+// SalesInvoice.invoiceType, PurchaseOrder.poType) so GSTR3B/GSTR1A can be added later without a
+// schema change, never implemented now.
+model GstReturnPeriod {
+  id                String                 @id @default(cuid())
+  companyId         String
+  company           Company                @relation(fields: [companyId], references: [id])
+  gstRegistrationId String
+  // Composite FK (CLAUDE.md §11 item 6): the database itself refuses a return period pointing at
+  // another company's GST registration — never inferred/silently populated.
+  gstRegistration   CompanyGstRegistration @relation(fields: [gstRegistrationId, companyId], references: [id, companyId])
+
+  // Only "GSTR1" is supported in this phase. Do not add GSTR3B/GSTR1A handling without a deliberate
+  // follow-up phase (see CLAUDE.md).
+  returnType    String
+  // Indian FY convention used throughout the GST module ("YYYY-YY", e.g. "2026-27") — matches
+  // CompanyGstAato.financialYear and shared/financialYear.ts: getFinancialYearForDate(), the only
+  // other per-registration, FY-keyed model/helper in this codebase.
+  financialYear String
+  // MMYYYY, matching the existing GSTR-1 export convention exactly (gstr1Export.service.ts:
+  // resolveFilingPeriodMmYYYY / Gstr1GstnExportDto.metadata.period.filingPeriodMmYYYY), e.g. "092026".
+  taxPeriod     String
+
+  // Lifecycle: OPEN -> SNAPSHOT_CREATED -> FILING_ATTEMPTED -> FILED -> LOCKED. SNAPSHOT_CREATED does
+  // NOT mean locked. G2g-6e implements the FILED and LOCKED transitions (gstr1FilingPeriod.service.ts)
+  // — FILING_ATTEMPTED is set by G2g-6c's createGstr1FilingAttempt when the period is still OPEN/
+  // SNAPSHOT_CREATED (an attempt has been made but not yet resolved); FILED/LOCKED are the only
+  // authoritative, permanent boundary — see that file's own header for the full transition rules.
+  status String @default("OPEN")
+
+  // Filing metadata. filedAt/filedSnapshotId/arn predate G2g-6e (G2g-6a's own placeholder columns);
+  // filedById/filedByAttemptId/lockedAt/lockedById are new in G2g-6e. All remain null until
+  // gstr1FilingPeriod.service.ts's controlled FILED/LOCKED transitions set them — never written by
+  // any other code path.
+  filedAt          DateTime?
+  filedSnapshotId  String?
+  // Named relation: distinct from GstFilingSnapshot.returnPeriod below (a snapshot's own parent) —
+  // this is "which exact snapshot, among this period's possibly several, was the one actually filed".
+  filedSnapshot    GstFilingSnapshot? @relation("GstReturnPeriodFiledSnapshot", fields: [filedSnapshotId, companyId], references: [id, companyId])
+  // G2g-6e: the exact ACCEPTED GstFilingAttempt whose eligibility established this FILED boundary —
+  // "FILED stores correct attempt association" (brief §5). Composite FK: the database refuses this
+  // pointing at another company's attempt. RESTRICT — an attempt that established a filing boundary
+  // is never deletable out from under it (attempts are append-only everywhere in this codebase anyway).
+  filedByAttemptId String?
+  filedByAttempt   GstFilingAttempt?  @relation("GstReturnPeriodFiledAttempt", fields: [filedByAttemptId, companyId], references: [id, companyId])
+  // Actor who performed the controlled FILED transition — distinct from GstFilingAttempt.createdById
+  // (who recorded the attempt/outcome, a possibly earlier and different step).
+  filedById        String?
+  filedBy          User?              @relation("GstReturnPeriodFiledBy", fields: [filedById], references: [id])
+  // Real, externally-issued GST ARN once filed. Never generated or validated by this system.
+  arn              String?
+
+  // G2g-6e: LOCKED is a separate, later, one-way transition from FILED (brief §13) — never combined
+  // with the filedAt/filedById pair above, so a period's filed-vs-locked moments stay independently
+  // auditable even though LOCKED can only ever follow FILED.
+  lockedAt   DateTime?
+  lockedById String?
+  lockedBy   User?     @relation("GstReturnPeriodLockedBy", fields: [lockedById], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  snapshots      GstFilingSnapshot[] @relation("GstFilingSnapshotReturnPeriod")
+  filingAttempts GstFilingAttempt[]
+
+  // A GST registration cannot have two periods for the same return type + FY + tax period. Two
+  // DIFFERENT registrations (even in the same company) may legitimately share one, same reasoning
+  // as every other registration-scoped uniqueness constraint in this schema (CreditNote,
+  // SalesDebitNote numbering).
+  // Explicitly named: the unhashed default exceeds Postgres's 63-byte identifier limit and gets
+  // silently truncated (same issue CreditNote.creditNoteNumber's own constraint documents).
+  @@unique([companyId, gstRegistrationId, returnType, financialYear, taxPeriod], map: "gst_return_periods_company_registration_period_key")
+  // composite-FK target: lets the database refuse a child (snapshot/attempt) pointing at another
+  // company's return period.
+  @@unique([id, companyId])
+  @@index([companyId])
+  @@index([gstRegistrationId])
+  @@map("gst_return_periods")
+}
+
+// A historical, immutable representation of one filing attempt's exact payload (or payload-in-
+// waiting) for a GstReturnPeriod. Deliberately NOT built/populated by any service in this phase —
+// see the model-level fields below, each annotated with what G2g-6b/6c will eventually compute.
+model GstFilingSnapshot {
+  id             String          @id @default(cuid())
+  companyId      String
+  company        Company         @relation(fields: [companyId], references: [id])
+  returnPeriodId String
+  returnPeriod   GstReturnPeriod @relation("GstFilingSnapshotReturnPeriod", fields: [returnPeriodId, companyId], references: [id, companyId])
+
+  // Identifies snapshot #1, #2, #3, ... for this return period. Allocation logic (e.g. "next
+  // version number") is NOT implemented in this phase — that belongs to G2g-6b.
+  version Int
+
+  // Eventually the canonical GSTR-1 export DTO (with diagnostics/traceability) and the exact
+  // GSTN-facing serialized payload, respectively. No snapshot builder exists yet — nothing writes
+  // these in this phase; buildGstr1GstnExport()/the serializer are NOT called from here.
+  canonicalDtoJson Json
+  wireJson         Json
+
+  // Eventually SHA-256 of the canonical DTO / the exact serialized wire payload bytes. No hashing
+  // implementation exists in this phase — schema only persists the eventual value.
+  canonicalDtoHash String
+  wireJsonHash     String
+
+  // Which serializer/adapter implementation produced this snapshot, for traceability as those
+  // evolve. gstnSchemaVersion may legitimately stay "UNSPECIFIED" until a real GSTN schema version
+  // is adopted — never invented here.
+  serializerVersion String
+  adapterVersion    String
+  gstnSchemaVersion String @default("UNSPECIFIED")
+
+  // Denormalized snapshot metadata — the exact date range this snapshot represents, preserved even
+  // if the report range convention changes later.
+  periodFrom DateTime
+  periodTo   DateTime
+
+  // Full registration scope vs a specific branch — preserved historically even if branch
+  // permissions change later. No branch-scope validation is implemented in this phase.
+  branchScope Json
+
+  // Eventually the complete Gstr1GstnValidationResult (blockers + warnings) for this snapshot. The
+  // validator is NOT invoked from this phase.
+  validationResult Json
+
+  // DRAFT does not lock the return period; multiple drafts may architecturally exist, though
+  // normally only the latest active draft is used. Exactly one snapshot eventually becomes FILED.
+  // No lifecycle transition logic is implemented in this phase.
+  status String @default("DRAFT")
+
+  // For the current live-query architecture this will eventually correspond to snapshot creation
+  // time — not computed here.
+  sourceDataCutoff DateTime
+  // The report parameters used to construct this snapshot (gstRegistrationId, from, to, branch
+  // scope, ...) — preserved verbatim, shape intentionally left to whatever the export DTO/request
+  // carries when G2g-6b actually builds a snapshot.
+  reportParams     Json
+
+  createdAt   DateTime @default(now())
+  createdById String?
+  createdBy   User?    @relation(fields: [createdById], references: [id])
+
+  filingAttempts GstFilingAttempt[]
+  // Reverse of GstReturnPeriod.filedSnapshot above.
+  filedByPeriod  GstReturnPeriod[]  @relation("GstReturnPeriodFiledSnapshot")
+
+  @@unique([returnPeriodId, version])
+  // composite-FK target: lets the database refuse a filing attempt pointing at another company's snapshot.
+  @@unique([id, companyId])
+  @@index([companyId])
+  @@index([returnPeriodId])
+  @@map("gst_filing_snapshots")
+}
+
+// A record that a filing was attempted for a GstReturnPeriod against one exact GstFilingSnapshot.
+// No filing/GSP/ASP/API integration exists in this phase — mode/status are persistence-only;
+// nothing in this codebase writes these rows yet, and no retry/attempt-number allocation logic is
+// implemented here.
+model GstFilingAttempt {
+  id             String            @id @default(cuid())
+  companyId      String
+  company        Company           @relation(fields: [companyId], references: [id])
+  returnPeriodId String
+  returnPeriod   GstReturnPeriod   @relation(fields: [returnPeriodId, companyId], references: [id, companyId])
+  // Never allow a filing attempt to exist without identifying its exact payload snapshot.
+  snapshotId     String
+  snapshot       GstFilingSnapshot @relation(fields: [snapshotId, companyId], references: [id, companyId])
+
+  attemptNumber Int
+
+  // MANUAL_EXPORT | MANUAL_UPLOAD | GSP | ASP | API. TRIVO does not file GSTR-1 through GSTN today
+  // — GSP/ASP/API are future architecture only, not implemented/integrated in this phase.
+  mode   String
+  // ATTEMPTED | ACCEPTED | REJECTED | SUPERSEDED. No state-transition logic is implemented in this
+  // phase; nothing automatically changes GstReturnPeriod.status off this column.
+  status String @default("ATTEMPTED")
+
+  attemptedAt DateTime  @default(now())
+  filedAt     DateTime?
+
+  // Real, externally-issued GST ARN once filed. Never generated or validated against an external
+  // service by this system.
+  arn               String?
+  externalReference String?
+
+  // Eventually equal to the snapshot's wireJsonHash — evidence of exactly which payload was
+  // submitted. Not calculated/enforced in this phase.
+  payloadHash String
+
+  // Future GSP/ASP/API response metadata — no integration exists in this phase.
+  responseMetadata Json?
+
+  errorCode    String?
+  errorMessage String?
+
+  createdAt   DateTime @default(now())
+  createdById String?
+  createdBy   User?    @relation(fields: [createdById], references: [id])
+
+  // G2g-6e: reverse of GstReturnPeriod.filedByAttempt above — normally at most one period ever
+  // points back at a given attempt (an attempt belongs to exactly one period), but Prisma still
+  // requires the list form on this side of the named relation.
+  filedForPeriod GstReturnPeriod[] @relation("GstReturnPeriodFiledAttempt")
+
+  @@unique([returnPeriodId, attemptNumber])
+  @@unique([id, companyId])
+  @@index([companyId])
+  @@index([returnPeriodId])
+  @@index([snapshotId])
+  @@map("gst_filing_attempts")
 }
 
 // G1: a company's tax-invoice print layout. Structurally mirrors EstimateTemplate/TagTemplate
@@ -477,6 +719,19 @@ model User {
   // procurement DebitNote above — the two domains never share a permission or a relation.
   salesDebitNotesCreated     SalesDebitNote[]      @relation("SalesDebitNoteCreatedBy")
   salesDebitNotesCancelled   SalesDebitNote[]      @relation("SalesDebitNoteCancelledBy")
+  // G2g-7d — inward RCM foundation.
+  rcmLiabilitiesCreated      RcmLiability[]        @relation("RcmLiabilityCreatedBy")
+  rcmLiabilitiesPaid         RcmLiability[]        @relation("RcmLiabilityPaidBy")
+  selfInvoicesCreated        SelfInvoice[]         @relation("SelfInvoiceCreatedBy")
+  selfInvoicesCancelled      SelfInvoice[]         @relation("SelfInvoiceCancelledBy")
+  // G2g-6a: schema-only foundation — no code creates these rows yet.
+  gstFilingSnapshotsCreated  GstFilingSnapshot[]
+  gstFilingAttemptsCreated   GstFilingAttempt[]
+  // G2g-6e: the actor who performed each controlled lifecycle transition.
+  gstReturnPeriodsFiled      GstReturnPeriod[]     @relation("GstReturnPeriodFiledBy")
+  gstReturnPeriodsLocked     GstReturnPeriod[]     @relation("GstReturnPeriodLockedBy")
+  // G2g-7e: GSTR-2B ingestion.
+  gst2bStatementsImported    Gst2bStatement[]      @relation("Gst2bStatementImportedBy")
 
   @@map("users")
 }
@@ -803,34 +1058,46 @@ model CostEstimate {
 // NOT reference/taxonomy data like ProductCategory or KaratMaster, so it doesn't belong in that
 // bucket.
 model Supplier {
-  id           String   @id @default(cuid())
-  companyId    String
-  company      Company  @relation(fields: [companyId], references: [id])
-  supplierCode String
-  name         String
-  type         String
-  gstNumber    String?
-  panNumber    String?
-  address      String?
-  city         String?
-  state        String?
-  pincode      String?
-  contactName  String?
-  phone        String?
-  email        String?
-  bankName     String?
-  bankAccount  String?
-  bankIfsc     String?
-  creditLimit  Decimal? @db.Decimal(12, 2)
-  currentDue   Decimal  @default(0) @db.Decimal(12, 2)
-  isActive     Boolean  @default(true)
-  createdAt    DateTime @default(now())
+  id            String   @id @default(cuid())
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id])
+  supplierCode  String
+  name          String
+  type          String
+  gstNumber     String?
+  panNumber     String?
+  address       String?
+  city          String?
+  state         String?
+  pincode       String?
+  contactName   String?
+  phone         String?
+  email         String?
+  bankName      String?
+  bankAccount   String?
+  bankIfsc      String?
+  creditLimit   Decimal? @db.Decimal(12, 2)
+  currentDue    Decimal  @default(0) @db.Decimal(12, 2)
+  // G2g-7a: whether this supplier is registered under the GST Composition Scheme — a fact about
+  // the supplier's OWN registration (not about any one transaction), relevant to future ITC-
+  // eligibility checks (a composition dealer's bill carries no GST a buyer can claim as input
+  // credit). Deliberately NOT paired with an "isRcmLiable" flag here — reverse-charge
+  // applicability turns on the nature of the specific supply/HSN, not a permanent property of the
+  // supplier identity; see PHASE_G2G7A_IMPLEMENTATION.md §E. Defaults false (a regular registered
+  // dealer, the overwhelming common case) for every existing row — never inferred from gstNumber
+  // being present/absent, which is a registration question, not a scheme question.
+  isComposition Boolean  @default(false)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
 
   purchaseOrders PurchaseOrder[]
   artisans       Artisan[]
   returns        PurchaseReturn[]
   payments       SupplierPayment[]
   debitNotes     DebitNote[]
+  // G2g-7d: inward RCM foundation.
+  rcmLiabilities RcmLiability[]
+  selfInvoices   SelfInvoice[]
 
   @@unique([companyId, supplierCode])
   // composite-FK target: lets the database refuse a child that points at another company's Supplier
@@ -1009,6 +1276,283 @@ model DebitNoteItem {
   @@map("debit_note_items")
 }
 
+// G2g-7d — Inward RCM (reverse-charge) foundation. See PHASE_G2G7D_AUDIT.md / PHASE_G2G7D_IMPLEMENTATION.md
+// for the full read-only audit, legal research, and design rationale. Summary of what this is and is not:
+//
+// A self-assessed RCM liability on ONE inward supply line — created only when PoItem.rcmCategory
+// (shared/rcmCategory.ts) classifies as RCM_APPLICABLE (gstr3bRcmClassification.ts), at the exact moment
+// the line's ordinary input-GST fields are booked on GrnItem (createTagFromGrnItem / openPurchaseLot) —
+// never at PO time, and never re-derived later. Deliberately line-level, never a Supplier-level flag
+// (CGST Act §9(4)'s blanket unregistered-supplier RCM has been suspended since Feb 2019 — RCM turns on the
+// specific notified supply, not on the supplier's registration status).
+//
+// THIS IS A DORMANT FOUNDATION AGAINST TODAY'S REAL DATA, not a live, populated ledger: PoItem.rcmCategory
+// defaults to NULL/NONE for every line, TRIVO's two actual inward-supply flows (jewellery-stock PO/GRN,
+// old-gold exchange) are not RCM-liable under current law (§9(4) suspended; the only metal-scrap RCM
+// notification excludes Chapter 71 precious metals), and the realistic §9(3) categories for this business
+// (GTA freight, legal fees, security, director fees) are services with no line-item representation
+// anywhere in this schema. This table will stay empty until something explicitly sets a non-NONE
+// rcmCategory — see PHASE_G2G7D_AUDIT.md §B.1/§A.1 for the full reasoning, and the "foundation only"
+// scope decision it was built against.
+model RcmLiability {
+  id                String                  @id @default(cuid())
+  companyId         String
+  company           Company                 @relation(fields: [companyId], references: [id])
+  gstRegistration   CompanyGstRegistration? @relation(fields: [gstRegistrationId, companyId], references: [id, companyId])
+  gstRegistrationId String?
+  grnItem           GrnItem                 @relation(fields: [grnItemId, companyId], references: [id, companyId])
+  grnItemId         String
+  supplier          Supplier                @relation(fields: [supplierId, companyId], references: [id, companyId])
+  supplierId        String
+
+  // Snapshot of the category that produced this liability — never re-read from PoItem after
+  // creation, same immutability rule as taxRate/hsnCodeId elsewhere in this schema.
+  rcmCategory String
+
+  taxableValue Decimal @db.Decimal(12, 2)
+  cgst         Decimal @default(0) @db.Decimal(12, 2)
+  sgst         Decimal @default(0) @db.Decimal(12, 2)
+  igst         Decimal @default(0) @db.Decimal(12, 2)
+  cess         Decimal @default(0) @db.Decimal(12, 2)
+
+  // SELF_INVOICE_REQUIRED | SELF_INVOICE_NOT_REQUIRED | SELF_INVOICE_NOT_DETERMINED — required only
+  // when the supplier is unregistered (Section 31(3)(f)/Rule 47A); a registered supplier's own
+  // invoice suffices and no self-invoice is created.
+  selfInvoiceRequirement String
+  selfInvoice            SelfInvoice?
+
+  // PAYMENT_VOUCHER_REQUIRED | PAYMENT_VOUCHER_NOT_REQUIRED | PAYMENT_VOUCHER_NOT_DETERMINED
+  // (Section 31(3)(g)) — architecture/status only in this phase; no document is generated.
+  paymentVoucherRequirement String
+
+  // LIABILITY_RECOGNIZED (self-assessed, not yet paid in cash) | TAX_PAID (paid — the only state
+  // that can ever make a future ITC claim ELIGIBLE, per Rule 86(2): RCM tax must be paid from the
+  // electronic cash ledger before it can be claimed back as credit).
+  status                String        @default("LIABILITY_RECOGNIZED")
+  paidAt                DateTime?
+  paidById              String?
+  paidBy                User?         @relation("RcmLiabilityPaidBy", fields: [paidById], references: [id])
+  paymentMode           String?
+  paymentJournalEntryId String?
+  paymentJournalEntry   JournalEntry? @relation("RcmLiabilityPaymentJournal", fields: [paymentJournalEntryId], references: [id])
+
+  // The liability-recognition journal (Dr RCM Input Tax Credit / Cr RCM Tax Payable), posted at
+  // creation — plain FK, same reasoning as DebitNote.journalEntryId.
+  journalEntryId String?
+  journalEntry   JournalEntry? @relation("RcmLiabilityJournal", fields: [journalEntryId], references: [id])
+
+  createdById String?
+  createdBy   User?    @relation("RcmLiabilityCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+
+  // one liability per GRN line; composite-FK target for SelfInvoice
+  @@unique([grnItemId, companyId])
+  @@unique([id, companyId])
+  @@index([companyId])
+  @@index([gstRegistrationId])
+  @@index([supplierId])
+  @@map("rcm_liabilities")
+}
+
+// A self-invoice under Section 31(3)(f)/Rule 47A — created only when an RcmLiability's
+// selfInvoiceRequirement is SELF_INVOICE_REQUIRED. Numbered per the company's own GST registration
+// (nextDocumentNumber's registration-scoped key, the same proven pattern as CreditNote/
+// SalesDebitNote's `CN:`/`SDN:` keys). Every money/HSN field is a snapshot copied from its
+// RcmLiability at issue time, mirroring DebitNote's supplierInvoiceNumber/Date snapshot convention.
+model SelfInvoice {
+  id                String                  @id @default(cuid())
+  companyId         String
+  company           Company                 @relation(fields: [companyId], references: [id])
+  selfInvoiceNumber String
+  financialYear     Int
+  gstRegistration   CompanyGstRegistration? @relation(fields: [gstRegistrationId, companyId], references: [id, companyId])
+  gstRegistrationId String?
+  rcmLiability      RcmLiability            @relation(fields: [rcmLiabilityId, companyId], references: [id, companyId])
+  rcmLiabilityId    String
+  supplier          Supplier                @relation(fields: [supplierId, companyId], references: [id, companyId])
+  supplierId        String
+  // Snapshot — a later edit to the Supplier row must not rewrite an already-issued self-invoice.
+  supplierName      String
+  supplierAddress   String?
+
+  issueDate    DateTime @default(now())
+  taxableValue Decimal  @db.Decimal(12, 2)
+  cgst         Decimal  @default(0) @db.Decimal(12, 2)
+  sgst         Decimal  @default(0) @db.Decimal(12, 2)
+  igst         Decimal  @default(0) @db.Decimal(12, 2)
+  cess         Decimal  @default(0) @db.Decimal(12, 2)
+  hsnCode      HsnCode? @relation(fields: [hsnCodeId], references: [id])
+  hsnCodeId    String?
+
+  status        String    @default("ISSUED")
+  cancelledAt   DateTime?
+  cancelledById String?
+  cancelledBy   User?     @relation("SelfInvoiceCancelledBy", fields: [cancelledById], references: [id])
+  cancelReason  String?
+
+  createdById String?
+  createdBy   User?    @relation("SelfInvoiceCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+
+  @@unique([companyId, selfInvoiceNumber])
+  @@unique([id, companyId])
+  // at most one self-invoice per liability (RcmLiability.selfInvoice is a to-one back-relation)
+  @@unique([rcmLiabilityId, companyId])
+  @@index([companyId])
+  @@index([gstRegistrationId])
+  @@map("self_invoices")
+}
+
+// G2g-7e — GSTR-2B ingestion: one IMMUTABLE row per (company, GST registration, financial year, tax
+// period, version). See PHASE_G2G7E_AUDIT.md / PHASE_G2G7E_IMPLEMENTATION.md for the full design.
+// GSTR-2B is a government-GENERATED statement handed TO this company — the opposite direction from
+// GstReturnPeriod (a return WE file) — so it is deliberately a separate, narrower model: no FILED/
+// LOCKED/ARN concept exists here, only ACTIVE/SUPERSEDED (same vocabulary GstFilingSnapshot already
+// uses for its own DRAFT->SUPERSEDED transition). A later re-import of the SAME period with
+// different content creates a NEW, higher `version` and marks the prior one SUPERSEDED — never
+// deleted, never overwritten (brief §3/§25). An import whose sourceFileHash OR canonicalPayloadHash
+// matches the current ACTIVE statement for that exact period is a no-op duplicate — see
+// gstr2bImport.service.ts.
+model Gst2bStatement {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+
+  gstRegistrationId String
+  gstRegistration   CompanyGstRegistration @relation(fields: [gstRegistrationId, companyId], references: [id, companyId])
+
+  // Indian FY convention ("YYYY-YY") / MMYYYY — identical shape to GstReturnPeriod's own fields,
+  // deliberately NOT the same table (see header comment above).
+  financialYear String
+  taxPeriod     String
+
+  // Only "GSTN_JSON" is supported in this phase (brief's own "prefer the smallest reliable
+  // implementation" — §2 Option A). Plain string, not an enum, matching this codebase's convention
+  // for every other extensible type/status field.
+  source String @default("GSTN_JSON")
+
+  // GSTN's own statement-generation timestamp, read from the source payload when the normalizer can
+  // confidently locate it — left null rather than guessed when it can't (§2's own field-spelling
+  // confidence caveat).
+  generatedAt DateTime?
+  importedAt  DateTime  @default(now())
+  importedById String?
+  importedBy   User?    @relation("Gst2bStatementImportedBy", fields: [importedById], references: [id])
+
+  // SHA-256 of the exact uploaded bytes (captured via a dedicated raw-body-preserving parser on the
+  // import route only — see gstr2bImport.service.ts) and of the canonicalized parsed structure
+  // (catches a re-saved file with different whitespace/key order as identical content) respectively.
+  // Same hashing convention as gstr1SnapshotHash.ts (G2g-6b) — duplicated here as a small, generic,
+  // pure utility (shared/gst2bHash.ts) rather than imported, to keep this phase's module boundary
+  // independent of the named-frozen GSTR-1 filing snapshot module (brief §28).
+  sourceFileHash       String
+  canonicalPayloadHash String
+
+  // Which version of gstr2bNormalizer.ts produced Gst2bDocument rows for this statement — so a
+  // future correction to field-mapping is a documented RE-NORMALIZATION of already-preserved source
+  // data, never a re-import (see PHASE_G2G7E_AUDIT.md §2).
+  normalizerVersion String
+
+  // The exact, complete, parsed source JSON — never rewritten after creation. This is what makes a
+  // normalizer bug fixable without re-importing: the source of truth is preserved regardless of how
+  // well the normalizer understood it at import time.
+  rawPayload Json
+
+  // ACTIVE | SUPERSEDED. At most one ACTIVE statement per (companyId, gstRegistrationId,
+  // financialYear, taxPeriod) — enforced in gstr2bImport.service.ts's transaction, not a DB
+  // constraint (same "uniqueness invariant enforced in a transaction" precedent as
+  // CompanyGstRegistration.isPrimary).
+  status String @default("ACTIVE")
+
+  // Allocated via shared/numberSequence.ts's proven atomic per-key counter (documentType key
+  // `GST2B:<gstRegistrationId>:<financialYear>:<taxPeriod>`) — never a count()+1 race.
+  version Int
+
+  documents Gst2bDocument[]
+
+  @@unique([companyId, gstRegistrationId, financialYear, taxPeriod, version])
+  // composite-FK target: lets the database refuse a document pointing at another company's statement
+  @@unique([id, companyId])
+  @@index([companyId])
+  @@index([gstRegistrationId])
+  @@index([companyId, gstRegistrationId, financialYear, taxPeriod, status])
+  @@map("gst2b_statements")
+}
+
+// G2g-7e — one normalized row per source GSTR-2B document (B2B/B2BA/CDNR/CDNRA/ISD/ISDA/IMPG/
+// IMPGSEZ entry). Structured and indexable, unlike Gst2bStatement.rawPayload, because this codebase
+// has no other structured table to fall back on for 2B-shaped data (unlike GSTR-1 export, which
+// reuses the already-structured SalesInvoice/CreditNote tables). See gstr2bNormalizer.ts for how
+// this is produced, and gstr2bReconciliation.ts for how it is matched against book documents.
+model Gst2bDocument {
+  id          String         @id @default(cuid())
+  companyId   String
+  company     Company        @relation(fields: [companyId], references: [id])
+  statement   Gst2bStatement @relation(fields: [statementId, companyId], references: [id, companyId], onDelete: Cascade)
+  statementId String
+
+  // B2B | B2BA | CDNR | CDNRA | ISD | ISDA | IMPG | IMPGSEZ — the GSTR-2B table this document was
+  // read from (PHASE_G2G7E_AUDIT.md §2/§3).
+  section String
+
+  // INVOICE | CREDIT_NOTE | DEBIT_NOTE | ISD_INVOICE | IMPORT_BOE — the statutory document type,
+  // distinct from `section` (B2BA is still an INVOICE document type, just an amendment row).
+  documentType String
+
+  supplierGstin     String?
+  supplierTradeName String?
+  // The source document's own number (or Bill-of-Entry number for IMPG/IMPGSEZ) — a free string,
+  // never assumed to be in any particular format. Normalized for Level-2 matching at MATCH time
+  // (gstr2bReconciliation.ts), never mutated here.
+  documentNumber String?
+  documentDate   DateTime?
+  documentValue  Decimal?  @db.Decimal(14, 2)
+  placeOfSupply  String?
+
+  taxableValue Decimal @default(0) @db.Decimal(14, 2)
+  igst         Decimal @default(0) @db.Decimal(14, 2)
+  cgst         Decimal @default(0) @db.Decimal(14, 2)
+  sgst         Decimal @default(0) @db.Decimal(14, 2)
+  cess         Decimal @default(0) @db.Decimal(14, 2)
+
+  reverseCharge Boolean @default(false)
+
+  // AVAILABLE | NOT_AVAILABLE | null (the source did not state one, or the normalizer could not
+  // confidently locate it) — copied verbatim from the source's own ITC-availability classification,
+  // never re-derived here (that re-derivation, against TRIVO's OWN books, is exactly what
+  // gstr2bReconciliation.ts computes separately).
+  itcAvailability   String?
+  ineligibilityReason String?
+
+  // ORIGINAL | AMENDED | SUPERSEDED | CURRENT (brief §15) — provenance, never collapsed away.
+  // Defaults to CURRENT: the overwhelming case (a B2B/CDNR row with no amendment history at all).
+  provenanceStatus String @default("CURRENT")
+  // Self-reference: which document (if any) THIS one amends. Populated only when the source payload
+  // carries an unambiguous original-document reference the normalizer can resolve — never guessed
+  // (PHASE_G2G7E_AUDIT.md §3's B2BA scope note).
+  amendsDocumentId String?
+  amendsDocument   Gst2bDocument?  @relation("Gst2bDocumentAmendment", fields: [amendsDocumentId, companyId], references: [id, companyId])
+  amendedBy        Gst2bDocument[] @relation("Gst2bDocumentAmendment")
+
+  // SUPPORTED | ISD_NOT_SUPPORTED | IMPORTS_NOT_RECONCILABLE (brief §7/§8) — a document the
+  // normalizer preserved faithfully but that this phase does not attempt to reconcile against books.
+  supportStatus String @default("SUPPORTED")
+
+  // The exact source sub-object for this one document — full per-document traceability back to the
+  // original statement, independent of how the structured columns above were derived.
+  rawRecord Json
+
+  createdAt DateTime @default(now())
+
+  // composite-FK target: lets the database refuse an amendment pointing at another company's document
+  @@unique([id, companyId])
+  @@index([companyId])
+  @@index([statementId])
+  @@index([companyId, supplierGstin])
+  @@index([companyId, section])
+  @@map("gst2b_documents")
+}
+
 // companyId direct — Phase 2b. purchaseRequisitionId may point at a PR from the same company
 // only (enforced in convertToPO, mirroring the tag/branch cross-checks used everywhere else).
 model PurchaseOrder {
@@ -1079,6 +1623,25 @@ model PoItem {
   hsnCode   HsnCode? @relation(fields: [hsnCodeId], references: [id])
   hsnCodeId String?
   taxRate   Decimal  @default(0) @db.Decimal(5, 4)
+
+  // G2g-7a: the statutory classification of this line's supply (shared/taxCategory.ts: TAXABLE |
+  // EXEMPT | NIL_RATED | NON_GST | ZERO_RATED) — decided at the same time as hsnCodeId/taxRate
+  // above (PO entry) and for the same reason: a later master change must never reinterpret what
+  // an already-placed order was. Deliberately NOT inferred from taxRate — a 0% rate and an
+  // EXEMPT/NIL_RATED/NON_GST/ZERO_RATED supply are distinct statutory facts (see that module's own
+  // header). Nullable: every PoItem created before this column exists is left unassigned, never
+  // guessed from its taxRate; createPO defaults a newly-created line to TAXABLE only when the
+  // caller omits the field outright.
+  taxCategory String?
+
+  // G2g-7d: explicit, line-level RCM (reverse-charge) category for this supply —
+  // shared/rcmCategory.ts. Decided at PO entry, exactly like taxCategory above, and for the
+  // identical reason: RCM liability is a property of the specific notified supply, never inferred
+  // from the supplier's registration status (CGST Act §9(4)'s blanket unregistered-supplier RCM
+  // has been suspended since Feb 2019 — see PHASE_G2G7D_AUDIT.md §B.2) or from a blank gstNumber.
+  // Nullable — every existing row is left unassigned; createPO defaults a newly-created line with
+  // no explicit value to 'NONE' (RCM_NOT_APPLICABLE), never guessed.
+  rcmCategory String?
 
   grnItems   GrnItem[]
   // FINISHED_LOT lines only: what is in the bag, category by category (see PoItemCategory).
@@ -1188,9 +1751,27 @@ model GrnItem {
   inputSgst    Decimal  @default(0) @db.Decimal(12, 2)
   inputIgst    Decimal  @default(0) @db.Decimal(12, 2)
 
+  // G2g-7a: which of the company's OWN GST registrations this inward supply is attributed to —
+  // resolved from the GRN's receiving branch (else the company's primary active registration)
+  // and stamped ONCE, at the exact moment the line's own taxableValue/inputCgst/Sgst/Igst above
+  // are booked (createTagFromGrnItem for a FINISHED_GOODS line, openPurchaseLot for a
+  // FINISHED_LOT line) — see resolveBuyerRegistration (shared/inputGst.ts). Never backfilled onto
+  // an existing row and never re-resolved later even if the branch's registration subsequently
+  // changes (same immutable-snapshot convention as TaxInvoice.sellerRegistrationId on the sell
+  // side). Null for every line that predates this column, for a line whose tax event never ran
+  // (a raw-material/other line that never books input GST at all), and for a company with no GST
+  // registration configured — null is left as a fact, never guessed (CLAUDE.md §13).
+  buyerRegistrationId String?
+  buyerRegistration   CompanyGstRegistration? @relation(fields: [buyerRegistrationId, companyId], references: [id, companyId])
+
+  // G2g-7d: the self-assessed RCM liability this line produced, if its PoItem.rcmCategory
+  // classified as RCM_APPLICABLE. Null for the overwhelming majority of lines (rcmCategory NONE).
+  rcmLiability RcmLiability?
+
   // composite-FK target: lets the database refuse a lot that points at another company's GrnItem
   @@unique([id, companyId])
   @@index([companyId])
+  @@index([buyerRegistrationId])
   @@map("grn_items")
 }
 
@@ -2306,6 +2887,7 @@ model HsnCode {
   creditNoteItems     CreditNoteItem[]
   debitNoteItems      DebitNoteItem[]
   salesDebitNoteItems SalesDebitNoteItem[]
+  selfInvoices        SelfInvoice[]
 
   @@index([codeType])
   @@map("hsn_codes")
@@ -3268,10 +3850,15 @@ model JournalEntry {
   totalCredit   Decimal     @db.Decimal(14, 2)
   createdAt     DateTime    @default(now())
 
-  lines           JournalLine[]
-  creditNotes     CreditNote[]
-  debitNotes      DebitNote[]
-  salesDebitNotes SalesDebitNote[]
+  lines                       JournalLine[]
+  creditNotes                 CreditNote[]
+  debitNotes                  DebitNote[]
+  salesDebitNotes             SalesDebitNote[]
+  // G2g-7d: the liability-recognition journal (Dr RCM ITC / Cr RCM Payable) and, separately, the
+  // cash-settlement journal (Dr RCM Payable / Cr Cash-or-Bank) posted when it is later paid —
+  // distinct relation names since one RcmLiability can point at both.
+  rcmLiabilityJournals        RcmLiability[]   @relation("RcmLiabilityJournal")
+  rcmLiabilityPaymentJournals RcmLiability[]   @relation("RcmLiabilityPaymentJournal")
 
   @@unique([companyId, entryNumber])
   @@index([companyId, date, isPosted])

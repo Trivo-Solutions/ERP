@@ -27,6 +27,9 @@ const ACTION_LABELS: Record<string, string> = {
   // underscore, which starterPackage/validate.ts's permission-string regex already accommodates
   // (widened for J4-D1's report:financial_view/po:approve_high_value, same shape here).
   registration_view: 'View', registration_create: 'Create', registration_edit: 'Edit', registration_manage: 'Manage (Activate/Assign to Branch)',
+  // G2g-6a: statutory filing-period persistence foundation (CLAUDE.md's G2g-6a entry) — schema only,
+  // no snapshot/filing service exists yet, same underscore-action shape as registration_* above.
+  period_view: 'View', snapshot_create: 'Create Snapshot', snapshot_export: 'Export Snapshot', filing_record: 'Record Filing',
 };
 
 function cap(permission: string): PermissionCapability {
@@ -192,6 +195,16 @@ export const PERMISSION_CATALOG: PermissionCatalogGroup[] = [
       {
         key: 'salesDebitNote', label: 'GST Sales Debit Notes',
         capabilities: [cap('salesDebitNote:view'), cap('salesDebitNote:create'), cap('salesDebitNote:cancel')],
+      },
+      // G2g-6a: schema/RLS foundation only (CLAUDE.md's G2g-6a entry) — no snapshot builder or
+      // filing service exists yet. Cataloged but deliberately NOT assigned to any starter role in
+      // this pass, same "ungrantable-but-known, Role Editor can grant the moment it's needed"
+      // posture as creditNote/debitNote/salesDebitNote above when THEY shipped ahead of any
+      // starter-role grant. gst:period_lock_override is deliberately NOT added — the unlock/override
+      // decision has not been approved for v1.
+      {
+        key: 'gstFiling', label: 'GST Return Filing (Periods & Snapshots)',
+        capabilities: [cap('gst:period_view'), cap('gst:snapshot_create'), cap('gst:snapshot_export'), cap('gst:filing_record')],
       },
       {
         key: 'creditNoteTemplate', label: 'Credit Note Templates',

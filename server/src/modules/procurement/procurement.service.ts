@@ -9,8 +9,12 @@ import { TenantContext, tenantQuery, tenantBatch, tenantTransaction } from '../.
 import { assertOwnedByCompany, assertBranchAccessible, assertAllOwned } from '../../middleware/tenant';
 import { isValidKarat } from '../../shared/karatMaster';
 import { FINISHED_GOODS_MATERIAL_TYPE, FINISHED_LOT_MATERIAL_TYPE, DEFAULT_HSN_CODE } from '../../shared/constants';
-import { round2, resolveSupplierStateCode, splitInputGst } from '../../shared/inputGst';
+import { round2, resolveSupplierStateCode, splitInputGst, resolveBuyerRegistration } from '../../shared/inputGst';
+import { isValidTaxCategory, DEFAULT_TAX_CATEGORY } from '../../shared/taxCategory';
+import { isValidRcmCategory, DEFAULT_RCM_CATEGORY } from '../../shared/rcmCategory';
 import { createDebitNoteForPurchaseReturnTx } from './debitNote.service';
+import { bookRcmLiabilityIfApplicable } from '../finance/gst/gstr3bRcmBooking.service';
+import { assertGstr3bPeriodMutable } from '../finance/gst/gstr3bFilingProtection';
 
 export async function listPOs(ctx: TenantContext, filters: {
   status?: string; supplierId?: string; poType?: string;
@@ -154,7 +158,15 @@ export async function createPO(data: {
     hsnCode?: string;
     /** GST rate as a fraction (0.03 = 3%) exactly as charged on the supplier's bill. Omitted: the HSN
      *  master's rate if the supplier is GST-registered, else 0 (an unregistered supplier charges none). */
-    taxRate?: number; }>;
+    taxRate?: number;
+    /** G2g-7a: the statutory classification of this line's supply (shared/taxCategory.ts). Omitted:
+     *  defaults to TAXABLE — never inferred from taxRate (a 0% rate is not the same fact as EXEMPT/
+     *  NIL_RATED/NON_GST/ZERO_RATED). */
+    taxCategory?: string;
+    /** G2g-7d: an explicit, notified reverse-charge category for this line (shared/rcmCategory.ts).
+     *  Omitted: defaults to NONE — never inferred from the supplier's registration status (CGST
+     *  Act §9(4)'s blanket unregistered-supplier RCM has been suspended since Feb 2019). */
+    rcmCategory?: string; }>;
 }, ctx: TenantContext, userId: string) {
   // Layer 2: Supplier is company-owned (Phase 3) — a Company-B supplierId must 404, not let a PO
   // be raised against another company's supplier relationship.
@@ -193,8 +205,16 @@ export async function createPO(data: {
     if (explicitRate !== undefined && (explicitRate < 0 || explicitRate > 1)) {
       throw new AppError(`${materialName}: GST rate must be a fraction between 0 and 1 (0.03 = 3%)`, 400);
     }
+    if (src.taxCategory !== undefined && !isValidTaxCategory(src.taxCategory)) {
+      throw new AppError(`${materialName}: unknown tax category "${src.taxCategory}"`, 400);
+    }
+    if (src.rcmCategory !== undefined && !isValidRcmCategory(src.rcmCategory)) {
+      throw new AppError(`${materialName}: unknown RCM category "${src.rcmCategory}"`, 400);
+    }
     const taxRate = currency !== 'INR' ? 0 : (explicitRate ?? (supplier.gstNumber ? Number(hsn.gstRate) : 0));
-    const base = { materialCode, materialName, materialType, hsnCodeId: hsn.id, taxRate };
+    const taxCategory = src.taxCategory ?? DEFAULT_TAX_CATEGORY;
+    const rcmCategory = src.rcmCategory ?? DEFAULT_RCM_CATEGORY;
+    const base = { materialCode, materialName, materialType, hsnCodeId: hsn.id, taxRate, taxCategory, rcmCategory };
     const cats = lotCategories.get(src);
     if (cats) {
       // One bag = one unit. The invoice states the bag's amount, not a rate; its weights are the category rows'.
@@ -250,11 +270,12 @@ export async function createPO(data: {
 // where a single finished piece's is, so the purchase-GST register and a purchase return read it the same way.
 async function openPurchaseLot(tx: Prisma.TransactionClient, a: {
   ctx: TenantContext; userId: string;
-  grn: { id: string; grnNumber: string; receivedDate: Date };
+  grn: { id: string; grnNumber: string; receivedDate: Date; branchId: string | null };
   grnItem: { id: string; poItemId: string };
   poItem: { id: string; materialName: string; karat: string | null; quantity: Prisma.Decimal; weight: Prisma.Decimal;
-    netWeight: Prisma.Decimal | null; totalAmount: Prisma.Decimal; taxRate: Prisma.Decimal };
-  supplierId: string; supplierStateCode: string | null; companyStateCode: string | null;
+    netWeight: Prisma.Decimal | null; totalAmount: Prisma.Decimal; taxRate: Prisma.Decimal;
+    rcmCategory: string | null; taxCategory: string | null; hsnCodeId: string | null };
+  supplierId: string; supplierGstNumber: string | null; supplierStateCode: string | null; companyStateCode: string | null;
 }) {
   const { ctx, poItem } = a;
   // Lock the PO line first, so two GRNs received against it at once can't both open a lot for it.
@@ -269,6 +290,17 @@ async function openPurchaseLot(tx: Prisma.TransactionClient, a: {
 
   const taxable = round2(Number(poItem.totalAmount));
   const gst = splitInputGst(taxable, Number(poItem.taxRate), a.supplierStateCode, a.companyStateCode);
+  // G2g-7a: which of the company's own GST registrations this inward supply is attributed to —
+  // resolved from the GRN's own receiving branch, stamped alongside the tax amounts below.
+  const buyerRegistrationId = await resolveBuyerRegistration(tx, ctx.companyId, a.grn.branchId);
+  // G2g-7g: same checkpoint as createTagFromGrnItem's — this is the exact point this GRN line's
+  // input GST is booked below (GrnItem.taxableValue/inputCgst/Sgst/Igst), read by
+  // gstr3bItcReporting.service.ts's loader by GRN receivedDate. Runs before bookRcmLiabilityIfApplicable
+  // too, which is called later in this same transaction.
+  await assertGstr3bPeriodMutable(tx, ctx.companyId, {
+    documentType: 'GRN_ITEM', documentId: a.grnItem.id,
+    gstRegistrationId: buyerRegistrationId, documentDate: a.grn.receivedDate, action: 'received',
+  });
 
   const lot = await tx.purchaseLot.create({
     data: {
@@ -290,9 +322,21 @@ async function openPurchaseLot(tx: Prisma.TransactionClient, a: {
   });
   await tx.grnItem.update({
     where: { id: a.grnItem.id },
-    data: { taxableValue: taxable, inputCgst: gst.cgst, inputSgst: gst.sgst, inputIgst: gst.igst },
+    data: { taxableValue: taxable, inputCgst: gst.cgst, inputSgst: gst.sgst, inputIgst: gst.igst, buyerRegistrationId },
   });
   await tx.supplier.update({ where: { id: a.supplierId }, data: { currentDue: { increment: round2(taxable + gst.total) } } });
+
+  // G2g-7d: a no-op for the overwhelming majority of lines (PoItem.rcmCategory NONE) — see
+  // createTagFromGrnItem's identical hook and PHASE_G2G7D_AUDIT.md.
+  await bookRcmLiabilityIfApplicable(tx, {
+    ctx: a.ctx, userId: a.userId,
+    grn: { grnNumber: a.grn.grnNumber, receivedDate: a.grn.receivedDate },
+    grnItemId: a.grnItem.id,
+    poItem: { rcmCategory: a.poItem.rcmCategory, taxCategory: a.poItem.taxCategory, hsnCodeId: a.poItem.hsnCodeId, totalAmount: a.poItem.totalAmount },
+    supplier: { id: a.supplierId, gstNumber: a.supplierGstNumber },
+    supplierStateCode: a.supplierStateCode, companyStateCode: a.companyStateCode, buyerRegistrationId,
+  });
+
   return lot;
 }
 
@@ -369,7 +413,7 @@ export async function createGRN(data: {
       for (const g of lotLines) {
         await openPurchaseLot(tx, {
           ctx, userId, grn, grnItem: g, poItem: po.poItems.find((p) => p.id === g.poItemId)!,
-          supplierId: po.supplierId, supplierStateCode, companyStateCode: company.stateCode,
+          supplierId: po.supplierId, supplierGstNumber: po.supplier.gstNumber, supplierStateCode, companyStateCode: company.stateCode,
         });
       }
     }
@@ -416,6 +460,8 @@ export async function createSupplier(data: {
   name: string; type: string; supplierCode?: string;
   gstNumber?: string; panNumber?: string; contactName?: string;
   phone?: string; email?: string; address?: string; city?: string; state?: string; pincode?: string;
+  /** G2g-7a: whether this supplier is registered under the GST Composition Scheme. Omitted: false. */
+  isComposition?: boolean;
 }, companyId: string) {
   return tenantTransaction(companyId, async (tx) => {
     const supplierPrefix: Record<string, string> = {
@@ -859,8 +905,25 @@ export async function createPurchaseReturn(data: {
   const totalAmount = resolvedItems.reduce((s, i) => s + i.amount, 0);
   const taxAmount = round2(resolvedItems.reduce((s, i) => s + i.cgst + i.sgst + i.igst, 0));
 
+  // G2g-7g: a Purchase Return is its own GSTR-3B inward/ITC source document
+  // (gstr3bItcReporting.service.ts's loader reads it by its own returnDate, attributed to each
+  // returned tag's own source GRN line's buyerRegistrationId) — computed once, outside the
+  // transaction, and passed explicitly into the create below so the checked date and the persisted
+  // date can never drift apart. Every DISTINCT registration among the returned tags' source GRN
+  // lines is checked — a return is not restricted to a single GRN unless a debit note is requested.
+  const returnDate = new Date();
+  const distinctReturnRegistrationIds = Array.from(
+    new Set(tags.map((t) => sourceOf(t)!.buyerRegistrationId).filter((id): id is string => !!id)),
+  );
+
   const result = await tenantTransaction(ctx.companyId, async (tx) => {
     const returnNumber = await nextDocumentNumber(ctx.companyId, 'PRET', 'PRET', tx);
+    for (const regId of distinctReturnRegistrationIds) {
+      await assertGstr3bPeriodMutable(tx, ctx.companyId, {
+        documentType: 'PURCHASE_RETURN', documentId: returnNumber,
+        gstRegistrationId: regId, documentDate: returnDate, action: 'returned',
+      });
+    }
     const flipped = await tx.jewelryTag.updateMany({
       where: { id: { in: tagIds }, companyId: ctx.companyId, status: 'IN_STOCK' },
       data: { status: 'RETIRED' },
@@ -873,6 +936,7 @@ export async function createPurchaseReturn(data: {
       data: {
         companyId: ctx.companyId,
         returnNumber,
+        returnDate,
         supplierId,
         reason: data.reason,
         notes: data.notes,

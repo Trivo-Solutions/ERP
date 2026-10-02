@@ -824,6 +824,189 @@ locked decisions or execution slices, so left untouched rather than expanding sc
 roles for the five J3 admin permissions are an explicit future decision. The backfill script is
 unexecuted against any live database. See `PHASE_J4_IMPLEMENTATION.md` for the full matrix.
 
+**G2g-7a — Inward GST Foundation & Multi-GSTIN Attribution (TRIVO GST module, 2026-10-02).**
+Data-model/attribution foundation only — no GSTR-3B aggregation, ITC eligibility, RCM calculation,
+or journal-posting change. Three purely additive pieces: (1) `GrnItem.buyerRegistrationId` —
+which of the company's own GST registrations an inward GRN line is attributed to, resolved by new
+`shared/inputGst.ts: resolveBuyerRegistration()` from the GRN's own receiving branch (else the
+company's primary active registration, else `null` — never the primary when the branch's own link
+is merely inactive, mirroring `resolveSellerRegistration`'s identical behavior on the sell side) and
+stamped once, alongside the line's existing `taxableValue`/`inputCgst`/`Sgst`/`Igst`, by
+`createTagFromGrnItem` (FINISHED_GOODS) and `openPurchaseLot` (FINISHED_LOT) — composite FK to
+`CompanyGstRegistration`, same pattern as `Branch.gstRegistrationId`. (2) A reusable `TaxCategory`
+concept (`shared/taxCategory.ts`: TAXABLE/EXEMPT/NIL_RATED/NON_GST/ZERO_RATED) on `PoItem.taxCategory`
+— decided at PO entry alongside `hsnCodeId`/`taxRate`, never inferred from a 0% rate (a 0%-rated bill
+from an unregistered supplier and a genuinely EXEMPT/NIL_RATED/NON_GST/ZERO_RATED supply are distinct
+statutory facts); `createPO` defaults an omitted line to TAXABLE, existing rows stay `NULL`. (3)
+`Supplier.isComposition` (default `false`), wired into `createSupplier` only — there is no Supplier
+edit endpoint at all today (pre-existing gap, confirmed, left untouched). Deliberately **not**
+built: any RCM data field anywhere (the placement — supplier vs. line vs. an unbuilt supply-scoped
+concept — is genuinely unresolved from this codebase alone; deferred whole to G2g-7d, the brief's own
+RCM phase) and `Client.isComposition`/`isUin` (deferred to G2g-7b — outward/recipient-side, out of
+this inward-only phase). Migration `20261002150000_g2g7a_inward_gst_foundation` is pure
+`ALTER TABLE ADD COLUMN` + one composite FK — no `UPDATE`, no backfill, no row touched (verified via
+`prisma migrate diff` returning an empty diff after applying it). See `PHASE_G2G7A_IMPLEMENTATION.md`
+for the full design reasoning, the rejected alternatives for each placement decision, and the test
+inventory (full suite 1787/1792 non-RLS and 1791/1792 under the real role-split `test:rls` cluster,
+both 0 failed; `audit:tenant` clean; both `tsc`s clean).
+
+**G2g-7c — GSTR-3B Table 4(A)(5) ITC Foundation & Eligibility Engine (2026-10-02). NOT a complete
+ITC implementation — see §I below for exactly what's deferred.** Pure classification/aggregation
+engine, parallel to (never modifying) G2g-7b's frozen outward engine, built the same way: a
+no-Prisma classifier (`gstr3bItcEligibility.ts`), a no-Prisma aggregator (`gstr3bItcAggregation.ts`),
+and a tenant-scoped reporting service (`gstr3bItcReporting.service.ts`, reusing G2g-7b's
+`resolveGstr3bPeriod` rather than re-deriving period math) behind `GET
+/finance/reports/gstr3b-itc` (`report:financial_view`, same gate as every other GST report). No
+schema change — reads `GrnItem.buyerRegistrationId`/`PoItem.taxCategory`/`Supplier.isComposition`
+(G2g-7a) that already existed. Every inward tax-bearing line (GRN intake, Purchase Return, standalone
+Debit Note — Path A excluded, same double-count-avoidance convention as
+`finance.service.ts: getPurchaseGstSummary`) is classified **ELIGIBLE / INELIGIBLE / UNRESOLVED**
+against only five foundation-phase conditions actually checkable today: buyer-registration match,
+supplier GSTIN structural validity (full checksum via `shared/gstin.ts`, not a length check),
+supplier composition-scheme status (Section 10 — the one reliable INELIGIBLE exclusion this phase
+can establish), tax category (`EXEMPT`/`NIL_RATED`/`NON_GST`/`ZERO_RATED` → INELIGIBLE; missing →
+UNRESOLVED), and non-RCM/import/ISD (true by construction — this codebase's inward data model has
+none of those yet). **Hard invariant: raw book GST is never silently treated as eligible ITC** — a
+line with no determinable fact lands in `unresolved`, never `eligible`. Four statutory conditions
+the brief asked about — place of supply, Section 16(4) time limit, Section 17(5) blocked credits,
+the 180-day payment condition — and GSTR-2B availability are **NOT_DETERMINABLE today** (no inward
+place-of-supply field beyond the existing intra/inter-state split, no tracked GSTR-3B filing date,
+no transaction-purpose semantics beyond composition/tax-category, `SupplierPayment` is account-level
+not bill-linked, and no GSTR-2B ingestion exists) — each reported once per report as a report-level
+diagnostic and in a returned `eligibilityMatrix`, deliberately **not** used to gate every individual
+line to UNRESOLVED (that would make the `eligible` bucket permanently empty, defeating the report's
+purpose — see `gstr3bItcEligibility.ts`'s own header for the full reasoning). A Purchase Return nets
+into the exact same bucket its source GRN line was already classified into (never re-derived). See
+`PHASE_G2G7C_IMPLEMENTATION.md` for the full eligibility matrix, diagnostics list, and test
+inventory (50 focused G2g-7c tests; full suite 1871/1876 local and 1875/1876 under the real
+role-split `test:rls` cluster, both 0 failed; `audit:tenant` clean; `tsc`/Prisma-validate clean).
+**G2g-7d — Inward RCM & Self-Invoicing Foundation (2026-10-02). Deliberately "foundation only."**
+A dedicated read-only audit (`PHASE_G2G7D_AUDIT.md`) found that neither of TRIVO's two real inward
+flows (jewellery-stock PO/GRN, old-gold exchange) is actually RCM-liable under current law (Section
+9(4)'s blanket unregistered-supplier rule has been suspended since Feb 2019; the only metal-scrap RCM
+notification excludes Chapter 71 precious metals) — so rather than add a new expense-recording
+entity for the realistic §9(3) categories (GTA freight, legal/security/director services, none of
+which this schema can record as a line item), the build is a pure, reusable classification/liability/
+self-invoice/ITC engine plus the minimal schema (`PoItem.rcmCategory`, `RcmLiability`,
+`SelfInvoice`) needed to represent a notified supply if and when one is ever flagged. New
+`gstr3bRcmClassification.ts`/`gstr3bRcmTaxCalculation.ts`/`gstr3bRcmItcEligibility.ts`/
+`gstr3bRcmAggregation.ts` (pure engines) + `gstr3bRcmReporting.service.ts`/
+`gstr3bRcmBooking.service.ts`; `GET /finance/reports/gstr3b-rcm`, `GET /finance/rcm-liabilities`,
+`POST /finance/rcm-liabilities/:id/mark-paid` (all `report:financial_view`/`journal:create`, no new
+permission). ITC eligibility is gated on an actual recorded cash payment (Rule 86(2)), never on
+liability-creation alone. One integration hook (`bookRcmLiabilityIfApplicable`) wired into
+`createTagFromGrnItem`/`openPurchaseLot` — a no-op for ~100% of lines against today's real data, by
+design, not by omission. See `PHASE_G2G7D_IMPLEMENTATION.md` for the full writeup, known limitations
+(no automatic guard against a line combining `rcmCategory` with a positive `taxRate`; no RCM
+adjustment path on Purchase Return/Debit Note), and test inventory (63 focused tests).
+
+**G2g-7e — GSTR-2B Ingestion & Reconciliation Foundation (2026-10-02).** New `Gst2bStatement`
+(immutable, versioned per company/registration/FY/tax-period — ACTIVE/SUPERSEDED, never overwritten,
+same hashing/versioning discipline as `GstFilingSnapshot`) and `Gst2bDocument` (one normalized row
+per B2B/B2BA/CDNR/CDNRA/ISD/ISDA/IMPG/IMPGSEZ entry). A pure normalizer (`gstr2bNormalizer.ts`) maps
+the GSTN wire JSON — field-name spelling a best-effort reconstruction, not byte-verified this
+session, same disclaimer class as `shared/gstin.ts` — into a stable internal shape, always preserving
+the complete original payload verbatim regardless of mapping confidence. A pure matching engine
+(`gstr2bReconciliation.ts`) compares the current statement's documents against book GRNs (keyed by
+`GoodsReceiptNote.invoiceNumber`/`invoiceDate`, not `GrnItem`), `PurchaseReturn`, and `RcmLiability`
+using three strict identity tiers (exact → normalized-document-number → possible-by-GSTIN-and-date
+only, never escalated past possible) plus a ₹1 amount tolerance — a false match is treated as worse
+than an honest unresolved one throughout. CDNR/CDNRA is capped at `POSSIBLE_MATCH` confidence by
+design: this codebase has no field for a *supplier-issued* credit/debit note number (`PurchaseReturn`/
+`DebitNote` record TRIVO's own return/memo, not the supplier's statutory Section-34 note). ISD/IMPG
+are preserved faithfully but never reconciled (`ISD_NOT_SUPPORTED`/`IMPORTS_NOT_RECONCILABLE`) — no
+ISD or Bill-of-Entry model exists in this codebase. `GET /finance/reports/gstr2b-reconciliation`
+always reports `GSTR_2B_IS_NOT_FINAL_ITC_ELIGIBILITY` — a match here is not a final ITC
+determination; G2g-7c's own eligibility classifier is untouched and remains authoritative. No
+automatic journal/GRN/RCM-liability creation from an imported statement (brief's own explicit ban).
+`POST /finance/gstr2b/import` (the request body is the raw GSTN JSON itself; registration/period
+travel as query params) and the reconciliation GET both reuse `report:financial_view`, no new
+permission. See `PHASE_G2G7E_IMPLEMENTATION.md` for the full writeup, known limitations (period
+matching uses the GRN's own `receivedDate`, which can misalign with the GSTN filing period for a
+late-received invoice; the field-mapping confidence caveat), and test inventory (49 focused tests;
+full suite 1987/1992 local and 1991/1992 under the real role-split `test:rls` cluster, both 0
+failed; `audit:tenant` clean; both `tsc`s and Prisma validate clean).
+
+**G2g-7e correction (2026-10-02) — GSTR-2B ITC availability (Table 3/4) now independent of match
+status.** The reconciliation engine already normalized and persisted the source's own
+ITC-availability flag (`Gst2bDocument.itcAvailability`/`.ineligibilityReason`) but never read it back
+out before producing a report. Added `Gstr2bTwoBItcAvailability` (`'AVAILABLE' | 'NOT_AVAILABLE' |
+'UNKNOWN'` — `UNKNOWN` is explicit and honest, never silently coerced to `AVAILABLE`) and threaded it
+through: `Gstr2bDocumentForMatch`/`Gstr2bMatchResult` (`gstr2b.types.ts`), the DB loader
+(`gstr2bReconciliation.service.ts`, which previously omitted those two columns), and all 7
+`matches.push(...)` sites in `gstr2bReconciliation.ts` via a new pure `twoBAvailabilityOf()` helper —
+`matchStatus` computation itself untouched, so e.g. an `EXACT_MATCH` can carry
+`twoBItcAvailability: 'NOT_AVAILABLE'`. No schema change (columns pre-existed), no change to G2g-7b/
+7c/7d/GSTR-1. 8 new focused tests. See `PHASE_G2G7E_IMPLEMENTATION.md`'s "Correction" section for the
+full writeup and verification numbers (49/49 focused, 730/730 GST regression, both `tsc`, Prisma
+validate, `audit:tenant` clean, `test:rls` 1999/2000 — 1 pre-existing skip — 0 failed).
+
+**G2g-7e, including this correction, is now ✅ APPROVED / FROZEN by the user (2026-10-02).** Do not
+modify any of its five files without an explicit new instruction.
+
+**G2g-7f — Complete GSTR-3B Aggregation & Reconciliation (2026-10-02).** A pure composition layer
+only — reimplements none of G2g-7b/7c/7d/7e, all of which remain frozen and untouched. New
+`gstr3bReconciliation.types.ts` / `gstr3bReconciliationComposition.ts` (pure, no Prisma) /
+`gstr3bReconciliation.service.ts` compose the four frozen reports (outward liability, book ITC, RCM,
+GSTR-2B reconciliation) into one `Gstr3bReconciliationReport` behind `GET
+/finance/reports/gstr3b-reconciliation` (`report:financial_view`, required `gstRegistrationId` +
+`taxPeriod`). Adds exactly what none of the four alone can produce: a full Table 4(A)/4(B)/4(C)/4(D)
+ITC presentation (4(A)(3)/4(A)(5) quoted verbatim from 7d/7c; imports/ISD/Rule 42-43/ITC-reclaim
+`NOT_SUPPORTED`/`NOT_DETERMINABLE` with `null` amounts, never a fabricated zero; 4(C) nets only the
+two supported eligible buckets, flagged partial), six distinct 2B-derived ITC totals (never one
+"ITC Available" figure), an 11-category book-vs-2B reconciliation matrix built on 7e's own match
+status + ITC-availability flag, and a read-only `GstReturnPeriod` (`returnType: 'GSTR3B'`) filing-
+status lookup — which always reads `NOT_STARTED` today, since no service anywhere writes that
+returnType yet; this phase creates/files/locks nothing. One deliberate deviation from the brief's own
+example: no `SUPPLIER_MISMATCH` matrix category exists, because the frozen 7e matcher indexes
+candidates by supplier GSTIN before comparing anything else, so a genuine supplier-identity
+disagreement can never surface as one matched-but-disagreeing row (it shows up as two independent
+unmatched rows instead) — documented as a standing diagnostic
+(`SUPPLIER_MISMATCH_NOT_DETECTABLE`) rather than a category that would always read zero. No schema
+change (`GstReturnPeriod.returnType` was already a free-text column anticipating this). See
+`PHASE_G2G7F_IMPLEMENTATION.md` for the full audit, design reasoning, and test inventory (33 new
+focused tests; full suite 2028/2033 local and 2032/2033 under the real role-split `test:rls` cluster,
+both 0 failed; `audit:tenant` clean; `tsc`/Prisma validate clean).
+
+**G2g-7f is now ✅ APPROVED / FROZEN by the user (2026-10-02).** Do not modify
+`gstr3bReconciliation.types.ts` / `gstr3bReconciliationComposition.ts` /
+`gstr3bReconciliation.service.ts`, or the `gstr3b-reconciliation` route in `finance.router.ts`,
+without an explicit new instruction.
+
+**G2g-7g — GSTR-3B export/filing lifecycle + post-filing mutation protection, now ✅ APPROVED /
+FROZEN by the user (2026-10-02).** Two parts, both complete. **(1) Export/filing lifecycle:**
+`gstr3bGstnWire.types.ts`/`.ts` (pure serializer), `gstr3bGstnValidator.ts` (pure filing-readiness
+validator — `isFilingReady` deliberately means "TRIVO's own data is internally resolved," never
+"statutorily complete"; `netPosition.statutoryReportingPosition.status` stays permanently
+`NOT_DETERMINABLE` regardless), `gstr3bExport.service.ts`, `gstr3bFilingSnapshot.service.ts`,
+`gstr3bFilingAttempt.service.ts`, `gstr3bFilingPeriod.service.ts` — new, GSTR-3B-labeled files
+reusing the SAME `GstReturnPeriod`/`GstFilingSnapshot`/`GstFilingAttempt` tables and
+`OPEN → SNAPSHOT_CREATED → FILING_ATTEMPTED → FILED → LOCKED` lifecycle G2g-6 already established
+(`returnType: 'GSTR3B'`, no schema change), never the frozen GSTR-1-typed functions directly (those
+hardcode GSTR-1-only audit-action names/pipelines). `GET /reports/gstr3b-export` + six filing-
+lifecycle routes in `finance.router.ts` (`report:financial_view`/`gst:snapshot_create`/
+`gst:filing_record`/`gst:period_view`, all pre-existing G2g-6a catalog entries). Full writeup in
+`PHASE_G2G7G_IMPLEMENTATION.md`. **(2) Close-out mutation protection** (that report's own flagged
+gap, closed the same day): `gstr3bFilingProtection.ts: assertGstr3bPeriodMutable()` — unlike
+`gstr1FilingProtection.ts`'s document-traceability check, this is purely DATE-based (a GSTR-3B
+snapshot is a period-range aggregation with no per-document id list to check against — see that
+file's own header), resolving a mutation's own effective date to a tax period and rejecting (409
+`GSTR3B_FILED_PERIOD_IMMUTABLE`) only when that exact company+registration+`GSTR3B` period is
+`FILED`/`LOCKED`. Wired into every outward (`createInvoice`/`amendInvoice`/`voidInvoice`/
+`createSalesReturn`/`convertMemoToInvoice` in `sales.service.ts`; `createStandaloneCreditNote`/
+`createCreditNoteForReturn`/`cancelCreditNote` in `creditNote.service.ts`; `createSalesDebitNote`/
+`cancelSalesDebitNote` in `salesDebitNote.service.ts`) and inward/RCM (`createTagFromGrnItem` in
+`tagging.service.ts`; `openPurchaseLot`/`createPurchaseReturn` in `procurement.service.ts`;
+`createStandaloneDebitNote`/`cancelDebitNote` in `debitNote.service.ts`; `markRcmLiabilityPaid` in
+`gstr3bRcmBooking.service.ts`) mutation path that can change a FILED/LOCKED period's own reported
+figures — a brand-new backdated document is caught too, something GSTR-1's own traceability-based
+guard structurally cannot do. **Do not modify `gstr3bFilingProtection.ts`, any of the nine files
+listed above, or the export/filing-lifecycle files in part (1), without an explicit new
+instruction.** 37 new tests (35 service-level, incl. one true end-to-end run through the real
+snapshot → attempt → FILED → LOCKED pipeline; 2 HTTP) all passing; full suite 2135/2140 (5
+pre-existing skips) and 2139/2140 under the real role-split `test:rls` cluster (1 pre-existing
+skip), both 0 failed; `audit:tenant` clean; `tsc`/Prisma validate clean; no schema/migration change.
+
 ---
 
 ## 8. Known follow-ups / control gaps

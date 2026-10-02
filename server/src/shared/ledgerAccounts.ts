@@ -12,10 +12,16 @@ export const LEDGER_ACCOUNT = {
   INPUT_CGST: '1401',
   INPUT_SGST: '1402',
   INPUT_IGST: '1403',
+  // G2g-7d: RCM self-assessed liability/credit — deliberately separate from the ordinary
+  // INPUT_*/*_PAYABLE accounts above (never mixed into them: a liability this company
+  // self-assesses, not one the supplier charged). See migration 20261002160000's seed for every
+  // existing company; new companies get it from the Starter Package chart.
+  RCM_INPUT_TAX_CREDIT: '1404',
   ACCOUNTS_PAYABLE: '2100',
   CGST_PAYABLE: '2201',
   SGST_PAYABLE: '2202',
   IGST_PAYABLE: '2203',
+  RCM_TAX_PAYABLE: '2204',
   SALES_REVENUE: '4000',
   COST_OF_GOODS: '5000',
   // Sales round-off: credit when the customer is billed up to the rupee, debit when down.

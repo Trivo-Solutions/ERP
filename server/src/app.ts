@@ -11,6 +11,15 @@ import { logger } from './config/logger';
 import { errorHandler, notFound } from './middleware/error';
 import { rejectClientTenantSelectors } from './middleware/tenant';
 
+// G2g-7e: see the express.json() call below for why this exists.
+declare global {
+  namespace Express {
+    interface Request {
+      rawBody?: Buffer;
+    }
+  }
+}
+
 // Module routers
 import { authRouter } from './modules/auth/auth.router';
 import { designRouter } from './modules/product-design/design.router';
@@ -58,7 +67,11 @@ app.use('/api', rateLimit({
 
 // Request parsing
 app.use(compression() as any);
-app.use(express.json({ limit: '10mb' }));
+// G2g-7e: `verify` captures the exact uploaded bytes onto req.rawBody before JSON parsing — needed
+// only by the GSTR-2B import route (finance.router.ts) to hash what was actually uploaded, not a
+// re-serialization of the parsed object. Harmless for every other route: body-parser already buffers
+// the full body before parsing, so this adds a reference, not a second read or extra buffering.
+app.use(express.json({ limit: '10mb', verify: (req, _res, buf) => { (req as express.Request).rawBody = buf; } }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use('/api', inputGuard); // ids must be strings, no nested query objects — see middleware/inputGuard.ts
 

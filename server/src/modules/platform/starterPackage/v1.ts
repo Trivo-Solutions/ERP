@@ -121,6 +121,9 @@ export const STARTER_PACKAGE_V1: StarterPackageDefinition = {
     { code: '1401', name: 'Input CGST (ITC)', type: 'ASSET', subType: 'TAX', isSystem: true },
     { code: '1402', name: 'Input SGST (ITC)', type: 'ASSET', subType: 'TAX', isSystem: true },
     { code: '1403', name: 'Input IGST (ITC)', type: 'ASSET', subType: 'TAX', isSystem: true },
+    // G2g-7d: RCM self-assessed credit — kept separate from the ordinary Input CGST/SGST/IGST
+    // above (LEDGER_ACCOUNT.RCM_INPUT_TAX_CREDIT).
+    { code: '1404', name: 'RCM Input Tax Credit (ITC)', type: 'ASSET', subType: 'TAX', isSystem: true },
     { code: '1500', name: 'Fixed Assets', type: 'ASSET', subType: 'FIXED_ASSET', isSystem: true },
     { code: '1501', name: 'Machinery & Equipment', type: 'ASSET', subType: 'FIXED_ASSET', isSystem: true },
     // Liabilities
@@ -130,6 +133,10 @@ export const STARTER_PACKAGE_V1: StarterPackageDefinition = {
     { code: '2201', name: 'CGST Payable', type: 'LIABILITY', subType: 'TAX', isSystem: true },
     { code: '2202', name: 'SGST Payable', type: 'LIABILITY', subType: 'TAX', isSystem: true },
     { code: '2203', name: 'IGST Payable', type: 'LIABILITY', subType: 'TAX', isSystem: true },
+    // G2g-7d: RCM self-assessed liability — kept separate from the ordinary CGST/SGST/IGST
+    // Payable above (LEDGER_ACCOUNT.RCM_TAX_PAYABLE); those are output tax collected from
+    // customers, this is tax this company self-assesses as the recipient of a notified supply.
+    { code: '2204', name: 'RCM Tax Payable', type: 'LIABILITY', subType: 'TAX', isSystem: true },
     { code: '2300', name: 'Loan Payable', type: 'LIABILITY', subType: 'LOAN', isSystem: true },
     // Equity
     { code: '3000', name: 'Owner Equity', type: 'EQUITY', isSystem: true },

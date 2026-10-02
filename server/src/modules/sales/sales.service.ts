@@ -17,6 +17,8 @@ import { LEDGER_ACCOUNT, cashOrBankAccount } from '../../shared/ledgerAccounts';
 import { nextDocumentNumber, gstFinancialYear } from '../../shared/numberSequence';
 import { TenantContext, tenantTransaction, tenantQuery, tenantBatch } from '../../shared/tenantContext';
 import { assertBranchAccessible, assertOwnedByCompany, assertAllOwned } from '../../middleware/tenant';
+import { assertGstr1DocumentMutable, auditGstr1MutationBlocked } from '../finance/gst/gstr1FilingProtection';
+import { assertGstr3bPeriodMutable, auditGstr3bMutationBlocked } from '../finance/gst/gstr3bFilingProtection';
 
 // The customer's old metal handed over against this bill (mode OLD_GOLD) — see createInvoice.
 type OldGoldInput = {
@@ -364,6 +366,14 @@ export async function createInvoice(data: {
       if (taxableAmount > 0 && taxAmount <= 0) {
         throw new AppError('Refusing to emit a zero-GST tax invoice on a taxable INR sale', 500);
       }
+      // G2g-7g: a brand-new invoice dated into an already-FILED/LOCKED GSTR-3B period for this
+      // registration must never be created — unlike GSTR-1's document-traceability guard, this is
+      // a date-based check, so it also catches a document that doesn't exist yet (see
+      // gstr3bFilingProtection.ts's own header for why).
+      await assertGstr3bPeriodMutable(tx, ctx.companyId, {
+        documentType: 'SALES_INVOICE', documentId: invoiceNumber,
+        gstRegistrationId: seller.registrationId, documentDate: data.invoiceDate, action: 'created',
+      });
       // B2: client.state is free text (e.g. "Gujarat"), not a GST code — resolve it via the state
       // master before comparing. No confident match (blank/unrecognized — the common case for a
       // lightweight walk-in retail Client) is treated as inter-state, same as before this fix.
@@ -843,7 +853,13 @@ export async function amendInvoice(invoiceId: string, data: {
     })),
   }));
 
-  const { before, after, updated } = await tenantTransaction(ctx.companyId, async (tx) => {
+  // G2g-6d: the whole `tenantTransaction` call is wrapped so a `Gstr1FilingProtectionError` thrown
+  // by the guard inside it can still be audited (brief §18) once the transaction has aborted — an
+  // IIFE, not a pre-declared `let`, so `before`/`after`/`updated` keep their real inferred types
+  // rather than widening to `any`.
+  const { before, after, updated } = await (async () => {
+    try {
+      return await tenantTransaction(ctx.companyId, async (tx) => {
     // Serialise amendments of the same invoice, then read its state FRESH — payments, returns and tag statuses as
     // they are now, not as they were when the screen was opened.
     await tx.$queryRaw`SELECT "id" FROM "sales_invoices" WHERE "id" = ${invoiceId} FOR UPDATE`;
@@ -866,6 +882,19 @@ export async function amendInvoice(invoiceId: string, data: {
     if (inv.taxDetails?.irn) {
       throw new AppError('An e-invoice (IRN) has already been generated for this invoice — it cannot be amended in-app; a GST credit/debit note or IRN cancellation must be used instead', 409);
     }
+    // G2g-6d: an invoice represented in an accepted GSTR-1 filing is closed to a direct rewrite of
+    // its own filed tax/reporting facts — the only legal corrections are a later-period Credit/
+    // Debit Note or Sales Return, neither of which this amend path is.
+    await assertGstr1DocumentMutable(tx, ctx.companyId, {
+      documentType: 'SALES_INVOICE', documentId: invoiceId,
+      gstRegistrationId: inv.taxDetails?.sellerRegistrationId, action: 'amended',
+    });
+    // G2g-7g: the invoice's CURRENT period — reject the amend outright if the period it is already
+    // reported in is FILED/LOCKED, before any of this edit's own new values are even computed.
+    await assertGstr3bPeriodMutable(tx, ctx.companyId, {
+      documentType: 'SALES_INVOICE', documentId: invoiceId,
+      gstRegistrationId: inv.taxDetails?.sellerRegistrationId, documentDate: inv.invoiceDate, action: 'amended',
+    });
 
     const newClientId = data.clientId ?? inv.clientId;
     const clientChanged = newClientId !== inv.clientId;
@@ -937,6 +966,13 @@ export async function amendInvoice(invoiceId: string, data: {
     const seller = await resolveSellerRegistration(tx, ctx.companyId, head.branchId);
     if (currency === 'INR') {
       if (taxableAmount > 0 && taxAmount <= 0) throw new AppError('Refusing to emit a zero-GST tax invoice on a taxable INR sale', 500);
+      // G2g-7g: also reject if this edit moves the invoice INTO a different, already-FILED/LOCKED
+      // period (e.g. the invoiceDate itself is being changed) — the check above only covered the
+      // period the invoice is CURRENTLY reported in.
+      await assertGstr3bPeriodMutable(tx, ctx.companyId, {
+        documentType: 'SALES_INVOICE', documentId: invoiceId,
+        gstRegistrationId: seller.registrationId, documentDate: invoiceDate, action: 'amended',
+      });
       clientStateCode = await resolveStateCode(client.state);
       isSameState = clientStateCode === seller.stateCode;
       ({ cgst: cgstAmt, sgst: sgstAmt, igst: igstAmt } = splitGst(taxAmount, isSameState));
@@ -1023,7 +1059,13 @@ export async function amendInvoice(invoiceId: string, data: {
     }
 
     return { before: snapshot(inv), after: snapshot(upd), updated: upd };
-  });
+      });
+    } catch (err) {
+      await auditGstr1MutationBlocked(err, 'sales_invoices', userId, ctx.companyId);
+      await auditGstr3bMutationBlocked(err, 'sales_invoices', userId, ctx.companyId);
+      throw err;
+    }
+  })();
 
   await createAuditEntry('sales_invoices', invoiceId, userId, 'AMEND', before, { ...after, reason: data.reason ?? null }, ctx.companyId);
   return updated;
@@ -1049,7 +1091,9 @@ export async function voidInvoice(invoiceId: string, ctx: TenantContext, userId:
   if (!reason || !reason.trim()) throw new AppError('A reason is required to void an invoice', 400);
   await assertOwnedByCompany('salesInvoice', invoiceId, ctx.companyId, 'Invoice');
 
-  const { before, after } = await tenantTransaction(ctx.companyId, async (tx) => {
+  const { before, after } = await (async () => {
+    try {
+      return await tenantTransaction(ctx.companyId, async (tx) => {
     // Serialise, then read fresh — same lock amendInvoice takes on the same row, for the same
     // reason: payments/returns as they are right now, not as they were when the screen was opened.
     await tx.$queryRaw`SELECT "id" FROM "sales_invoices" WHERE "id" = ${invoiceId} FOR UPDATE`;
@@ -1074,6 +1118,19 @@ export async function voidInvoice(invoiceId: string, ctx: TenantContext, userId:
     if (invoice.taxDetails?.irn) {
       throw new AppError('An e-invoice (IRN) has already been generated for this invoice — it cannot be voided in-app; cancel the IRN with the GST portal first', 409);
     }
+    // G2g-6d: a filed invoice is closed to a whole-invoice reversal too — same reasoning as
+    // amendInvoice's own guard above it.
+    await assertGstr1DocumentMutable(tx, ctx.companyId, {
+      documentType: 'SALES_INVOICE', documentId: invoiceId,
+      gstRegistrationId: invoice.taxDetails?.sellerRegistrationId, action: 'voided',
+    });
+    // G2g-7g: a whole-invoice reversal into an already-FILED/LOCKED period is exactly the kind of
+    // "cancel/reverse" mutation brief §10 calls out — blocked here, not bypassed just because the
+    // operation is named Void rather than Edit.
+    await assertGstr3bPeriodMutable(tx, ctx.companyId, {
+      documentType: 'SALES_INVOICE', documentId: invoiceId,
+      gstRegistrationId: invoice.taxDetails?.sellerRegistrationId, documentDate: invoice.invoiceDate, action: 'voided',
+    });
 
     const before = {
       status: invoice.status, totalAmount: invoice.totalAmount,
@@ -1135,7 +1192,13 @@ export async function voidInvoice(invoiceId: string, ctx: TenantContext, userId:
       before,
       after: { status: updated.status, voidedAt: updated.voidedAt, voidReason: updated.voidReason },
     };
-  });
+      });
+    } catch (err) {
+      await auditGstr1MutationBlocked(err, 'sales_invoices', userId, ctx.companyId);
+      await auditGstr3bMutationBlocked(err, 'sales_invoices', userId, ctx.companyId);
+      throw err;
+    }
+  })();
 
   await createAuditEntry('sales_invoices', invoiceId, userId, 'VOID', before, { ...after, reason }, ctx.companyId);
   return { id: invoiceId, status: 'VOID' as const };
@@ -1527,7 +1590,19 @@ export async function createSalesReturn(data: {
   const revenueReversal = resolvedItems.reduce((s, r) => s + r.revenuePortion, 0);
   const taxReversal = resolvedItems.reduce((s, r) => s + r.taxPortion, 0);
 
+  // G2g-7g: a SalesReturn is its own GSTR-3B outward source document (gstr3bReporting.service.ts's
+  // loader reads it by its own returnDate, attributed to the ORIGINAL invoice's seller registration
+  // snapshot — see that loader's own query) — so it is guarded against ITS OWN period, not the
+  // original invoice's. Computed once, outside the transaction, and passed explicitly into the
+  // create below so the checked date and the persisted date can never drift apart.
+  const returnDate = new Date();
+
   const salesReturn = await tenantTransaction(ctx.companyId, async (tx) => {
+    await assertGstr3bPeriodMutable(tx, ctx.companyId, {
+      documentType: 'SALES_RETURN', documentId: data.invoiceId,
+      gstRegistrationId: taxDetails?.sellerRegistrationId, documentDate: returnDate, action: 'returned',
+    });
+
     // Friendly pre-check for the common case; the count-checked updateMany below is the
     // authoritative guard (same pattern createInvoice uses for its own flip). companyId is
     // included here too — a tag in this list is only ever populated from invoice.items, which
@@ -1559,6 +1634,7 @@ export async function createSalesReturn(data: {
       data: {
         companyId: ctx.companyId,
         returnNumber,
+        returnDate,
         invoiceId: invoice.id,
         clientId: invoice.clientId,
         reason: data.reason,
@@ -1901,6 +1977,12 @@ export async function convertMemoToInvoice(
     // G1 Part E: same seller-registration resolution and immutable seller/buyer snapshot as
     // createInvoice — fixes the hardcoded-seller-identity bug on this path too.
     const seller = await resolveSellerRegistration(tx, ctx.companyId, memo.branchId);
+    // G2g-7g: a memo conversion is a real SalesInvoice-creating path too (invoiceDate is always
+    // "now" here, but "now" can itself already fall inside an already-FILED/LOCKED current period).
+    await assertGstr3bPeriodMutable(tx, ctx.companyId, {
+      documentType: 'SALES_INVOICE', documentId: invoiceNumber,
+      gstRegistrationId: seller.registrationId, documentDate: invoiceDate, action: 'created',
+    });
     // B2: same free-text-to-code resolution as createInvoice.
     const clientStateCode = await resolveStateCode(memo.client.state);
     const isSameState = clientStateCode === seller.stateCode;

@@ -10,6 +10,8 @@ import { LEDGER_ACCOUNT } from '../../shared/ledgerAccounts';
 import { splitGst } from '../../shared/gstSplit';
 import { isValidCreditNoteReason } from '../../shared/gstDocumentReasons';
 import { DEFAULT_HSN_CODE } from '../../shared/constants';
+import { assertGstr1DocumentMutable, auditGstr1MutationBlocked } from '../finance/gst/gstr1FilingProtection';
+import { assertGstr3bPeriodMutable, auditGstr3bMutationBlocked } from '../finance/gst/gstr3bFilingProtection';
 
 // G2c — Credit Note lifecycle. See PHASE_G2_GST_DOCUMENTS_LIFECYCLE_DESIGN.md §3 for the full
 // design this implements. Two creation paths, one shared line-builder and one shared over-credit
@@ -204,6 +206,12 @@ export async function createCreditNoteForReturn(
   const date = creditNoteDate ?? new Date();
   const financialYear = gstFinancialYear(date);
   const td = invoice.taxDetails;
+  // G2g-7g: a Credit Note is its own GSTR-3B outward source document (gstr3bReporting.service.ts's
+  // loader reads it by its own creditNoteDate) — guarded against its own period before it is numbered.
+  await assertGstr3bPeriodMutable(tx, ctx.companyId, {
+    documentType: 'CREDIT_NOTE', documentId: salesReturnId,
+    gstRegistrationId: td.sellerRegistrationId, documentDate: date, action: 'issued',
+  });
   // §9: GST-registration-scoped numbering key — the statutory unit (Rule 46(b)) is per-GSTIN, not
   // company-wide. 'LEGACY' is the sentinel for a company with no CompanyGstRegistration row yet.
   const creditNoteNumber = await nextDocumentNumber(ctx.companyId, `CN:${td.sellerRegistrationId ?? 'LEGACY'}`, 'CN', tx, financialYear);
@@ -390,6 +398,11 @@ export async function createStandaloneCreditNote(
 
     const date = data.creditNoteDate ?? new Date();
     const financialYear = gstFinancialYear(date);
+    // G2g-7g: same guard as Path A's createCreditNoteForReturn, against this Path B note's own date.
+    await assertGstr3bPeriodMutable(tx, ctx.companyId, {
+      documentType: 'CREDIT_NOTE', documentId: invoice.invoiceNumber,
+      gstRegistrationId: td.sellerRegistrationId, documentDate: date, action: 'issued',
+    });
     const creditNoteNumber = await nextDocumentNumber(ctx.companyId, `CN:${td.sellerRegistrationId ?? 'LEGACY'}`, 'CN', tx, financialYear);
 
     const cn = await tx.creditNote.create({
@@ -444,7 +457,9 @@ export async function cancelCreditNote(creditNoteId: string, ctx: TenantContext,
   if (!reason?.trim()) throw new AppError('A reason is required to cancel a credit note', 400);
   await assertOwnedByCompany('creditNote', creditNoteId, ctx.companyId, 'Credit Note');
 
-  const { before, after } = await tenantTransaction(ctx.companyId, async (tx) => {
+  let before: any, after: any;
+  try {
+    ({ before, after } = await tenantTransaction(ctx.companyId, async (tx) => {
     // Serialise, then read fresh — same lock voidInvoice/amendInvoice take on their own row.
     await tx.$queryRaw`SELECT "id" FROM "credit_notes" WHERE "id" = ${creditNoteId} FOR UPDATE`;
     const cn = await tx.creditNote.findUniqueOrThrow({ where: { id: creditNoteId } });
@@ -453,6 +468,18 @@ export async function cancelCreditNote(creditNoteId: string, ctx: TenantContext,
       throw new AppError('A Credit Note linked to a Sales Return cannot be independently cancelled — the underlying return is append-only', 409);
     }
     if (cn.status === 'CANCELLED') throw new AppError('This credit note has already been cancelled', 409);
+    // G2g-6d: a credit note represented in an accepted GSTR-1 filing is closed to cancellation —
+    // same posture as voidInvoice's own guard on the sales-invoice side.
+    await assertGstr1DocumentMutable(tx, ctx.companyId, {
+      documentType: 'CREDIT_NOTE', documentId: creditNoteId,
+      gstRegistrationId: cn.sellerRegistrationId, action: 'cancelled',
+    });
+    // G2g-7g: same cancel/reverse protection as voidInvoice's own — a credit note dated into an
+    // already-FILED/LOCKED period cannot be cancelled either.
+    await assertGstr3bPeriodMutable(tx, ctx.companyId, {
+      documentType: 'CREDIT_NOTE', documentId: creditNoteId,
+      gstRegistrationId: cn.sellerRegistrationId, documentDate: cn.creditNoteDate, action: 'cancelled',
+    });
 
     const before = { status: cn.status, totalAmount: Number(cn.totalAmount) };
     const totalAmount = Number(cn.totalAmount);
@@ -481,7 +508,12 @@ export async function cancelCreditNote(creditNoteId: string, ctx: TenantContext,
     });
 
     return { before, after: { status: updated.status, cancelledAt: updated.cancelledAt, cancelReason: updated.cancelReason } };
-  });
+    }));
+  } catch (err) {
+    await auditGstr1MutationBlocked(err, 'credit_notes', userId, ctx.companyId);
+    await auditGstr3bMutationBlocked(err, 'credit_notes', userId, ctx.companyId);
+    throw err;
+  }
 
   await createAuditEntry('credit_notes', creditNoteId, userId, 'CANCEL', before, { ...after, reason }, ctx.companyId);
   return { id: creditNoteId, status: 'CANCELLED' as const };

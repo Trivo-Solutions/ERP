@@ -10,6 +10,8 @@ import { LEDGER_ACCOUNT } from '../../shared/ledgerAccounts';
 import { splitGst } from '../../shared/gstSplit';
 import { isValidSalesDebitNoteReason } from '../../shared/gstDocumentReasons';
 import { DEFAULT_HSN_CODE } from '../../shared/constants';
+import { assertGstr1DocumentMutable, auditGstr1MutationBlocked } from '../finance/gst/gstr1FilingProtection';
+import { assertGstr3bPeriodMutable, auditGstr3bMutationBlocked } from '../finance/gst/gstr3bFilingProtection';
 
 // G2g-4b.2 — Sales (outward) Debit Note. A wholly separate domain from the procurement-side
 // DebitNote/debitNote.service.ts (that one stays purchase-side only — see CLAUDE.md). Mirrors
@@ -215,6 +217,13 @@ export async function createSalesDebitNote(
     // Steps 9-10: immutable snapshot + atomic, registration-scoped number.
     const date = data.debitNoteDate ?? new Date();
     const financialYear = gstFinancialYear(date);
+    // G2g-7g: a Sales Debit Note is its own GSTR-3B outward source document
+    // (gstr3bReporting.service.ts's loader reads it by its own debitNoteDate) — guarded against its
+    // own period before it is numbered.
+    await assertGstr3bPeriodMutable(tx, ctx.companyId, {
+      documentType: 'SALES_DEBIT_NOTE', documentId: invoice.invoiceNumber,
+      gstRegistrationId: td.sellerRegistrationId, documentDate: date, action: 'issued',
+    });
     const debitNoteNumber = await nextDocumentNumber(ctx.companyId, `SDN:${td.sellerRegistrationId ?? 'LEGACY'}`, 'SDN', tx, financialYear);
 
     // Step 11: create document/items.
@@ -279,12 +288,25 @@ export async function cancelSalesDebitNote(debitNoteId: string, ctx: TenantConte
   if (!reason?.trim()) throw new AppError('A reason is required to cancel a sales debit note', 400);
   await assertOwnedByCompany('salesDebitNote', debitNoteId, ctx.companyId, 'Sales Debit Note');
 
-  const { before, after } = await tenantTransaction(ctx.companyId, async (tx) => {
+  let before: any, after: any;
+  try {
+    ({ before, after } = await tenantTransaction(ctx.companyId, async (tx) => {
     // Serialise, then read fresh — same lock cancelCreditNote/voidInvoice take on their own row.
     await tx.$queryRaw`SELECT "id" FROM "sales_debit_notes" WHERE "id" = ${debitNoteId} FOR UPDATE`;
     const dn = await tx.salesDebitNote.findUniqueOrThrow({ where: { id: debitNoteId } });
     if (dn.companyId !== ctx.companyId) throw new AppError('Sales Debit Note not found', 404);
     if (dn.status === 'CANCELLED') throw new AppError('This sales debit note has already been cancelled', 409);
+    // G2g-6d: a sales debit note represented in an accepted GSTR-1 filing is closed to
+    // cancellation — same posture as cancelCreditNote's own guard.
+    await assertGstr1DocumentMutable(tx, ctx.companyId, {
+      documentType: 'SALES_DEBIT_NOTE', documentId: debitNoteId,
+      gstRegistrationId: dn.sellerRegistrationId, action: 'cancelled',
+    });
+    // G2g-7g: same cancel/reverse protection as cancelCreditNote's own.
+    await assertGstr3bPeriodMutable(tx, ctx.companyId, {
+      documentType: 'SALES_DEBIT_NOTE', documentId: debitNoteId,
+      gstRegistrationId: dn.sellerRegistrationId, documentDate: dn.debitNoteDate, action: 'cancelled',
+    });
 
     const before = { status: dn.status, totalAmount: Number(dn.totalAmount) };
     const totalAmount = Number(dn.totalAmount);
@@ -313,7 +335,12 @@ export async function cancelSalesDebitNote(debitNoteId: string, ctx: TenantConte
     });
 
     return { before, after: { status: updated.status, cancelledAt: updated.cancelledAt, cancelReason: updated.cancelReason } };
-  });
+    }));
+  } catch (err) {
+    await auditGstr1MutationBlocked(err, 'sales_debit_notes', userId, ctx.companyId);
+    await auditGstr3bMutationBlocked(err, 'sales_debit_notes', userId, ctx.companyId);
+    throw err;
+  }
 
   await createAuditEntry('sales_debit_notes', debitNoteId, userId, 'CANCEL', before, { ...after, reason }, ctx.companyId);
   return { id: debitNoteId, status: 'CANCELLED' as const };

@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { resolveStateCode } from './stateMaster';
 
 // Purchase-side (input) GST helpers, shared by PO creation, finished-goods intake and purchase returns.
@@ -25,4 +26,29 @@ export function splitInputGst(taxable: number, rate: number, supplierStateCode: 
   if (!intra) return { cgst: 0, sgst: 0, igst: total, total };
   const cgst = round2(total / 2);
   return { cgst, sgst: round2(total - cgst), igst: 0, total };
+}
+
+// G2g-7a: resolves which of the company's OWN GST registrations an inward supply is attributed
+// to — the receiving GRN's own branch link, else the company's primary active registration, else
+// null (no registration configured at all, or no branch to resolve from). Mirrors
+// resolveSellerRegistration (sales.service.ts) on the buy side, but — unlike that function —
+// returns a plain nullable id with no legacy Company-row fallback: buyerRegistrationId is a new,
+// purely additive attribution column (CLAUDE.md §13: never fabricate historical attribution), so
+// there is no existing "always non-null" behavior for a fallback to preserve. The caller stamps
+// the result onto GrnItem at the exact moment it books that line's taxableValue/inputCgst/Sgst/
+// Igst (createTagFromGrnItem for a FINISHED_GOODS line, openPurchaseLot for a FINISHED_LOT line)
+// — never re-resolved later, same immutable-snapshot rule as the sell side.
+//
+// Deliberately takes the GRN's RECEIVING branch, never a tag's own (possibly different,
+// overridable) branch — the inward supply was legally received wherever the GRN says it was,
+// regardless of which branch a piece is later tagged/held at.
+export async function resolveBuyerRegistration(
+  tx: Prisma.TransactionClient, companyId: string, receivingBranchId: string | null,
+): Promise<string | null> {
+  if (!receivingBranchId) return null;
+  const branch = await tx.branch.findFirst({ where: { id: receivingBranchId, companyId }, select: { gstRegistrationId: true } });
+  const reg = branch?.gstRegistrationId
+    ? await tx.companyGstRegistration.findFirst({ where: { id: branch.gstRegistrationId, companyId, isActive: true } })
+    : await tx.companyGstRegistration.findFirst({ where: { companyId, isPrimary: true, isActive: true } });
+  return reg?.id ?? null;
 }

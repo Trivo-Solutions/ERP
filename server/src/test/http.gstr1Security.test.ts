@@ -60,7 +60,10 @@ describe('HTTP: G2g-3e GSTR-1 report branch + registration + permission security
     );
   }
 
-  for (const [pathIndex, path] of ['/finance/reports/gstr1-outward', '/finance/reports/gstr1-credit-notes', '/finance/reports/gstr1-table12'].entries()) {
+  // G2g-4b.3: /finance/reports/gstr1-debit-notes (Sales Debit Note CDNR/CDNUR, Table 9B) added
+  // alongside its three siblings — proves the identical branch/registration/permission security
+  // matrix below also covers the new route, over real HTTP.
+  for (const [pathIndex, path] of ['/finance/reports/gstr1-outward', '/finance/reports/gstr1-credit-notes', '/finance/reports/gstr1-table12', '/finance/reports/gstr1-debit-notes'].entries()) {
     describe(`${path}`, () => {
       it('3. missing gstRegistrationId is rejected (400), never silently defaulted', async () => {
         const A = await tenantWith(`M${pathIndex}`);
@@ -175,5 +178,15 @@ describe('HTTP: G2g-3e GSTR-1 report branch + registration + permission security
     expect(resBTable12.status).toBe(200);
     expect(resBTable12.body.data.meta.invoicesConsidered).toBe(0);
     expect(resBTable12.body.data.rows).toHaveLength(0);
+
+    // G2g-4b.3: the new Sales Debit Note CDNR/CDNUR route shares the identical loading layer —
+    // same isolation guarantee re-verified here. No Sales Debit Note fixture exists in this test at
+    // all, so both companies correctly see zero.
+    const resBDn = await apiWith(tokenFor(B), app).get(`/finance/reports/gstr1-debit-notes?gstRegistrationId=${regB.id}&from=${from}&to=${to}`);
+    expect(resBDn.status).toBe(200);
+    expect(resBDn.body.data.meta.notesConsidered).toBe(0);
+    expect(resBDn.body.data.cdnr.documents).toHaveLength(0);
+    expect(resBDn.body.data.cdnur.b2cl.documents).toHaveLength(0);
+    expect(resBDn.body.data.b2csAddOn.documents).toHaveLength(0);
   });
 });

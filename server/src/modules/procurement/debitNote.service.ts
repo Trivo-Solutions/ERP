@@ -7,9 +7,10 @@ import { TenantContext, tenantQuery, tenantTransaction } from '../../shared/tena
 import { nextDocumentNumber, gstFinancialYear } from '../../shared/numberSequence';
 import { postAutoJournalEntry } from '../finance/finance.service';
 import { LEDGER_ACCOUNT } from '../../shared/ledgerAccounts';
-import { round2, resolveSupplierStateCode, splitInputGst } from '../../shared/inputGst';
+import { round2, resolveSupplierStateCode, splitInputGst, resolveBuyerRegistration } from '../../shared/inputGst';
 import { isValidDebitNoteReason } from '../../shared/gstDocumentReasons';
 import { DEFAULT_HSN_CODE } from '../../shared/constants';
+import { assertGstr3bPeriodMutable, auditGstr3bMutationBlocked } from '../finance/gst/gstr3bFilingProtection';
 
 // G2e — Debit Note lifecycle (the purchase-side mirror of creditNote.service.ts's G2c). Two
 // creation paths, one shared over-debit guard so neither path can silently diverge from the
@@ -330,6 +331,15 @@ export async function createStandaloneDebitNote(
 
     const date = data.debitNoteDate ?? new Date();
     const financialYear = gstFinancialYear(date);
+    // G2g-7g: a standalone (Path B) Debit Note is its own GSTR-3B inward/ITC source document
+    // (gstr3bItcReporting.service.ts's loadStandaloneDebitNoteLines reads it by its own
+    // debitNoteDate) — guarded against its own period before it is numbered. Resolved the same way
+    // G2g-7a resolves it at intake — from the GRN's own receiving branch.
+    const buyerRegistrationId = await resolveBuyerRegistration(tx, ctx.companyId, grn.branchId);
+    await assertGstr3bPeriodMutable(tx, ctx.companyId, {
+      documentType: 'DEBIT_NOTE', documentId: grn.grnNumber,
+      gstRegistrationId: buyerRegistrationId, documentDate: date, action: 'issued',
+    });
     const debitNoteNumber = await nextDocumentNumber(ctx.companyId, 'DN', 'DN', tx, financialYear);
 
     const dn = await tx.debitNote.create({
@@ -376,7 +386,9 @@ export async function cancelDebitNote(debitNoteId: string, ctx: TenantContext, u
   if (!reason?.trim()) throw new AppError('A reason is required to cancel a debit note', 400);
   await assertOwnedByCompany('debitNote', debitNoteId, ctx.companyId, 'Debit Note');
 
-  const { before, after } = await tenantTransaction(ctx.companyId, async (tx) => {
+  let before: any, after: any;
+  try {
+    ({ before, after } = await tenantTransaction(ctx.companyId, async (tx) => {
     // Serialise, then read fresh — same lock cancelCreditNote/voidInvoice take on their own row.
     await tx.$queryRaw`SELECT "id" FROM "debit_notes" WHERE "id" = ${debitNoteId} FOR UPDATE`;
     const dn = await tx.debitNote.findUniqueOrThrow({ where: { id: debitNoteId } });
@@ -386,6 +398,14 @@ export async function cancelDebitNote(debitNoteId: string, ctx: TenantContext, u
     }
     if (dn.status === 'CANCELLED') throw new AppError('This debit note has already been cancelled', 409);
     if (dn.status !== 'ISSUED') throw new AppError(`A ${dn.status} debit note cannot be cancelled`, 409);
+    // G2g-7g: same cancel/reverse protection as cancelCreditNote's own — resolved the same way
+    // createStandaloneDebitNote resolves it, from the GRN's own receiving branch.
+    const grnForCancel = await tx.goodsReceiptNote.findUnique({ where: { id: dn.grnId }, select: { branchId: true } });
+    const buyerRegistrationId = await resolveBuyerRegistration(tx, ctx.companyId, grnForCancel?.branchId ?? null);
+    await assertGstr3bPeriodMutable(tx, ctx.companyId, {
+      documentType: 'DEBIT_NOTE', documentId: debitNoteId,
+      gstRegistrationId: buyerRegistrationId, documentDate: dn.debitNoteDate, action: 'cancelled',
+    });
 
     const before = { status: dn.status, totalAmount: Number(dn.totalAmount) };
     const totalAmount = Number(dn.totalAmount);
@@ -414,7 +434,11 @@ export async function cancelDebitNote(debitNoteId: string, ctx: TenantContext, u
     });
 
     return { before, after: { status: updated.status, cancelledAt: updated.cancelledAt, cancelReason: updated.cancelReason } };
-  });
+    }));
+  } catch (err) {
+    await auditGstr3bMutationBlocked(err, 'debit_notes', userId, ctx.companyId);
+    throw err;
+  }
 
   await createAuditEntry('debit_notes', debitNoteId, userId, 'CANCEL', before, { ...after, reason }, ctx.companyId);
   return { id: debitNoteId, status: 'CANCELLED' as const };
