@@ -51,6 +51,12 @@ const envSchema = z.object({
   AUTH_RATE_LIMIT_MAX: z.string().default('20').transform(Number),
   TRUST_PROXY: z.string().optional(),
   TRIVO_PLATFORM_API_KEY: z.string().min(32).optional(),
+  // G8a — GST Integration Foundation. Symmetric key (32+ chars) that encrypts every
+  // GstIntegrationCredential value at rest (AES-256-GCM, see modules/gst/integration/encryption.ts).
+  // Unset = the foundation is configured but inert: creating/reading a credential throws rather than
+  // ever storing or returning plaintext. Same "declared but unconfigured until deployed" posture as
+  // GST_PROVIDER_API_KEY/METAL_RATE_API_KEY above — never defaulted, never committed, never logged.
+  GST_INTEGRATION_ENCRYPTION_KEY: z.string().min(32).optional(),
   // (SCALE_PORT / SCALE_BAUD_RATE / RFID_READER_PORT used to live here — a process-wide "default scale" no
   // company owns. Devices are company-owned HardwareDevice rows only; see shared/hardware.ts.)
 });

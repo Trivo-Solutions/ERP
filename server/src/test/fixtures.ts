@@ -196,6 +196,8 @@ export async function cleanupTestTenant(t: TestTenant) {
     prisma.estimateTemplate.deleteMany({ where: { companyId } }),
     prisma.costCenter.deleteMany({ where: { companyId } }),
     prisma.systemConfig.deleteMany({ where: { companyId } }),
+    // G8a — cascades to its own credentials/request-log rows (both ON DELETE CASCADE to this).
+    prisma.gstIntegrationConfig.deleteMany({ where: { companyId } }),
   ]);
 
   // Wave 6 — the company's own masters (Phase 1 of full company isolation). Everything that

@@ -38,6 +38,7 @@ import { taggingRouter } from './modules/tagging/tagging.router';
 import { estimationRouter } from './modules/tagging/estimation.router';
 import { mastersRouter } from './modules/masters/masters.router';
 import { gstRouter } from './modules/gst/gst.router';
+import { gstIntegrationRouter } from './modules/gst/integration/gstIntegration.router';
 import { companyRouter } from './modules/company/company.router';
 import { platformRouter } from './modules/platform/platform.router';
 
@@ -115,6 +116,10 @@ app.use(`${API}/masters`, mastersRouter);
 // own top-level namespace, not nested under /finance — these are cross-module utilities future
 // Customer/Supplier/Product masters and Sales/Purchase will call directly, not a finance report.
 app.use(`${API}/gst`, gstRouter);
+// G8a — GST Integration Foundation (provider-neutral config/credentials/test boundary for a
+// FUTURE e-invoice/IRP/E-Way Bill integration). A separate router from gstRouter above on purpose
+// — this phase adds nothing to that existing, working module.
+app.use(`${API}/gst/integration`, gstIntegrationRouter);
 
 // 404 & error handlers
 app.use(notFound);

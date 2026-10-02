@@ -30,6 +30,9 @@ const ACTION_LABELS: Record<string, string> = {
   // G2g-6a: statutory filing-period persistence foundation (CLAUDE.md's G2g-6a entry) — schema only,
   // no snapshot/filing service exists yet, same underscore-action shape as registration_* above.
   period_view: 'View', snapshot_create: 'Create Snapshot', snapshot_export: 'Export Snapshot', filing_record: 'Record Filing',
+  // G8a: GST Integration Foundation (config for a future e-invoice/IRP/E-Way Bill provider) —
+  // same underscore-action shape as registration_*/period_view above.
+  integration_view: 'View', integration_manage: 'Manage (Configure/Credentials)', integration_test: 'Test Connection',
 };
 
 function cap(permission: string): PermissionCapability {
@@ -205,6 +208,15 @@ export const PERMISSION_CATALOG: PermissionCatalogGroup[] = [
       {
         key: 'gstFiling', label: 'GST Return Filing (Periods & Snapshots)',
         capabilities: [cap('gst:period_view'), cap('gst:snapshot_create'), cap('gst:snapshot_export'), cap('gst:filing_record')],
+      },
+      // G8a: infrastructure for a FUTURE e-invoice/IRP/E-Way Bill provider — config + encrypted
+      // credentials + a read-only connection test, never an IRN/EWB mutation (none exists yet).
+      // Deliberately NOT assigned to any starter role (SUPER_ADMIN only, via the wildcard) per the
+      // phase's own decision — same "cataloged but ungrantable until deployed" posture as gstFiling
+      // above when IT shipped ahead of a starter-role grant.
+      {
+        key: 'gstIntegration', label: 'GST Integration (e-Invoice/IRP Foundation)',
+        capabilities: [cap('gst:integration_view'), cap('gst:integration_manage'), cap('gst:integration_test')],
       },
       {
         key: 'creditNoteTemplate', label: 'Credit Note Templates',
