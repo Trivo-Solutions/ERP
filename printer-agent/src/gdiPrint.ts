@@ -21,7 +21,7 @@ export async function printViaDriver(printerName: string, tspl: string): Promise
   const label = parseTspl(tspl);
   const items = [];
   for (const it of label.items) {
-    if (it.type === 'barcode') items.push({ ...it, png: await modulesImage('code128', it.text) });
+    if (it.type === 'barcode') items.push({ ...it, sbs: (bwipjs.raw('code128', it.text)[0] as { sbs: number[] }).sbs });
     else if (it.type === 'qrcode') items.push({ ...it, png: await modulesImage('qrcode', it.text) });
     else items.push(it);
   }

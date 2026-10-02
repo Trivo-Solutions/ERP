@@ -47,19 +47,34 @@ try {
                     $g.DrawString([string]$it.text, $font, $black, 0, 0, $fmt)
                     $font.Dispose()
                 }
-                { $_ -in 'barcode', 'qrcode' } {
+                'barcode' {
+                    # Draw bars ourselves on whole printer dots: a scaled bitmap lands modules on fractional
+                    # dots, so bar widths come out uneven and scanners cannot decode it.
+                    $g.TranslateTransform($it.x / $dpm, $it.y / $dpm)
+                    $g.RotateTransform([single]$it.rot)
+                    $dotMm = 25.4 / $g.DpiX
+                    $modMm = [Math]::Max(2, [Math]::Round(($it.narrow / $dpm) / $dotMm)) * $dotMm
+                    $bh = [Math]::Round(($it.height / $dpm) / $dotMm) * $dotMm
+                    $x = 10 * $modMm   # quiet zone
+                    $isBar = $true
+                    foreach ($w in $it.sbs) {
+                        if ($isBar) { $g.FillRectangle($black, [single]$x, [single]0, [single]($w * $modMm), [single]$bh) }
+                        $x += $w * $modMm
+                        $isBar = -not $isBar
+                    }
+                    if ($it.readable) {
+                        $font = New-Object System.Drawing.Font('Arial', [single]2.2, [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Millimeter)
+                        $g.DrawString([string]$it.text, $font, $black, [single](10 * $modMm), [single]($bh + 0.3), $fmt)
+                        $font.Dispose()
+                    }
+                }
+                'qrcode' {
                     $g.TranslateTransform($it.x / $dpm, $it.y / $dpm)
                     $g.RotateTransform([single]$it.rot)
                     $ms = New-Object System.IO.MemoryStream (, [Convert]::FromBase64String($it.png))
                     $img = [System.Drawing.Image]::FromStream($ms)
-                    if ($it.type -eq 'barcode') { $bw = $img.Width * $it.narrow / $dpm; $bh = $it.height / $dpm }
-                    else { $bw = $img.Width * $it.cell / $dpm; $bh = $img.Height * $it.cell / $dpm }
+                    $bw = $img.Width * $it.cell / $dpm; $bh = $img.Height * $it.cell / $dpm
                     $g.DrawImage($img, [single]0, [single]0, [single]$bw, [single]$bh)
-                    if ($it.type -eq 'barcode' -and $it.readable) {
-                        $font = New-Object System.Drawing.Font('Arial', [single]2.2, [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Millimeter)
-                        $g.DrawString([string]$it.text, $font, $black, 0, [single]($bh + 0.3), $fmt)
-                        $font.Dispose()
-                    }
                     $img.Dispose(); $ms.Dispose()
                 }
                 'box' {
