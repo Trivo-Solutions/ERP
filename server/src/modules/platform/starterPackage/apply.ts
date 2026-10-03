@@ -41,8 +41,15 @@ export async function applyStarterPackage(
   await tx.productCategory.createMany({ data: m.productCategories.map((c) => ({ companyId, ...c })) });
   const categories = await tx.productCategory.findMany({ where: { companyId }, select: { id: true, code: true } });
   const categoryIdByCode = new Map(categories.map((c) => [c.code, c.id]));
-  await tx.subCategory.createMany({
-    data: m.subCategories.map((s) => ({ companyId, code: s.code, name: s.name, categoryId: categoryIdByCode.get(s.categoryCode)! })),
+  // A starter sub-category is one shared master row; the package lists each with its (single) category,
+  // which becomes one CategorySubCategory link. The company can link more categories later.
+  await tx.subCategory.createMany({ data: m.subCategories.map((s) => ({ companyId, code: s.code, name: s.name })) });
+  const subs = await tx.subCategory.findMany({ where: { companyId }, select: { id: true, code: true } });
+  const subIdByCode = new Map(subs.map((s) => [s.code, s.id]));
+  await tx.categorySubCategory.createMany({
+    data: m.subCategories.map((s) => ({
+      companyId, categoryId: categoryIdByCode.get(s.categoryCode)!, subCategoryId: subIdByCode.get(s.code)!,
+    })),
   });
 
   await tx.collection.createMany({ data: m.collections.map((c) => ({ companyId, ...c })) });

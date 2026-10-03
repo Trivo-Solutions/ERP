@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../config/database';
 import { AppError } from '../../middleware/error';
+import { assertSubCategoryForCategory } from '../../shared/subCategory';
 import { createAuditEntry } from '../../middleware/audit';
 import { FINISHED_GOODS_MATERIAL_TYPE } from '../../shared/constants';
 import { isValidKarat } from '../../shared/karatMaster';
@@ -491,7 +492,7 @@ export async function createTag(ctx: TenantContext, data: {
   // sub-category, collection, material code or stone grade must 404, never attach to this tag.
   // (stockType/category are re-fetched below, scoped to the company, because their codes build
   // the tag number.)
-  await assertOwnedIfPresent('subCategory', data.subCategoryId, ctx.companyId, 'Sub-category');
+  await assertSubCategoryForCategory(ctx.companyId, data.categoryId, data.subCategoryId, true);
   await assertOwnedIfPresent('collection', data.collectionId, ctx.companyId, 'Collection');
   await assertSizeForCategory(ctx, data.sizeId, data.categoryId);
   assertValidPieceCount(data.noOfPcs);
@@ -665,7 +666,16 @@ export async function updateTag(id: string, data: {
   // Layer 2: same company-ownership rule as createTag — every master id on a tag edit is checked.
   await assertOwnedIfPresent('stockType', data.stockTypeId, ctx.companyId, 'Stock Type');
   await assertOwnedIfPresent('productCategory', data.categoryId, ctx.companyId, 'Category');
-  await assertOwnedIfPresent('subCategory', data.subCategoryId, ctx.companyId, 'Sub-category');
+  // The (category, sub-category) pair the tag will have AFTER this edit must be a real link. A kept
+  // sub-category is only re-checked when the category changes under it, and is never re-checked for
+  // 'active' — deactivating the master later must not block editing tags that already carry it.
+  {
+    const effCategory = data.categoryId ?? existing.categoryId;
+    const effSub = data.subCategoryId !== undefined ? data.subCategoryId : existing.subCategoryId;
+    if (effSub && (data.subCategoryId !== undefined || data.categoryId !== undefined)) {
+      await assertSubCategoryForCategory(ctx.companyId, effCategory, effSub, data.subCategoryId !== undefined && data.subCategoryId !== existing.subCategoryId);
+    }
+  }
   await assertOwnedIfPresent('collection', data.collectionId, ctx.companyId, 'Collection');
   // A size must fit the category the tag will have AFTER this edit (the new one if it is changing too).
   if (data.sizeId || data.categoryId) {
@@ -851,7 +861,7 @@ export async function createTagFromGrnItem(data: {
 
   // Layer 2: master ids are company-owned — sub-category/collection are checked here, and the
   // stock type/category are fetched scoped to the company just below.
-  await assertOwnedIfPresent('subCategory', data.subCategoryId, ctx.companyId, 'Sub-category');
+  await assertSubCategoryForCategory(ctx.companyId, data.categoryId, data.subCategoryId, true);
   await assertOwnedIfPresent('collection', data.collectionId, ctx.companyId, 'Collection');
   await assertOwnedIfPresent('client', data.manufacturerId, ctx.companyId, 'Manufacturer');
   const [stockType, category] = await Promise.all([

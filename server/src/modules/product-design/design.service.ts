@@ -232,8 +232,10 @@ export async function getRateSheet(companyId: string, date: Date) {
         metalType: k.metalType,
         purity: k.purity,
         ratePerGram: r ? r.ratePerGram : null,
+        ogRatePerGram: r ? r.ogRatePerGram : null,
         source: r?.source ?? null,
         previousRate: prev ? prev.ratePerGram : null,
+        previousOgRate: prev ? prev.ogRatePerGram : null,
         previousDate: prev ? prev.date : null,
       };
     });
@@ -245,7 +247,7 @@ export async function getRateSheet(companyId: string, date: Date) {
  * same (company, date, karat, currency) upsert upsertMetalRate does, so re-saving a date edits it and
  * no other date changes. Karats must be this company's own active karats (the purity comes from there).
  */
-export async function saveRateSheet(companyId: string, date: Date, rates: Array<{ karat: string; ratePerGram: number }>, source?: string) {
+export async function saveRateSheet(companyId: string, date: Date, rates: Array<{ karat: string; ratePerGram: number; ogRatePerGram?: number | null }>, source?: string) {
   if (!Array.isArray(rates) || rates.length === 0) throw new AppError('No rates to save', 400);
   const seen = new Set<string>();
   for (const r of rates) {
@@ -254,6 +256,10 @@ export async function saveRateSheet(companyId: string, date: Date, rates: Array<
     seen.add(r.karat);
     if (typeof r.ratePerGram !== 'number' || !Number.isFinite(r.ratePerGram) || r.ratePerGram <= 0) {
       throw new AppError(`Rate for ${r.karat} must be a number greater than 0`, 400);
+    }
+    // OG (old gold) rate is optional; null/absent leaves it unset, anything else must be a positive number.
+    if (r.ogRatePerGram != null && (typeof r.ogRatePerGram !== 'number' || !Number.isFinite(r.ogRatePerGram) || r.ogRatePerGram <= 0)) {
+      throw new AppError(`OG rate for ${r.karat} must be a number greater than 0`, 400);
     }
   }
   return tenantTransaction(companyId, async (tx) => {
@@ -264,8 +270,9 @@ export async function saveRateSheet(companyId: string, date: Date, rates: Array<
     for (const r of rates) {
       saved.push(await tx.metalRate.upsert({
         where: { companyId_date_karat_currency: { companyId, date, karat: r.karat, currency: RATE_CURRENCY } },
-        create: { companyId, date, karat: r.karat, currency: RATE_CURRENCY, ratePerGram: r.ratePerGram, purity: purityByCode.get(r.karat)!, source },
-        update: { ratePerGram: r.ratePerGram, source },
+        create: { companyId, date, karat: r.karat, currency: RATE_CURRENCY, ratePerGram: r.ratePerGram, ogRatePerGram: r.ogRatePerGram ?? null, purity: purityByCode.get(r.karat)!, source },
+        // OG only overwritten when the caller sent the field, so a rate-only save never wipes it.
+        update: { ratePerGram: r.ratePerGram, source, ...(r.ogRatePerGram !== undefined && { ogRatePerGram: r.ogRatePerGram }) },
       }));
     }
     return saved;

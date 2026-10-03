@@ -5,6 +5,10 @@ import { resolveTenantContext, assertOwnedByCompany, assertOwnedIfPresent } from
 import { tenantQuery, tenantTransaction } from '../../shared/tenantContext';
 import { isBlockedByForeignKey } from '../../shared/prismaErrors';
 import { AppError } from '../../middleware/error';
+import {
+  listSubCategories, listCategoriesForSubCategory, createSubCategory, updateSubCategory,
+  linkSubCategory, unlinkSubCategory, deleteSubCategory,
+} from './subCategory.service';
 
 export const mastersRouter = Router();
 // Every master below is company-owned (Phase 1 of full company isolation): each company has its
@@ -87,7 +91,7 @@ mastersRouter.get('/categories', requirePermission('masters:view'), async (req: 
   const data = await tenantQuery(companyId, (tx) =>
     tx.productCategory.findMany({
       where: { companyId },
-      include: { _count: { select: { subCategories: true } } },
+      include: { _count: { select: { subCategoryLinks: true } } },
       orderBy: { name: 'asc' },
     })
   );
@@ -121,49 +125,88 @@ mastersRouter.delete('/categories/:id', requirePermission('masters:delete'), asy
 
 // ─── Sub-categories ───────────────────────────────────────────────────────────
 
-const SUBCATEGORY_FIELDS = ['code', 'name', 'categoryId', 'isActive'] as const;
+// A sub-category is ONE company master linked to many categories (CategorySubCategory) — see
+// subCategory.service.ts. ?categoryId= lists only the sub-categories linked to that category (what the
+// New Tag / GRN pickers use); ?search= matches code or name; ?active=true hides deactivated rows.
 
 mastersRouter.get('/subcategories', requirePermission('masters:view'), async (req: Request, res: Response) => {
+  const q = req.query;
+  const data = await listSubCategories(req.tenant!.companyId, {
+    categoryId: typeof q.categoryId === 'string' && q.categoryId ? q.categoryId : undefined,
+    search: typeof q.search === 'string' ? q.search : undefined,
+    activeOnly: q.active === 'true',
+  });
+  res.json({ success: true, data });
+});
+
+mastersRouter.post('/subcategories', requirePermission('masters:create'), async (req: Request, res: Response) => {
+  const item = await createSubCategory(req.tenant!.companyId, req.body ?? {});
+  res.status(201).json({ success: true, data: item });
+});
+
+mastersRouter.patch('/subcategories/:id', requirePermission('masters:edit'), async (req: Request, res: Response) => {
+  const item = await updateSubCategory(req.tenant!.companyId, req.params.id, req.body ?? {});
+  res.json({ success: true, data: item });
+});
+
+mastersRouter.delete('/subcategories/:id', requirePermission('masters:delete'), async (req: Request, res: Response) => {
+  await deleteSubCategory(req.tenant!.companyId, req.params.id);
+  res.json({ success: true, message: 'Sub-category deleted' });
+});
+
+mastersRouter.get('/subcategories/:id/categories', requirePermission('masters:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await listCategoriesForSubCategory(req.tenant!.companyId, req.params.id) });
+});
+
+// Link an EXISTING sub-category to another category (no new sub-category row is ever created here).
+mastersRouter.post('/subcategories/:id/categories', requirePermission('masters:edit'), async (req: Request, res: Response) => {
+  const data = await linkSubCategory(req.tenant!.companyId, req.params.id, req.body?.categoryId);
+  res.status(201).json({ success: true, data });
+});
+
+mastersRouter.delete('/subcategories/:id/categories/:categoryId', requirePermission('masters:edit'), async (req: Request, res: Response) => {
+  const data = await unlinkSubCategory(req.tenant!.companyId, req.params.id, req.params.categoryId);
+  res.json({ success: true, data });
+});
+
+// ─── Setting types (prong, bezel, pave ...) ───────────────────────────────────
+// Offered on New Tag. JewelryTag.settingType stays free text (the chosen name), so deactivating or
+// renaming a row here never rewrites an existing tag.
+
+const SETTING_TYPE_FIELDS = ['code', 'name', 'isActive'] as const;
+
+mastersRouter.get('/setting-types', requirePermission('masters:view'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   const data = await tenantQuery(companyId, (tx) =>
-    tx.subCategory.findMany({
-      where: { companyId, ...(req.query.categoryId && { categoryId: req.query.categoryId as string }) },
-      include: { category: { select: { name: true, code: true } } },
+    tx.settingType.findMany({
+      where: { companyId, ...(req.query.active === 'true' && { isActive: true }) },
       orderBy: { name: 'asc' },
     })
   );
   res.json({ success: true, data });
 });
 
-mastersRouter.post('/subcategories', requirePermission('masters:create'), async (req: Request, res: Response) => {
+mastersRouter.post('/setting-types', requirePermission('masters:create'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
-  const { code, name, categoryId } = req.body;
-  // The parent category is a foreign id from the client — must be this company's own.
-  await assertOwnedByCompany('productCategory', categoryId, companyId, 'Category');
-  const item = await tenantQuery(companyId, (tx) =>
-    tx.subCategory.create({
-      data: { companyId, code: String(code).toUpperCase(), name, categoryId },
-      include: { category: { select: { name: true } } },
-    })
-  );
+  const data = withUpperCode(pick(req.body, SETTING_TYPE_FIELDS)) as { code: string; name: string };
+  const item = await tenantQuery(companyId, (tx) => tx.settingType.create({ data: { ...data, companyId } }));
   res.status(201).json({ success: true, data: item });
 });
 
-mastersRouter.patch('/subcategories/:id', requirePermission('masters:edit'), async (req: Request, res: Response) => {
+mastersRouter.patch('/setting-types/:id', requirePermission('masters:edit'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
-  await assertOwnedByCompany('subCategory', req.params.id, companyId, 'Sub-category');
-  await assertOwnedIfPresent('productCategory', req.body.categoryId, companyId, 'Category');
+  await assertOwnedByCompany('settingType', req.params.id, companyId, 'Setting type');
   const item = await tenantQuery(companyId, (tx) =>
-    tx.subCategory.update({ where: { id: req.params.id }, data: withUpperCode(pick(req.body, SUBCATEGORY_FIELDS)) })
+    tx.settingType.update({ where: { id: req.params.id }, data: withUpperCode(pick(req.body, SETTING_TYPE_FIELDS)) })
   );
   res.json({ success: true, data: item });
 });
 
-mastersRouter.delete('/subcategories/:id', requirePermission('masters:delete'), async (req: Request, res: Response) => {
+mastersRouter.delete('/setting-types/:id', requirePermission('masters:delete'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
-  await assertOwnedByCompany('subCategory', req.params.id, companyId, 'Sub-category');
-  await deleteUnusedMaster(companyId, 'This sub-category', (tx) => tx.subCategory.delete({ where: { id: req.params.id } }));
-  res.json({ success: true, message: 'Sub-category deleted' });
+  await assertOwnedByCompany('settingType', req.params.id, companyId, 'Setting type');
+  await deleteUnusedMaster(companyId, 'This setting type', (tx) => tx.settingType.delete({ where: { id: req.params.id } }));
+  res.json({ success: true, message: 'Setting type deleted' });
 });
 
 // ─── Collections ──────────────────────────────────────────────────────────────

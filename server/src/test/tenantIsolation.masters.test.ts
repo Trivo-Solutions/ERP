@@ -284,8 +284,9 @@ describe('Phase 1: company-owned masters — Vasavi vs Shree Silver Palace', () 
     it('HTTP: sub-category under Vasavi\'s category → 404', async () => {
       expect((await shr.post('/masters/subcategories', { code: 'FORGE', name: 'x', categoryId: A.cat })).status).toBe(404);
     });
-    it('HTTP: moving Shree\'s own sub-category under Vasavi\'s category → 404', async () => {
-      expect((await shr.patch(`/masters/subcategories/${B.sub}`, { categoryId: A.cat })).status).toBe(404);
+    it('HTTP: linking Shree\'s sub-category to Vasavi\'s category, or Vasavi\'s sub-category to Shree\'s category → 404', async () => {
+      expect((await shr.post(`/masters/subcategories/${B.sub}/categories`, { categoryId: A.cat })).status).toBe(404);
+      expect((await shr.post(`/masters/subcategories/${A.sub}/categories`, { categoryId: B.cat })).status).toBe(404);
     });
     it('HTTP: stone grade under Vasavi\'s stone type → 404', async () => {
       expect((await shr.post('/masters/stone-grades', { stoneTypeId: A.sty, shape: 'x' })).status).toBe(404);

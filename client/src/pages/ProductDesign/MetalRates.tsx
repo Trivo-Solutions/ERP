@@ -24,6 +24,8 @@ export function MetalRates() {
   // Edit mode: one switch opens every purity. karat -> typed value (pre-filled with the stored rate).
   const [editing, setEditing] = useState(false);
   const [edits, setEdits] = useState<Record<string, string>>({});
+  // OG = Old Gold buying rate, same shape as `edits` (karat -> typed value).
+  const [ogEdits, setOgEdits] = useState<Record<string, string>>({});
 
   const { data: rows, isLoading } = useQuery({
     queryKey: ['metal-rate-sheet', date],
@@ -33,29 +35,51 @@ export function MetalRates() {
   const sheet: any[] = (rows as any)?.data ?? rows ?? [];
 
   // A different date (or a fresh save) starts from what is stored — drop any half-typed edits.
-  useEffect(() => { setEdits({}); setEditing(false); }, [date]);
+  useEffect(() => { setEdits({}); setOgEdits({}); setEditing(false); }, [date]);
 
   const startEdit = () => {
     setEdits(Object.fromEntries(sheet.map((r) => [r.karat, r.ratePerGram != null ? String(Number(r.ratePerGram)) : ''])));
+    setOgEdits(Object.fromEntries(sheet.map((r) => [r.karat, r.ogRatePerGram != null ? String(Number(r.ogRatePerGram)) : ''])));
     setEditing(true);
   };
-  const cancelEdit = () => { setEdits({}); setEditing(false); };
+  const cancelEdit = () => { setEdits({}); setOgEdits({}); setEditing(false); };
 
-  const dirty = Object.entries(edits).filter(([karat, v]) => {
-    const cur = sheet.find((r) => r.karat === karat)?.ratePerGram;
-    return v !== '' && Number(v) !== (cur == null ? NaN : Number(cur));
+  // A row is dirty when its rate or its OG rate differs from what is stored. A row's rate is always sent
+  // (the server needs it); a blank OG field means "no OG rate" and is sent as null so it can be cleared.
+  const dirty = sheet.filter((r) => {
+    const v = edits[r.karat] ?? '';
+    const og = ogEdits[r.karat] ?? '';
+    const rateChanged = v !== '' && Number(v) !== (r.ratePerGram == null ? NaN : Number(r.ratePerGram));
+    const ogChanged = (og === '' ? null : Number(og)) !== (r.ogRatePerGram == null ? null : Number(r.ogRatePerGram));
+    return rateChanged || ogChanged;
+  }).map((r) => r.karat as string);
+  // Rate must be positive when given, and a row needs a rate (typed or already stored) before an OG rate can ride on it.
+  const invalid = dirty.some((karat) => {
+    const r = sheet.find((x) => x.karat === karat);
+    const v = edits[karat] ?? '';
+    const og = ogEdits[karat] ?? '';
+    const effectiveRate = v !== '' ? Number(v) : (r?.ratePerGram != null ? Number(r.ratePerGram) : NaN);
+    return !(effectiveRate > 0) || (og !== '' && !(Number(og) > 0));
   });
-  const invalid = dirty.some(([, v]) => !(Number(v) > 0));
 
   const mutation = useMutation({
     mutationFn: () => apiPost('/designs/rates/batch', {
       date, source,
-      rates: dirty.map(([karat, v]) => ({ karat, ratePerGram: Number(v) })),
+      rates: dirty.map((karat) => {
+        const r = sheet.find((x) => x.karat === karat);
+        const v = edits[karat] ?? '';
+        const og = ogEdits[karat] ?? '';
+        return {
+          karat,
+          ratePerGram: v !== '' ? Number(v) : Number(r.ratePerGram),
+          ogRatePerGram: og === '' ? null : Number(og),
+        };
+      }),
     }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['metal-rate-sheet'] });
       qc.invalidateQueries({ queryKey: ['metal-rates'] });
-      setEdits({}); setEditing(false);
+      setEdits({}); setOgEdits({}); setEditing(false);
       enqueueSnackbar('Rates saved', { variant: 'success' });
     },
     onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed to save rates', { variant: 'error' }),
@@ -102,6 +126,7 @@ export function MetalRates() {
               <TableRow>
                 <TableCell>Purity</TableCell>
                 <TableCell align="right">Rate / Gram (₹)</TableCell>
+                <TableCell align="right">OG Rate / Gram (₹)</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -130,11 +155,27 @@ export function MetalRates() {
                         </Typography>
                       )}
                     </TableCell>
+                    <TableCell align="right" sx={{ fontFamily: 'monospace' }}>
+                      {editing ? (
+                        <TextField size="small" type="number" value={ogEdits[r.karat] ?? ''}
+                          placeholder={r.previousOgRate != null ? String(Number(r.previousOgRate)) : ''}
+                          onChange={(e) => setOgEdits((p) => ({ ...p, [r.karat]: e.target.value }))}
+                          onWheel={(e) => (e.target as HTMLInputElement).blur()}
+                          onKeyDown={(e) => { if (e.key === 'Escape') cancelEdit(); }}
+                          inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right', width: 120 } }} />
+                      ) : r.ogRatePerGram != null ? (
+                        <Typography component="span" fontWeight={700} color="#B26A00" fontSize={15} fontFamily="monospace">{fmt(r.ogRatePerGram)}</Typography>
+                      ) : (
+                        <Typography component="span" color="text.disabled" fontFamily="monospace">
+                          — {r.previousOgRate != null && `(last ${fmt(r.previousOgRate)})`}
+                        </Typography>
+                      )}
+                    </TableCell>
                   </TableRow>
                 );
               })}
               {!isLoading && sheet.length === 0 && (
-                <TableRow><TableCell colSpan={2} align="center">No purities configured — add them under Masters → Karats.</TableCell></TableRow>
+                <TableRow><TableCell colSpan={3} align="center">No purities configured — add them under Masters → Karats.</TableCell></TableRow>
               )}
             </TableBody>
           </Table>

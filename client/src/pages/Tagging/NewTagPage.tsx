@@ -367,10 +367,17 @@ export function NewTagPage() {
 
   const { data: subcats } = useQuery({
     queryKey: ['master-subcategories', selectedCatId],
-    queryFn: () => apiGet<any>('/masters/subcategories', { categoryId: selectedCatId || undefined }),
+    queryFn: () => apiGet<any>('/masters/subcategories', { categoryId: selectedCatId || undefined, active: 'true' }),
     enabled: !!selectedCatId,
   });
-  const subCatList: any[] = (subcats as any)?.data ?? (subcats as any) ?? [];
+  const subCatListRaw: any[] = (subcats as any)?.data ?? (subcats as any) ?? [];
+  // The server returns only sub-categories linked to the chosen category (and active). A tag being edited
+  // keeps the one it already carries even if that master was deactivated since — add it back so the
+  // field never shows blank — but only while the tag's category is unchanged.
+  const subCatList: any[] = (isEditMode && editTag?.subCategory && editTag.categoryId === selectedCatId
+    && !subCatListRaw.some((s: any) => s.id === editTag.subCategoryId))
+    ? [...subCatListRaw, { id: editTag.subCategoryId, name: editTag.subCategory.name }]
+    : subCatListRaw;
 
   const { data: collections } = useQuery({ queryKey: ['master-collections'], queryFn: () => apiGet<any>('/masters/collections') });
   const collectionList: any[] = (collections as any)?.data ?? (collections as any) ?? [];
@@ -383,6 +390,14 @@ export function NewTagPage() {
     enabled: !!selectedCatId,
   });
   const sizeList: any[] = (sizes as any)?.data ?? (sizes as any) ?? [];
+
+  // Setting Type master — active rows only. A tag already carrying a since-deactivated/renamed value
+  // keeps it: it is added back to the options below so the edit form never shows it as blank.
+  const { data: settingTypes } = useQuery({
+    queryKey: ['master-setting-types'],
+    queryFn: () => apiGet<any>('/masters/setting-types', { active: 'true' }),
+  });
+  const settingTypeList: any[] = (settingTypes as any)?.data ?? (settingTypes as any) ?? [];
 
   // No standalone "Item Name" field in the UI (matches the counter-inward form this page is
   // modeled on) — the tag's required `name` is derived from Classification instead, falling
@@ -731,10 +746,10 @@ export function NewTagPage() {
   );
 
   // ── MC & VA tab keyboard navigation ────────────────────────────────────────
-  // Just 4 standalone fields now (no repeating rows) — Enter moves to the next one in order
+  // Just 4 standalone fields (+ Notes) now (no repeating rows) — Enter moves to the next one in order
   // instead of submitting the form; Tab's default browser behavior already does the same via DOM
   // order, so only Enter needs help here.
-  const MC_VA_FIELDS = ['costMcRate', 'costVaPercent', 'saleMcRate', 'saleVaPercent'] as const;
+  const MC_VA_FIELDS = ['costVaPercent', 'costMcRate', 'saleVaPercent', 'saleMcRate', 'notes'] as const;
   const mcVaRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const registerMcVaRef = (name: string) => (el: HTMLInputElement | null) => { mcVaRefs.current[name] = el; };
   const handleMcVaKeyDown = (name: (typeof MC_VA_FIELDS)[number]) => (e: React.KeyboardEvent) => {
@@ -762,7 +777,8 @@ export function NewTagPage() {
         notes:        data.notes        || undefined,
         stockTypeId:  data.stockTypeId,
         categoryId:   data.categoryId   || undefined,
-        subCategoryId: data.subCategoryId || undefined,
+        // null (edit only) clears a previously saved value; undefined leaves it out on create
+        subCategoryId: data.subCategoryId || (isEditMode ? null : undefined),
         collectionId: data.collectionId  || undefined,
         // null (edit only) clears a previously saved value; undefined leaves it out on create
         sizeId:       data.sizeId || (isEditMode ? null : undefined),
@@ -1119,11 +1135,16 @@ export function NewTagPage() {
                         </Grid>
                         <Grid item xs={6} sm={4}>
                           <Controller name="settingType" control={control}
-                            render={({ field }) => <TextField {...field} fullWidth label="Setting Type" />} />
-                        </Grid>
-                        <Grid item xs={12} sm={4}>
-                          <Controller name="notes" control={control}
-                            render={({ field }) => <TextField {...field} fullWidth label="Notes" />} />
+                            render={({ field }) => (
+                              <TextField {...field} select fullWidth label="Setting Type"
+                                SelectProps={{ native: true }} InputLabelProps={{ shrink: true }}>
+                                <option value="">None</option>
+                                {field.value && !settingTypeList.some((t: any) => t.name === field.value) && (
+                                  <option value={field.value}>{field.value}</option>
+                                )}
+                                {settingTypeList.map((t: any) => <option key={t.id} value={t.name}>{t.name}</option>)}
+                              </TextField>
+                            )} />
                         </Grid>
 
                         <Grid item xs={12}>
@@ -1140,7 +1161,11 @@ export function NewTagPage() {
                         </Grid>
                       </Grid>
 
-                      <Stack direction="row" justifyContent="flex-end" sx={{ mt: 3 }}>
+                      <Stack direction="row" spacing={2} alignItems="center" justifyContent="flex-end" sx={{ mt: 3 }}>
+                        <FormControlLabel
+                          control={<Checkbox checked={directPrint} onChange={(e) => setDirectPrint(e.target.checked)} />}
+                          label="Print & continue"
+                          title="Print the tag automatically after creating it, then jump straight back to Identity for the next one" />
                         <Button variant="contained" size="large" onClick={() => setActiveTab(1)}>
                           Next: Add Materials →
                         </Button>
@@ -1360,17 +1385,17 @@ export function NewTagPage() {
                           </Typography>
                           <Grid container spacing={1.5}>
                             <Grid item xs={6}>
-                              <Controller name="costMcRate" control={control} render={({ field: f }) => (
-                                <TextField {...f} fullWidth size="small" type="number" label="Making Charge (₹/gm)"
-                                  inputProps={{ step: 0.01, min: 0 }}
-                                  inputRef={registerMcVaRef('costMcRate')} onKeyDown={handleMcVaKeyDown('costMcRate')} />
-                              )} />
-                            </Grid>
-                            <Grid item xs={6}>
                               <Controller name="costVaPercent" control={control} render={({ field: f }) => (
                                 <TextField {...f} fullWidth size="small" type="number" label="Value Addition (%)"
                                   inputProps={{ step: 0.1, min: 0 }}
                                   inputRef={registerMcVaRef('costVaPercent')} onKeyDown={handleMcVaKeyDown('costVaPercent')} />
+                              )} />
+                            </Grid>
+                            <Grid item xs={6}>
+                              <Controller name="costMcRate" control={control} render={({ field: f }) => (
+                                <TextField {...f} fullWidth size="small" type="number" label="Making Charge (₹/gm)"
+                                  inputProps={{ step: 0.01, min: 0 }}
+                                  inputRef={registerMcVaRef('costMcRate')} onKeyDown={handleMcVaKeyDown('costMcRate')} />
                               )} />
                             </Grid>
                           </Grid>
@@ -1385,17 +1410,17 @@ export function NewTagPage() {
                           </Typography>
                           <Grid container spacing={1.5}>
                             <Grid item xs={6}>
-                              <Controller name="saleMcRate" control={control} render={({ field: f }) => (
-                                <TextField {...f} fullWidth size="small" type="number" label="Making Charge (₹/gm)"
-                                  inputProps={{ step: 0.01, min: 0 }}
-                                  inputRef={registerMcVaRef('saleMcRate')} onKeyDown={handleMcVaKeyDown('saleMcRate')} />
-                              )} />
-                            </Grid>
-                            <Grid item xs={6}>
                               <Controller name="saleVaPercent" control={control} render={({ field: f }) => (
                                 <TextField {...f} fullWidth size="small" type="number" label="Value Addition (%)"
                                   inputProps={{ step: 0.1, min: 0 }}
                                   inputRef={registerMcVaRef('saleVaPercent')} onKeyDown={handleMcVaKeyDown('saleVaPercent')} />
+                              )} />
+                            </Grid>
+                            <Grid item xs={6}>
+                              <Controller name="saleMcRate" control={control} render={({ field: f }) => (
+                                <TextField {...f} fullWidth size="small" type="number" label="Making Charge (₹/gm)"
+                                  inputProps={{ step: 0.01, min: 0 }}
+                                  inputRef={registerMcVaRef('saleMcRate')} onKeyDown={handleMcVaKeyDown('saleMcRate')} />
                               )} />
                             </Grid>
                           </Grid>
@@ -1404,6 +1429,11 @@ export function NewTagPage() {
                           </Typography>
                         </Grid>
                       </Grid>
+
+                      <Controller name="notes" control={control} render={({ field: f }) => (
+                        <TextField {...f} fullWidth size="small" label="Notes" sx={{ mt: 2 }}
+                          inputRef={registerMcVaRef('notes')} />
+                      )} />
 
                       <Box sx={{ mt: 3, p: 1.5, bgcolor: 'action.hover', borderRadius: 1 }}>
                         <Grid container spacing={2}>
@@ -1433,10 +1463,6 @@ export function NewTagPage() {
                       <Stack direction="row" spacing={1.5} sx={{ mt: 3 }} alignItems="center" justifyContent="space-between">
                         <Button variant="text" onClick={() => setActiveTab(1)}>← Back</Button>
                         <Stack direction="row" spacing={2} alignItems="center">
-                          <FormControlLabel
-                            control={<Checkbox checked={directPrint} onChange={(e) => setDirectPrint(e.target.checked)} />}
-                            label="Print & continue"
-                            title="Print the tag automatically after creating it, then jump straight back to Identity for the next one" />
                           <Button type="submit" variant="contained" size="large"
                             startIcon={<AddCircleOutline />} disabled={mutation.isPending || tagLocked}>
                             {mutation.isPending ? (isEditMode ? 'Saving...' : 'Creating...') : (isEditMode ? 'Save Changes' : 'Create Tag')}

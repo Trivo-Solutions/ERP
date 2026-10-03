@@ -323,11 +323,25 @@ function CategoriesTab() {
   });
   const categories: any[] = (catData as any)?.data ?? (catData as any) ?? [];
 
+  // A sub-category is ONE shared master linked to many categories, so Masters loads them all (each with
+  // the categories it is linked to) and splits them here: "linked to the selected category" for the grid,
+  // "not linked yet" for the Link-existing picker. (New Tag / GRN ask the server per category instead.)
   const { data: subData, isLoading: subLoading } = useQuery({
-    queryKey: ['master-subcategories', selectedCat?.id ?? ''],
-    queryFn: () => apiGet<any>('/masters/subcategories', { categoryId: selectedCat?.id || undefined }),
+    queryKey: ['master-subcategories', 'all'],
+    queryFn: () => apiGet<any>('/masters/subcategories'),
   });
-  const subCategories: any[] = (subData as any)?.data ?? (subData as any) ?? [];
+  const allSubs: any[] = (subData as any)?.data ?? (subData as any) ?? [];
+  const isLinkedHere = (sc: any) => !!selectedCat && (sc.categories ?? []).some((c: any) => c.id === selectedCat.id);
+  const subCategories: any[] = selectedCat ? allSubs.filter(isLinkedHere) : allSubs;
+  const linkableSubs: any[] = selectedCat ? allSubs.filter((sc) => !isLinkedHere(sc)) : [];
+  const [linkPick, setLinkPick] = useState('');
+
+  // Quick search above each grid (code or name); the column filters below still work on top of it.
+  const [catSearch, setCatSearch] = useState('');
+  const [subSearch, setSubSearch] = useState('');
+  const matches = (r: any, q: string) => !q.trim() || `${r.code} ${r.name}`.toLowerCase().includes(q.trim().toLowerCase());
+  const shownCategories = categories.filter((r) => matches(r, catSearch));
+  const shownSubCategories = subCategories.filter((r) => matches(r, subSearch));
 
   const catDefaults = { code: '', name: '' };
   const { control: catControl, handleSubmit: handleCatSubmit, reset: resetCat } = useForm({ defaultValues: catDefaults });
@@ -343,17 +357,50 @@ function CategoriesTab() {
 
   const subDefaults = { code: '', name: '' };
   const { control: subControl, handleSubmit: handleSubSubmit, reset: resetSub } = useForm({ defaultValues: subDefaults });
+  const refreshSubs = () => {
+    qc.invalidateQueries({ queryKey: ['master-subcategories'] });
+    qc.invalidateQueries({ queryKey: ['master-categories'] });
+  };
+  const apiError = (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' });
+
+  // Add = create a NEW sub-category linked to the selected category. Update = rename / recode the ONE
+  // shared master (not a category-specific copy).
   const subMutation = useMutation({
     mutationFn: (data: any) => (selectedSub
-      ? apiPatch(`/masters/subcategories/${selectedSub.id}`, data)
+      ? apiPatch(`/masters/subcategories/${selectedSub.id}`, { code: data.code, name: data.name })
       : apiPost('/masters/subcategories', { ...data, categoryId: selectedCat?.id })),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['master-subcategories'] });
-      enqueueSnackbar(selectedSub ? 'Sub-category updated' : 'Sub-category created', { variant: 'success' });
+      refreshSubs();
+      enqueueSnackbar(selectedSub ? 'Sub-category updated' : 'Sub-category created and linked', { variant: 'success' });
       setSelectedSub(null); resetSub(subDefaults);
     },
-    onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' }),
+    onError: apiError,
   });
+
+  // Links an EXISTING sub-category to the selected category — never creates a row.
+  const linkMutation = useMutation({
+    mutationFn: (subId: string) => apiPost(`/masters/subcategories/${subId}/categories`, { categoryId: selectedCat?.id }),
+    onSuccess: () => { refreshSubs(); setLinkPick(''); enqueueSnackbar('Linked to ' + selectedCat?.name, { variant: 'success' }); },
+    onError: apiError,
+  });
+  const unlinkMutation = useMutation({
+    mutationFn: (subId: string) => apiDelete(`/masters/subcategories/${subId}/categories/${selectedCat?.id}`),
+    onSuccess: () => { refreshSubs(); setSelectedSub(null); resetSub(subDefaults); enqueueSnackbar('Unlinked from ' + selectedCat?.name, { variant: 'success' }); },
+    onError: apiError,
+  });
+
+  const norm = (v: string) => v.trim().replace(/\s+/g, ' ').toLowerCase();
+  // Adding something that already exists must LINK it, not duplicate it. The server refuses a duplicate
+  // anyway (409); this just turns that into the helpful path before a request is made.
+  const onAddSub = (d: { code: string; name: string }) => {
+    const dup = allSubs.find((sc) => norm(sc.name) === norm(d.name) || sc.code === d.code.trim().toUpperCase());
+    if (!dup) { subMutation.mutate(d); return; }
+    if (isLinkedHere(dup)) {
+      enqueueSnackbar(`"${dup.name}" is already linked to ${selectedCat?.name}`, { variant: 'info' });
+    } else if (window.confirm(`"${dup.name}" (${dup.code}) already exists. Link the existing sub-category to ${selectedCat?.name} instead of creating another?`)) {
+      linkMutation.mutate(dup.id);
+    }
+  };
 
   const toggleActive = (path: string, qk: string, id: string, val: boolean) => {
     if (!canEdit) return;
@@ -383,14 +430,16 @@ function CategoriesTab() {
             <Controller name="name" control={catControl} rules={{ required: true }}
               render={({ field, fieldState }) => <TextField {...field} fullWidth size="small" label="Category Name *" error={!!fieldState.error} />} />
           </FormPanel>
+          <TextField size="small" fullWidth placeholder="Search categories by code or name…" value={catSearch}
+            onChange={(e) => setCatSearch(e.target.value)} />
           <FilterGrid
             tableId="masters-categories"
             columns={[
               { key: 'code', label: 'Code', render: (r: any) => <Typography fontFamily="monospace" fontWeight={700} color="#44C47A" fontSize={12}>{r.code}</Typography> },
               { key: 'name', label: 'Name' },
-              { key: 'subCount', label: 'Sub-cats', filterValue: (r: any) => String(r._count?.subCategories ?? 0), render: (r: any) => <Chip label={r._count?.subCategories ?? 0} size="small" /> },
+              { key: 'subCount', label: 'Sub-cats', filterValue: (r: any) => String(r._count?.subCategoryLinks ?? 0), render: (r: any) => <Chip label={r._count?.subCategoryLinks ?? 0} size="small" /> },
             ]}
-            rows={categories} isLoading={catLoading} getRowId={(r: any) => r.id}
+            rows={shownCategories} isLoading={catLoading} getRowId={(r: any) => r.id}
             selectedId={selectedCat?.id} emptyLabel="No categories yet"
             onRowClick={(row: any) => { setSelectedCat(row); setSelectedSub(null); resetCat({ code: row.code, name: row.name }); }}
           />
@@ -402,27 +451,62 @@ function CategoriesTab() {
           <Typography variant="subtitle2" fontWeight={700}>
             Sub-categories{selectedCat ? ` — ${selectedCat.name}` : ' (select a category)'}
           </Typography>
+          {selectedCat && canEdit && !selectedSub && (
+            <Card variant="outlined" sx={{ p: 2 }}>
+              <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1 }}>Link existing sub-category to {selectedCat.name}</Typography>
+              <Stack direction="row" spacing={1}>
+                <TextField select fullWidth size="small" label="Existing sub-category" value={linkPick}
+                  onChange={(e) => setLinkPick(e.target.value)} SelectProps={{ native: true }} InputLabelProps={{ shrink: true }}
+                  helperText={linkableSubs.length ? undefined : 'Every existing sub-category is already linked here'}>
+                  <option value="">Select…</option>
+                  {linkableSubs.map((sc) => <option key={sc.id} value={sc.id}>{sc.name} ({sc.code})</option>)}
+                </TextField>
+                <Button variant="outlined" size="small" disabled={!linkPick || linkMutation.isPending}
+                  onClick={() => linkMutation.mutate(linkPick)} sx={{ whiteSpace: 'nowrap' }}>Link</Button>
+              </Stack>
+            </Card>
+          )}
           <FormPanel title={selectedSub ? `Edit — ${selectedSub.code}` : 'New Sub-category'}
             isEdit={!!selectedSub} saving={subMutation.isPending} disabled={!selectedCat}
-            onAdd={handleSubSubmit((d) => subMutation.mutate(d))}
+            onAdd={handleSubSubmit((d) => onAddSub(d))}
             onUpdate={handleSubSubmit((d) => subMutation.mutate(d))}
             onClear={() => { setSelectedSub(null); resetSub(subDefaults); }}
-            onDelete={selectedSub ? () => deleteMaster(`/masters/subcategories/${selectedSub.id}`, 'sub-category', () => {
-              qc.invalidateQueries({ queryKey: ['master-subcategories'] });
-              qc.invalidateQueries({ queryKey: ['master-categories'] });
+            onDelete={selectedSub ? () => deleteMaster(`/masters/subcategories/${selectedSub.id}`, 'sub-category (from every category)', () => {
+              refreshSubs();
               setSelectedSub(null); resetSub(subDefaults);
             }) : undefined}>
             <Controller name="code" control={subControl} rules={{ required: true }}
               render={({ field, fieldState }) => <TextField {...field} fullWidth size="small" label="Sub-category Code *" disabled={!selectedCat} error={!!fieldState.error} />} />
             <Controller name="name" control={subControl} rules={{ required: true }}
               render={({ field, fieldState }) => <TextField {...field} fullWidth size="small" label="Sub-category Name *" disabled={!selectedCat} error={!!fieldState.error} />} />
+            {selectedSub && (
+              <Typography variant="caption" color="warning.main" sx={{ gridColumn: '1 / -1' }}>
+                Shared master — renaming it changes it everywhere it is used
+                {(selectedSub.categories?.length ?? 0) > 0 && <> ({selectedSub.categories.map((c: any) => c.name).join(', ')})</>}.
+              </Typography>
+            )}
           </FormPanel>
+          <TextField size="small" fullWidth placeholder="Search sub-categories by code or name…" value={subSearch}
+            onChange={(e) => setSubSearch(e.target.value)} />
           <FilterGrid
             tableId="masters-subcategories"
             columns={[
               { key: 'code', label: 'Code', render: (r: any) => <Typography fontFamily="monospace" fontWeight={700} color="#44C47A" fontSize={12}>{r.code}</Typography> },
               { key: 'name', label: 'Name' },
-              { key: 'category', label: 'Category', filterValue: (r: any) => r.category?.name ?? '', render: (r: any) => r.category?.name },
+              {
+                key: 'categories', label: 'Linked categories',
+                filterValue: (r: any) => (r.categories ?? []).map((c: any) => c.name).join(', '),
+                render: (r: any) => (
+                  <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                    {(r.categories ?? []).length === 0
+                      ? <Typography variant="caption" color="text.disabled">none</Typography>
+                      : (r.categories ?? []).map((c: any) => (
+                        <Chip key={c.id} label={c.name} size="small" color={c.id === selectedCat?.id ? 'primary' : 'default'}
+                          sx={c.id === selectedCat?.id ? undefined : { bgcolor: 'action.selected', color: 'text.primary' }} />
+                      ))}
+                  </Stack>
+                ),
+              },
               {
                 key: 'isActive', label: 'Status',
                 filterValue: (r: any) => (r.isActive ? 'Active' : 'Inactive'),
@@ -432,8 +516,19 @@ function CategoriesTab() {
                     onClick={canEdit ? (e) => { e.stopPropagation(); toggleActive('/masters/subcategories', 'master-subcategories', r.id, r.isActive); } : undefined} />
                 ),
               },
+              {
+                // always present (DataTable fixes its column set at mount); the button only renders with a category selected
+                key: 'unlink', label: 'Action',
+                render: (r: any) => (selectedCat && canEdit ? (
+                  <Button size="small" color="warning" disabled={unlinkMutation.isPending}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (window.confirm(`Unlink "${r.name}" from ${selectedCat.name}? It stays in the other categories it is linked to.`)) unlinkMutation.mutate(r.id);
+                    }}>Unlink</Button>
+                ) : null),
+              },
             ]}
-            rows={subCategories} isLoading={subLoading} getRowId={(r: any) => r.id}
+            rows={shownSubCategories} isLoading={subLoading} getRowId={(r: any) => r.id}
             selectedId={selectedSub?.id} emptyLabel={selectedCat ? 'No sub-categories' : 'Select a category to view'}
             onRowClick={(row: any) => { setSelectedSub(row); resetSub({ code: row.code, name: row.name }); }}
           />
@@ -1380,6 +1475,7 @@ const SECTIONS: Array<{ key: string; label: string; icon: React.ReactNode }> = [
   { key: 'clients', label: 'Clients', icon: <Business fontSize="small" /> },
   { key: 'collections', label: 'Collections', icon: <CollectionsIcon fontSize="small" /> },
   { key: 'sizes', label: 'Sizes', icon: <Category fontSize="small" /> },
+  { key: 'settingTypes', label: 'Setting Types', icon: <Diamond fontSize="small" /> },
   { key: 'karats', label: 'Karats', icon: <Diamond fontSize="small" /> },
   { key: 'materialCodes', label: 'Material Codes', icon: <Diamond fontSize="small" /> },
   { key: 'stoneTypes', label: 'Stone Types', icon: <AutoAwesome fontSize="small" /> },
@@ -1460,6 +1556,20 @@ export function MastersPage() {
           )}
 
           {section === 'sizes' && <SizesTab />}
+
+          {section === 'settingTypes' && (
+            <GenericMasterSection title="Setting Type" queryKey="master-setting-types-manage" apiPath="/masters/setting-types"
+              invalidateKeys={['master-setting-types']}
+              description="How stones are set (Prong, Bezel, Pave, Channel...). Offered in the Setting Type dropdown on New Tag. Click a Status chip to hide one from the dropdown — tags already carrying it keep it."
+              columns={[
+                { key: 'code', label: 'Code', render: (r: any) => <Typography fontFamily="monospace" fontWeight={700} color="#44C47A" fontSize={12}>{r.code}</Typography> },
+                { key: 'name', label: 'Setting Type' },
+              ]}
+              fields={[
+                { name: 'code', label: 'Code (e.g. PRG)', required: true },
+                { name: 'name', label: 'Name (e.g. Prong)', required: true },
+              ]} />
+          )}
 
           {section === 'karats' && (
             <GenericMasterSection title="Karat" queryKey="master-karats-manage" apiPath="/masters/karats"

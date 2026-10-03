@@ -18,7 +18,7 @@ const ALL_STEPS: ProvisionStep[] = ['company', 'roles', 'branch', 'accounts', 's
 
 // Tables a freshly provisioned company legitimately has rows in — everything else must be EMPTY.
 const STARTER_OR_SETUP_TABLES = new Set([
-  'roles', 'branches', 'accounts', 'karat_master', 'design_categories', 'product_categories', 'sub_categories',
+  'roles', 'branches', 'accounts', 'karat_master', 'design_categories', 'product_categories', 'sub_categories', 'category_sub_categories',
   'collections', 'material_codes', 'stock_types', 'stone_types', 'stone_grades', 'tag_templates',
   'estimate_templates', 'system_configs', 'company_users', 'company_invitations',
 ]);
@@ -88,9 +88,9 @@ describe('Phase 3: company provisioning & Starter Package', () => {
 
     it('sub-categories and stone grades point at THIS company\'s own parents', async () => {
       const r = await provision();
-      const subs = await prisma.subCategory.findMany({ where: { companyId: r.company.id }, include: { category: true } });
-      expect(subs.length).toBeGreaterThan(0);
-      for (const s of subs) expect(s.category.companyId).toBe(r.company.id);
+      const links = await prisma.categorySubCategory.findMany({ where: { companyId: r.company.id }, include: { category: true, subCategory: true } });
+      expect(links.length).toBe(STARTER_PACKAGE_V1.masters.subCategories.length);
+      for (const l of links) { expect(l.category.companyId).toBe(r.company.id); expect(l.subCategory.companyId).toBe(r.company.id); }
       const grades = await prisma.stoneGrade.findMany({ where: { companyId: r.company.id }, include: { stoneType: true } });
       for (const g of grades) expect(g.stoneType.companyId).toBe(r.company.id);
     });
@@ -288,7 +288,7 @@ describe('Phase 3: company provisioning & Starter Package', () => {
         tpl: await prisma.tagTemplate.findFirstOrThrow({ where: { companyId: a.company.id }, select: { name: true, widthMm: true, layout: true } }),
         cfg: (await prisma.systemConfig.findUniqueOrThrow({ where: { companyId_key: { companyId: a.company.id, key: 'DEFAULT_GOLD_MARGIN' } } })).value,
       };
-      await prisma.subCategory.deleteMany({ where: { companyId: b.company.id, categoryId: (await prisma.productCategory.findUniqueOrThrow({ where: { companyId_code: { companyId: b.company.id, code: 'RNG' } } })).id } });
+      await prisma.categorySubCategory.deleteMany({ where: { companyId: b.company.id, categoryId: (await prisma.productCategory.findUniqueOrThrow({ where: { companyId_code: { companyId: b.company.id, code: 'RNG' } } })).id } });
       await prisma.productCategory.delete({ where: { companyId_code: { companyId: b.company.id, code: 'RNG' } } });
       await prisma.tagTemplate.updateMany({ where: { companyId: b.company.id }, data: { name: 'Shree Tag', widthMm: 99 } });
       await prisma.systemConfig.update({ where: { companyId_key: { companyId: b.company.id, key: 'DEFAULT_GOLD_MARGIN' } }, data: { value: '99' } });

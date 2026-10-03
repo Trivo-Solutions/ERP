@@ -25,6 +25,7 @@ describe('Phase 5: composite foreign keys refuse cross-company references at the
     const id = r.company.id;
     into.company = id; into.branch = r.branch.id; into.userId = (r.admin as any).userId;
     into.category = (await prisma.productCategory.findFirstOrThrow({ where: { companyId: id, code: 'RNG' } })).id;
+    into.sub = (await prisma.subCategory.findFirstOrThrow({ where: { companyId: id } })).id;
     into.stockType = (await prisma.stockType.findFirstOrThrow({ where: { companyId: id, code: 'R' } })).id;
     into.stoneType = (await prisma.stoneType.findFirstOrThrow({ where: { companyId: id, code: 'DIA' } })).id;
     into.stoneGrade = (await prisma.stoneGrade.findFirstOrThrow({ where: { companyId: id } })).id;
@@ -60,7 +61,8 @@ describe('Phase 5: composite foreign keys refuse cross-company references at the
     ['invitation -> another company\'s role', () => prisma.companyInvitation.create({ data: { companyId: B.company, email: `${u('i')}${DOMAIN}`, roleId: A.role, tokenHash: u('h'), expiresAt: new Date(Date.now() + 1e6) } })],
     ['making charge -> another company\'s category', () => prisma.makingCharge.create({ data: { companyId: B.company, categoryId: A.category } })],
     ['price master -> another company\'s stone grade', () => prisma.priceMaster.create({ data: { companyId: B.company, itemType: 'DIAMOND', pricePerCarat: 1, stoneGradeId: A.stoneGrade } })],
-    ['sub-category -> another company\'s category', () => prisma.subCategory.create({ data: { companyId: B.company, code: u('X'), name: 'x', categoryId: A.category } })],
+    ['sub-category link -> another company\'s category', () => prisma.categorySubCategory.create({ data: { companyId: B.company, categoryId: A.category, subCategoryId: B.sub } })],
+    ['sub-category link -> another company\'s sub-category', () => prisma.categorySubCategory.create({ data: { companyId: B.company, categoryId: B.category, subCategoryId: A.sub } })],
     ['stone grade -> another company\'s stone type', () => prisma.stoneGrade.create({ data: { companyId: B.company, stoneTypeId: A.stoneType } })],
     ['purchase order -> another company\'s supplier', () => prisma.purchaseOrder.create({ data: { companyId: B.company, poNumber: u('P'), supplierId: A.supplier, poType: 'METAL', orderDate: new Date(), subtotal: 1, totalAmount: 1 } })],
     ['UPDATE: re-point B\'s own tag at A\'s category', () => prisma.jewelryTag.update({ where: { id: B.tag }, data: { categoryId: A.category } })],
@@ -74,7 +76,8 @@ describe('Phase 5: composite foreign keys refuse cross-company references at the
   it('control: the SAME writes pointing at the company\'s OWN parents succeed (the keys do not block legitimate use)', async () => {
     await expect(prisma.jewelryTag.create({ data: { companyId: B.company, tagNumber: u('OK'), branchId: B.branch, name: 'ok', metalType: 'GOLD', grossWeight: 1, netWeight: 1, createdById: B.userId, categoryId: B.category, stockTypeId: B.stockType } })).resolves.toBeTruthy();
     await expect(prisma.salesInvoice.create({ data: { companyId: B.company, branchId: B.branch, invoiceNumber: u('OK'), clientId: B.client, invoiceDate: new Date(), invoiceType: 'RETAIL', subtotal: 1, totalAmount: 1, balanceDue: 1 } })).resolves.toBeTruthy();
-    await expect(prisma.subCategory.create({ data: { companyId: B.company, code: u('OK'), name: 'ok', categoryId: B.category } })).resolves.toBeTruthy();
+    const okSub = await prisma.subCategory.create({ data: { companyId: B.company, code: u('OK'), name: 'ok' } });
+    await expect(prisma.categorySubCategory.create({ data: { companyId: B.company, categoryId: B.category, subCategoryId: okSub.id } })).resolves.toBeTruthy();
     await expect(prisma.purchaseOrder.create({ data: { companyId: B.company, poNumber: u('OK'), supplierId: B.supplier, poType: 'METAL', orderDate: new Date(), subtotal: 1, totalAmount: 1 } })).resolves.toBeTruthy();
     await expect(prisma.jewelryTag.update({ where: { id: B.tag }, data: { categoryId: B.category } })).resolves.toBeTruthy();
   });

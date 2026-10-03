@@ -63,126 +63,128 @@ model Company {
   createdAt               DateTime  @default(now())
   updatedAt               DateTime  @updatedAt
 
-  branches              Branch[]
-  companyUsers          CompanyUser[]
-  roles                 Role[]
-  clients               Client[]
-  jewelryTags           JewelryTag[]
-  salesInvoices         SalesInvoice[]
-  invoiceItems          InvoiceItem[]
-  numberSequences       NumberSequence[]
-  oldGoldExchanges      OldGoldExchange[]
-  memoOuts              MemoOut[]
-  memoItems             MemoItem[]
-  stockAudits           StockAudit[]
-  branchTransfers       BranchTransfer[]
-  tagTemplates          TagTemplate[]
-  invoicePayments       InvoicePayment[]
-  salesReturns          SalesReturn[]
-  accounts              Account[]
-  journalEntries        JournalEntry[]
-  journalLines          JournalLine[]
-  costCenters           CostCenter[]
-  auditLogs             AuditLog[]
-  purchaseReturns       PurchaseReturn[]
-  supplierPayments      SupplierPayment[]
-  purchaseLots          PurchaseLot[]
-  poItemCategories      PoItemCategory[]
-  vendorComponentRates  VendorComponentRate[]
-  poItemComponents      PoItemComponent[]
-  grnItemComponentRates GrnItemComponentRate[]
-  purchaseReturnItems   PurchaseReturnItem[]
-  purchaseOrders        PurchaseOrder[]
-  poItems               PoItem[]
-  goodsReceiptNotes     GoodsReceiptNote[]
-  grnItems              GrnItem[]
-  purchaseRequisitions  PurchaseRequisition[]
-  prItems               PrItem[]
-  approvalHistory       ApprovalHistory[]
-  hallmarkingBatches    HallmarkingBatch[]
-  hallmarkingItems      HallmarkingItem[]
-  repairJobs            RepairJob[]
-  repairTransactions    RepairTransaction[]
-  designs               Design[]
-  designFiles           DesignFile[]
-  bomItems              BomItem[]
-  bomProcesses          BomProcess[]
-  costEstimates         CostEstimate[]
-  suppliers             Supplier[]
-  metalStocks           MetalStock[]
-  stoneLots             StoneLot[]
-  stoneLotSplits        StoneLotSplit[]
-  consumables           Consumable[]
-  consumableTxns        ConsumableTransaction[]
-  salesOrders           SalesOrder[]
-  orderItems            OrderItem[]
-  materialReservations  MaterialReservation[]
-  clientNotifications   ClientNotification[]
-  jobCards              JobCard[]
-  jobProcesses          JobProcess[]
-  wipTracking           WipTracking[]
-  qcCheckpoints         QcCheckpoint[]
-  artisans              Artisan[]
-  karigarLedgers        KarigarLedger[]
-  processTolerances     ProcessTolerance[]
-  subcontractorInvoices SubcontractorInvoice[]
-  hardwareDevices       HardwareDevice[]
-  metalRates            MetalRate[]
-  priceMasters          PriceMaster[]
-  jewelryTagMaterials   JewelryTagMaterial[]
-  makingCharges         MakingCharge[]
-  tagEstimates          TagEstimate[]
-  tagEstimateItems      TagEstimateItem[]
-  estimateTemplates     EstimateTemplate[]
-  stockAuditItems       StockAuditItem[]
-  branchTransferItems   BranchTransferItem[]
-  salesReturnItems      SalesReturnItem[]
-  exportDocuments       ExportDocument[]
-  taxInvoices           TaxInvoice[]
-  systemConfigs         SystemConfig[]
-  userBranchAccess      UserBranchAccess[]
-  companyInvitations    CompanyInvitation[]
-  designCategories      DesignCategory[]
-  karatMasters          KaratMaster[]
-  productCategories     ProductCategory[]
-  subCategories         SubCategory[]
-  collections           Collection[]
-  sizes                 Size[]
-  materialCodes         MaterialCode[]
-  stockTypes            StockType[]
-  stoneTypes            StoneType[]
-  stoneGrades           StoneGrade[]
-  gstRegistrations      CompanyGstRegistration[]
-  taxInvoiceTemplates   TaxInvoiceTemplate[]
+  branches                  Branch[]
+  companyUsers              CompanyUser[]
+  roles                     Role[]
+  clients                   Client[]
+  jewelryTags               JewelryTag[]
+  salesInvoices             SalesInvoice[]
+  invoiceItems              InvoiceItem[]
+  numberSequences           NumberSequence[]
+  oldGoldExchanges          OldGoldExchange[]
+  memoOuts                  MemoOut[]
+  memoItems                 MemoItem[]
+  stockAudits               StockAudit[]
+  branchTransfers           BranchTransfer[]
+  tagTemplates              TagTemplate[]
+  invoicePayments           InvoicePayment[]
+  salesReturns              SalesReturn[]
+  accounts                  Account[]
+  journalEntries            JournalEntry[]
+  journalLines              JournalLine[]
+  costCenters               CostCenter[]
+  auditLogs                 AuditLog[]
+  purchaseReturns           PurchaseReturn[]
+  supplierPayments          SupplierPayment[]
+  purchaseLots              PurchaseLot[]
+  poItemCategories          PoItemCategory[]
+  vendorComponentRates      VendorComponentRate[]
+  poItemComponents          PoItemComponent[]
+  grnItemComponentRates     GrnItemComponentRate[]
+  purchaseReturnItems       PurchaseReturnItem[]
+  purchaseOrders            PurchaseOrder[]
+  poItems                   PoItem[]
+  goodsReceiptNotes         GoodsReceiptNote[]
+  grnItems                  GrnItem[]
+  purchaseRequisitions      PurchaseRequisition[]
+  prItems                   PrItem[]
+  approvalHistory           ApprovalHistory[]
+  hallmarkingBatches        HallmarkingBatch[]
+  hallmarkingItems          HallmarkingItem[]
+  repairJobs                RepairJob[]
+  repairTransactions        RepairTransaction[]
+  designs                   Design[]
+  designFiles               DesignFile[]
+  bomItems                  BomItem[]
+  bomProcesses              BomProcess[]
+  costEstimates             CostEstimate[]
+  suppliers                 Supplier[]
+  metalStocks               MetalStock[]
+  stoneLots                 StoneLot[]
+  stoneLotSplits            StoneLotSplit[]
+  consumables               Consumable[]
+  consumableTxns            ConsumableTransaction[]
+  salesOrders               SalesOrder[]
+  orderItems                OrderItem[]
+  materialReservations      MaterialReservation[]
+  clientNotifications       ClientNotification[]
+  jobCards                  JobCard[]
+  jobProcesses              JobProcess[]
+  wipTracking               WipTracking[]
+  qcCheckpoints             QcCheckpoint[]
+  artisans                  Artisan[]
+  karigarLedgers            KarigarLedger[]
+  processTolerances         ProcessTolerance[]
+  subcontractorInvoices     SubcontractorInvoice[]
+  hardwareDevices           HardwareDevice[]
+  metalRates                MetalRate[]
+  priceMasters              PriceMaster[]
+  jewelryTagMaterials       JewelryTagMaterial[]
+  makingCharges             MakingCharge[]
+  tagEstimates              TagEstimate[]
+  tagEstimateItems          TagEstimateItem[]
+  estimateTemplates         EstimateTemplate[]
+  stockAuditItems           StockAuditItem[]
+  branchTransferItems       BranchTransferItem[]
+  salesReturnItems          SalesReturnItem[]
+  exportDocuments           ExportDocument[]
+  taxInvoices               TaxInvoice[]
+  systemConfigs             SystemConfig[]
+  userBranchAccess          UserBranchAccess[]
+  companyInvitations        CompanyInvitation[]
+  designCategories          DesignCategory[]
+  karatMasters              KaratMaster[]
+  productCategories         ProductCategory[]
+  subCategories             SubCategory[]
+  categorySubCategories     CategorySubCategory[]
+  collections               Collection[]
+  sizes                     Size[]
+  settingTypes              SettingType[]
+  materialCodes             MaterialCode[]
+  stockTypes                StockType[]
+  stoneTypes                StoneType[]
+  stoneGrades               StoneGrade[]
+  gstRegistrations          CompanyGstRegistration[]
+  taxInvoiceTemplates       TaxInvoiceTemplate[]
   // G2a
-  creditNotes           CreditNote[]
-  creditNoteItems       CreditNoteItem[]
-  debitNotes            DebitNote[]
-  debitNoteItems        DebitNoteItem[]
+  creditNotes               CreditNote[]
+  creditNoteItems           CreditNoteItem[]
+  debitNotes                DebitNote[]
+  debitNoteItems            DebitNoteItem[]
   // G2g-4b — Sales (outward) Debit Note. Wholly separate from the procurement-side DebitNote above.
-  salesDebitNotes       SalesDebitNote[]
+  salesDebitNotes           SalesDebitNote[]
   // G2g-7d — inward RCM foundation.
-  rcmLiabilities        RcmLiability[]
-  selfInvoices          SelfInvoice[]
-  salesDebitNoteItems   SalesDebitNoteItem[]
-  creditNoteTemplates   CreditNoteTemplate[]
-  debitNoteTemplates    DebitNoteTemplate[]
+  rcmLiabilities            RcmLiability[]
+  selfInvoices              SelfInvoice[]
+  salesDebitNoteItems       SalesDebitNoteItem[]
+  creditNoteTemplates       CreditNoteTemplate[]
+  debitNoteTemplates        DebitNoteTemplate[]
   // Phase D: GST AATO
-  gstAatos              CompanyGstAato[]
-  gstAatoHistories      CompanyGstAatoHistory[]
+  gstAatos                  CompanyGstAato[]
+  gstAatoHistories          CompanyGstAatoHistory[]
   // G2g-6a: statutory filing-period persistence foundation (schema + RLS only — no builder/filing
   // service exists yet; see GstReturnPeriod's own comment).
-  gstReturnPeriods      GstReturnPeriod[]
-  gstFilingSnapshots    GstFilingSnapshot[]
-  gstFilingAttempts     GstFilingAttempt[]
+  gstReturnPeriods          GstReturnPeriod[]
+  gstFilingSnapshots        GstFilingSnapshot[]
+  gstFilingAttempts         GstFilingAttempt[]
   // G2g-7e: GSTR-2B ingestion.
-  gst2bStatements       Gst2bStatement[]
-  gst2bDocuments        Gst2bDocument[]
+  gst2bStatements           Gst2bStatement[]
+  gst2bDocuments            Gst2bDocument[]
   // G8a: GST integration foundation.
-  gstIntegrationConfigs      GstIntegrationConfig[]
-  gstIntegrationCredentials  GstIntegrationCredential[]
-  gstIntegrationRequestLogs  GstIntegrationRequestLog[]
-  eInvoiceRecords            EInvoiceRecord[]
+  gstIntegrationConfigs     GstIntegrationConfig[]
+  gstIntegrationCredentials GstIntegrationCredential[]
+  gstIntegrationRequestLogs GstIntegrationRequestLog[]
+  eInvoiceRecords           EInvoiceRecord[]
 
   @@map("companies")
 }
@@ -214,19 +216,19 @@ model CompanyGstRegistration {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  branches       Branch[]
+  branches           Branch[]
   // Phase D: AATO records for this registration
-  aatoRecords    CompanyGstAato[]
-  aatoHistories  CompanyGstAatoHistory[]
+  aatoRecords        CompanyGstAato[]
+  aatoHistories      CompanyGstAatoHistory[]
   // G2g-6a: every statutory return period filed under this registration.
-  returnPeriods  GstReturnPeriod[]
+  returnPeriods      GstReturnPeriod[]
   // G2g-7a: every inward GRN line attributed to this registration as the buyer.
-  buyerGrnItems  GrnItem[]
+  buyerGrnItems      GrnItem[]
   // G2g-7d: inward RCM foundation.
-  rcmLiabilities RcmLiability[]
-  selfInvoices   SelfInvoice[]
+  rcmLiabilities     RcmLiability[]
+  selfInvoices       SelfInvoice[]
   // G2g-7e: every GSTR-2B statement imported for this registration.
-  gst2bStatements Gst2bStatement[]
+  gst2bStatements    Gst2bStatement[]
   // G8a: every GST integration config (provider × environment) scoped to this registration.
   integrationConfigs GstIntegrationConfig[]
   // G8c: e-invoice (IRN) operation records issued under this registration.
@@ -696,60 +698,60 @@ model User {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
-  companyMemberships         CompanyUser[]
-  auditLogs                  AuditLog[]
-  karigarIssues              KarigarLedger[]       @relation("IssuedBy")
-  qcSignoffs                 QcCheckpoint[]
-  wipEntries                 WipTracking[]
-  requestedRequisitions      PurchaseRequisition[] @relation("PRRequester")
-  approvedRequisitions       PurchaseRequisition[] @relation("PRApprover")
-  performedApprovals         ApprovalHistory[]
-  submittedPOs               PurchaseOrder[]       @relation("POSubmitter")
-  approvedPOs                PurchaseOrder[]       @relation("POApprover")
-  tagsCreated                JewelryTag[]          @relation("TagCreatedBy")
-  transfersRequested         BranchTransfer[]      @relation("TransferRequester")
-  transfersApproved          BranchTransfer[]      @relation("TransferApprover")
-  invoicesSold               SalesInvoice[]
-  stockAuditsStarted         StockAudit[]
-  tagTemplatesCreated        TagTemplate[]
-  tagEstimatesCreated        TagEstimate[]         @relation("EstimateCreatedBy")
-  tagEstimatesAttended       TagEstimate[]         @relation("EstimateSalesPerson")
-  estimateTemplatesCreated   EstimateTemplate[]
-  taxInvoiceTemplatesCreated TaxInvoiceTemplate[]
-  invitationsSent            CompanyInvitation[]   @relation("InvitationInviter")
-  platformAuditLogs          PlatformAuditLog[]
-  invoicesVoided             SalesInvoice[]        @relation("InvoiceVoidedBy")
-  paymentsReversed           InvoicePayment[]      @relation("PaymentReversedBy")
-  exchangesReversed          OldGoldExchange[]     @relation("ExchangeReversedBy")
+  companyMemberships           CompanyUser[]
+  auditLogs                    AuditLog[]
+  karigarIssues                KarigarLedger[]        @relation("IssuedBy")
+  qcSignoffs                   QcCheckpoint[]
+  wipEntries                   WipTracking[]
+  requestedRequisitions        PurchaseRequisition[]  @relation("PRRequester")
+  approvedRequisitions         PurchaseRequisition[]  @relation("PRApprover")
+  performedApprovals           ApprovalHistory[]
+  submittedPOs                 PurchaseOrder[]        @relation("POSubmitter")
+  approvedPOs                  PurchaseOrder[]        @relation("POApprover")
+  tagsCreated                  JewelryTag[]           @relation("TagCreatedBy")
+  transfersRequested           BranchTransfer[]       @relation("TransferRequester")
+  transfersApproved            BranchTransfer[]       @relation("TransferApprover")
+  invoicesSold                 SalesInvoice[]
+  stockAuditsStarted           StockAudit[]
+  tagTemplatesCreated          TagTemplate[]
+  tagEstimatesCreated          TagEstimate[]          @relation("EstimateCreatedBy")
+  tagEstimatesAttended         TagEstimate[]          @relation("EstimateSalesPerson")
+  estimateTemplatesCreated     EstimateTemplate[]
+  taxInvoiceTemplatesCreated   TaxInvoiceTemplate[]
+  invitationsSent              CompanyInvitation[]    @relation("InvitationInviter")
+  platformAuditLogs            PlatformAuditLog[]
+  invoicesVoided               SalesInvoice[]         @relation("InvoiceVoidedBy")
+  paymentsReversed             InvoicePayment[]       @relation("PaymentReversedBy")
+  exchangesReversed            OldGoldExchange[]      @relation("ExchangeReversedBy")
   // G2a
-  creditNotesCreated         CreditNote[]          @relation("CreditNoteCreatedBy")
-  creditNotesCancelled       CreditNote[]          @relation("CreditNoteCancelledBy")
-  debitNotesCreated          DebitNote[]           @relation("DebitNoteCreatedBy")
-  debitNotesCancelled        DebitNote[]           @relation("DebitNoteCancelledBy")
-  creditNoteTemplatesCreated CreditNoteTemplate[]
-  debitNoteTemplatesCreated  DebitNoteTemplate[]
+  creditNotesCreated           CreditNote[]           @relation("CreditNoteCreatedBy")
+  creditNotesCancelled         CreditNote[]           @relation("CreditNoteCancelledBy")
+  debitNotesCreated            DebitNote[]            @relation("DebitNoteCreatedBy")
+  debitNotesCancelled          DebitNote[]            @relation("DebitNoteCancelledBy")
+  creditNoteTemplatesCreated   CreditNoteTemplate[]
+  debitNoteTemplatesCreated    DebitNoteTemplate[]
   // G2g-4b — Sales Debit Note (outward, sell-side). Distinct relation names from the
   // procurement DebitNote above — the two domains never share a permission or a relation.
-  salesDebitNotesCreated     SalesDebitNote[]      @relation("SalesDebitNoteCreatedBy")
-  salesDebitNotesCancelled   SalesDebitNote[]      @relation("SalesDebitNoteCancelledBy")
+  salesDebitNotesCreated       SalesDebitNote[]       @relation("SalesDebitNoteCreatedBy")
+  salesDebitNotesCancelled     SalesDebitNote[]       @relation("SalesDebitNoteCancelledBy")
   // G2g-7d — inward RCM foundation.
-  rcmLiabilitiesCreated      RcmLiability[]        @relation("RcmLiabilityCreatedBy")
-  rcmLiabilitiesPaid         RcmLiability[]        @relation("RcmLiabilityPaidBy")
-  selfInvoicesCreated        SelfInvoice[]         @relation("SelfInvoiceCreatedBy")
-  selfInvoicesCancelled      SelfInvoice[]         @relation("SelfInvoiceCancelledBy")
+  rcmLiabilitiesCreated        RcmLiability[]         @relation("RcmLiabilityCreatedBy")
+  rcmLiabilitiesPaid           RcmLiability[]         @relation("RcmLiabilityPaidBy")
+  selfInvoicesCreated          SelfInvoice[]          @relation("SelfInvoiceCreatedBy")
+  selfInvoicesCancelled        SelfInvoice[]          @relation("SelfInvoiceCancelledBy")
   // G2g-6a: schema-only foundation — no code creates these rows yet.
-  gstFilingSnapshotsCreated  GstFilingSnapshot[]
-  gstFilingAttemptsCreated   GstFilingAttempt[]
+  gstFilingSnapshotsCreated    GstFilingSnapshot[]
+  gstFilingAttemptsCreated     GstFilingAttempt[]
   // G2g-6e: the actor who performed each controlled lifecycle transition.
-  gstReturnPeriodsFiled      GstReturnPeriod[]     @relation("GstReturnPeriodFiledBy")
-  gstReturnPeriodsLocked     GstReturnPeriod[]     @relation("GstReturnPeriodLockedBy")
+  gstReturnPeriodsFiled        GstReturnPeriod[]      @relation("GstReturnPeriodFiledBy")
+  gstReturnPeriodsLocked       GstReturnPeriod[]      @relation("GstReturnPeriodLockedBy")
   // G2g-7e: GSTR-2B ingestion.
-  gst2bStatementsImported    Gst2bStatement[]      @relation("Gst2bStatementImportedBy")
+  gst2bStatementsImported      Gst2bStatement[]       @relation("Gst2bStatementImportedBy")
   // G8a: GST integration foundation (config admin only — no provider/network action is ever
   // attributed to a user in this phase, since none is performed).
   gstIntegrationConfigsCreated GstIntegrationConfig[] @relation("GstIntegrationConfigCreatedBy")
   gstIntegrationConfigsUpdated GstIntegrationConfig[] @relation("GstIntegrationConfigUpdatedBy")
-  eInvoiceRecordsCreated EInvoiceRecord[] @relation("EInvoiceRecordCreatedBy")
+  eInvoiceRecordsCreated       EInvoiceRecord[]       @relation("EInvoiceRecordCreatedBy")
 
   @@map("users")
 }
@@ -1006,16 +1008,19 @@ model BomProcess {
 // createOldGoldExchange), not a shared public market feed with one true value — two companies
 // legitimately enter different rates. Every existing caller already carries a ctx.
 model MetalRate {
-  id          String   @id @default(cuid())
-  companyId   String
-  company     Company  @relation(fields: [companyId], references: [id])
-  date        DateTime @db.Date
-  karat       String
-  purity      Decimal  @db.Decimal(6, 4)
-  ratePerGram Decimal  @db.Decimal(12, 4)
-  currency    String   @default("INR")
-  source      String?
-  createdAt   DateTime @default(now())
+  id            String   @id @default(cuid())
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id])
+  date          DateTime @db.Date
+  karat         String
+  purity        Decimal  @db.Decimal(6, 4)
+  ratePerGram   Decimal  @db.Decimal(12, 4)
+  // OG = Old Gold: what the shop pays per gram for a customer's old metal of this karat that day.
+  // Optional — a day with no OG rate entered just has none.
+  ogRatePerGram Decimal? @db.Decimal(12, 4)
+  currency      String   @default("INR")
+  source        String?
+  createdAt     DateTime @default(now())
 
   @@unique([companyId, date, karat, currency])
   @@index([companyId, date])
@@ -1453,10 +1458,10 @@ model Gst2bStatement {
   // GSTN's own statement-generation timestamp, read from the source payload when the normalizer can
   // confidently locate it — left null rather than guessed when it can't (§2's own field-spelling
   // confidence caveat).
-  generatedAt DateTime?
-  importedAt  DateTime  @default(now())
+  generatedAt  DateTime?
+  importedAt   DateTime  @default(now())
   importedById String?
-  importedBy   User?    @relation("Gst2bStatementImportedBy", fields: [importedById], references: [id])
+  importedBy   User?     @relation("Gst2bStatementImportedBy", fields: [importedById], references: [id])
 
   // SHA-256 of the exact uploaded bytes (captured via a dedicated raw-body-preserving parser on the
   // import route only — see gstr2bImport.service.ts) and of the canonicalized parsed structure
@@ -1523,10 +1528,10 @@ model Gst2bDocument {
   // The source document's own number (or Bill-of-Entry number for IMPG/IMPGSEZ) — a free string,
   // never assumed to be in any particular format. Normalized for Level-2 matching at MATCH time
   // (gstr2bReconciliation.ts), never mutated here.
-  documentNumber String?
-  documentDate   DateTime?
-  documentValue  Decimal?  @db.Decimal(14, 2)
-  placeOfSupply  String?
+  documentNumber    String?
+  documentDate      DateTime?
+  documentValue     Decimal?  @db.Decimal(14, 2)
+  placeOfSupply     String?
 
   taxableValue Decimal @default(0) @db.Decimal(14, 2)
   igst         Decimal @default(0) @db.Decimal(14, 2)
@@ -1540,12 +1545,12 @@ model Gst2bDocument {
   // confidently locate it) — copied verbatim from the source's own ITC-availability classification,
   // never re-derived here (that re-derivation, against TRIVO's OWN books, is exactly what
   // gstr2bReconciliation.ts computes separately).
-  itcAvailability   String?
+  itcAvailability     String?
   ineligibilityReason String?
 
   // ORIGINAL | AMENDED | SUPERSEDED | CURRENT (brief §15) — provenance, never collapsed away.
   // Defaults to CURRENT: the overwhelming case (a B2B/CDNR row with no amendment history at all).
-  provenanceStatus String @default("CURRENT")
+  provenanceStatus String          @default("CURRENT")
   // Self-reference: which document (if any) THIS one amends. Populated only when the source payload
   // carries an unambiguous original-document reference the normalizer can resolve — never guessed
   // (PHASE_G2G7E_AUDIT.md §3's B2BA scope note).
@@ -1600,7 +1605,7 @@ model GstIntegrationConfig {
   // GST_PROVIDER: IRIS_IRP | NIC_IRP | CYGNET_IRP | CLEAR_IRP | OTHER — see
   // modules/gst/integration/types.ts. Free string, same "fixed by this phase's own constant list,
   // not a DB enum" convention as taxCategory/rcmCategory elsewhere in this schema.
-  provider String
+  provider    String
   // SANDBOX | PRODUCTION — structurally separate; never inferred from a URL (brief §9/§10).
   environment String
 
@@ -1647,7 +1652,7 @@ model GstIntegrationCredential {
   // e.g. 'clientId' | 'clientSecret' | 'username' | 'password' | 'portalId' | 'apiKey' —
   // provider-defined, never validated against a fixed enum (brief §8's "no migration per
   // provider" requirement).
-  credentialKey String
+  credentialKey  String
   // AES-256-GCM ciphertext: "<iv>:<authTag>:<ciphertext>", each base64. Never selected into an
   // API response body.
   encryptedValue String
@@ -1688,10 +1693,10 @@ model GstIntegrationRequestLog {
   correlationId  String
   idempotencyKey String?
 
-  requestStartedAt DateTime
-  completedAt      DateTime?
+  requestStartedAt    DateTime
+  completedAt         DateTime?
   // PENDING | SUCCESS | FAILED
-  status              String  @default("PENDING")
+  status              String    @default("PENDING")
   httpStatus          Int?
   providerReferenceId String?
 
@@ -1944,26 +1949,26 @@ model GrnItem {
 // the one with the latest effectiveDate on or before the PO date applies; two with the same latest date are
 // ambiguous and are reported, never picked between (shared/vendorRates.ts).
 model VendorComponentRate {
-  id            String      @id @default(cuid())
-  companyId     String
-  company       Company     @relation(fields: [companyId], references: [id])
-  supplierId    String
-  supplier      Supplier    @relation(fields: [supplierId, companyId], references: [id, companyId], onDelete: Restrict)
+  id             String        @id @default(cuid())
+  companyId      String
+  company        Company       @relation(fields: [companyId], references: [id])
+  supplierId     String
+  supplier       Supplier      @relation(fields: [supplierId, companyId], references: [id, companyId], onDelete: Restrict)
   // A component is EITHER a stone (stoneTypeId, optionally narrowed by stoneGradeId) OR a Material Code (materialCodeId) —
   // exactly one, enforced by a CHECK constraint (see migration 20261003150000).
-  stoneTypeId   String?
-  stoneType     StoneType?  @relation(fields: [stoneTypeId, companyId], references: [id, companyId], onDelete: Restrict)
-  stoneGradeId  String?
-  stoneGrade    StoneGrade? @relation(fields: [stoneGradeId, companyId], references: [id, companyId], onDelete: Restrict)
+  stoneTypeId    String?
+  stoneType      StoneType?    @relation(fields: [stoneTypeId, companyId], references: [id, companyId], onDelete: Restrict)
+  stoneGradeId   String?
+  stoneGrade     StoneGrade?   @relation(fields: [stoneGradeId, companyId], references: [id, companyId], onDelete: Restrict)
   materialCodeId String?
   materialCode   MaterialCode? @relation(fields: [materialCodeId, companyId], references: [id, companyId], onDelete: Restrict)
-  unit          String      @default("CT")
-  costRate      Decimal     @db.Decimal(12, 4)
-  effectiveDate DateTime    @default(now())
-  isActive      Boolean     @default(true)
-  notes         String?
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
+  unit           String        @default("CT")
+  costRate       Decimal       @db.Decimal(12, 4)
+  effectiveDate  DateTime      @default(now())
+  isActive       Boolean       @default(true)
+  notes          String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
 
   @@index([companyId])
   @@index([supplierId, stoneTypeId])
@@ -1975,20 +1980,20 @@ model VendorComponentRate {
 // the buyer did not type one (rateSource VENDOR_MASTER) or entered/overridden by the buyer (MANUAL); either way it
 // is the purchase's own figure and later vendor-rate edits never reach it.
 model PoItemComponent {
-  id           String      @id @default(cuid())
-  companyId    String
-  company      Company     @relation(fields: [companyId], references: [id])
-  poItem       PoItem      @relation(fields: [poItemId, companyId], references: [id, companyId], onDelete: Cascade)
-  poItemId     String
-  stoneTypeId  String?
-  stoneType    StoneType?  @relation(fields: [stoneTypeId, companyId], references: [id, companyId], onDelete: Restrict)
-  stoneGradeId String?
-  stoneGrade   StoneGrade? @relation(fields: [stoneGradeId, companyId], references: [id, companyId], onDelete: Restrict)
+  id             String        @id @default(cuid())
+  companyId      String
+  company        Company       @relation(fields: [companyId], references: [id])
+  poItem         PoItem        @relation(fields: [poItemId, companyId], references: [id, companyId], onDelete: Cascade)
+  poItemId       String
+  stoneTypeId    String?
+  stoneType      StoneType?    @relation(fields: [stoneTypeId, companyId], references: [id, companyId], onDelete: Restrict)
+  stoneGradeId   String?
+  stoneGrade     StoneGrade?   @relation(fields: [stoneGradeId, companyId], references: [id, companyId], onDelete: Restrict)
   materialCodeId String?
   materialCode   MaterialCode? @relation(fields: [materialCodeId, companyId], references: [id, companyId], onDelete: Restrict)
-  unit         String      @default("CT")
-  costRate     Decimal     @db.Decimal(12, 4)
-  rateSource   String      @default("MANUAL") // VENDOR_MASTER | MANUAL
+  unit           String        @default("CT")
+  costRate       Decimal       @db.Decimal(12, 4)
+  rateSource     String        @default("MANUAL") // VENDOR_MASTER | MANUAL
 
   @@index([companyId])
   @@index([poItemId])
@@ -1999,19 +2004,19 @@ model PoItemComponent {
 // Tagging a piece out of the received goods reads THESE rows, so a later PO edit or vendor-rate change can't
 // reprice goods already received.
 model GrnItemComponentRate {
-  id           String      @id @default(cuid())
-  companyId    String
-  company      Company     @relation(fields: [companyId], references: [id])
-  grnItem      GrnItem     @relation(fields: [grnItemId, companyId], references: [id, companyId], onDelete: Cascade)
-  grnItemId    String
-  stoneTypeId  String?
-  stoneType    StoneType?  @relation(fields: [stoneTypeId, companyId], references: [id, companyId], onDelete: Restrict)
-  stoneGradeId String?
-  stoneGrade   StoneGrade? @relation(fields: [stoneGradeId, companyId], references: [id, companyId], onDelete: Restrict)
+  id             String        @id @default(cuid())
+  companyId      String
+  company        Company       @relation(fields: [companyId], references: [id])
+  grnItem        GrnItem       @relation(fields: [grnItemId, companyId], references: [id, companyId], onDelete: Cascade)
+  grnItemId      String
+  stoneTypeId    String?
+  stoneType      StoneType?    @relation(fields: [stoneTypeId, companyId], references: [id, companyId], onDelete: Restrict)
+  stoneGradeId   String?
+  stoneGrade     StoneGrade?   @relation(fields: [stoneGradeId, companyId], references: [id, companyId], onDelete: Restrict)
   materialCodeId String?
   materialCode   MaterialCode? @relation(fields: [materialCodeId, companyId], references: [id, companyId], onDelete: Restrict)
-  unit         String      @default("CT")
-  costRate     Decimal     @db.Decimal(12, 4)
+  unit           String        @default("CT")
+  costRate       Decimal       @db.Decimal(12, 4)
 
   @@index([companyId])
   @@index([grnItemId])
@@ -3025,7 +3030,7 @@ model ProductCategory {
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
 
-  subCategories    SubCategory[]
+  subCategoryLinks CategorySubCategory[]
   jewelryTags      JewelryTag[]
   makingCharges    MakingCharge[]
   invoiceItems     InvoiceItem[]
@@ -3039,24 +3044,46 @@ model ProductCategory {
   @@map("product_categories")
 }
 
+// A sub-category is ONE company-owned master (e.g. "Traditional") that can be linked to many categories
+// through CategorySubCategory. Renaming it renames it everywhere it is used. JewelryTag keeps a plain
+// subCategoryId; the (categoryId, subCategoryId) pair on a tag must be a CategorySubCategory link
+// (enforced in the tagging service — the tag row itself is not a composite FK to the link table so a
+// later unlink can be refused instead of cascading).
 model SubCategory {
-  id         String          @id @default(cuid())
-  companyId  String
-  company    Company         @relation(fields: [companyId], references: [id])
-  code       String
-  name       String
-  categoryId String
-  category   ProductCategory @relation(fields: [categoryId, companyId], references: [id, companyId])
-  isActive   Boolean         @default(true)
-  createdAt  DateTime        @default(now())
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id])
+  code      String
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
 
-  jewelryTags JewelryTag[]
+  jewelryTags   JewelryTag[]
+  categoryLinks CategorySubCategory[]
 
   @@unique([companyId, code])
   // composite-FK target: lets the database refuse a child that points at another company's SubCategory
   @@unique([id, companyId])
   @@index([companyId])
   @@map("sub_categories")
+}
+
+// Category <-> SubCategory (many-to-many). Both sides are composite FKs on companyId, so the database
+// itself refuses a link between two different companies' rows. Restrict, never Cascade: a master cannot
+// be deleted from under its links, and unlinking is an explicit service operation.
+model CategorySubCategory {
+  id            String          @id @default(cuid())
+  companyId     String
+  company       Company         @relation(fields: [companyId], references: [id])
+  categoryId    String
+  category      ProductCategory @relation(fields: [categoryId, companyId], references: [id, companyId], onDelete: Restrict)
+  subCategoryId String
+  subCategory   SubCategory     @relation(fields: [subCategoryId, companyId], references: [id, companyId], onDelete: Restrict)
+  createdAt     DateTime        @default(now())
+
+  @@unique([companyId, categoryId, subCategoryId])
+  @@index([companyId, subCategoryId])
+  @@map("category_sub_categories")
 }
 
 // A size a piece can carry (ring size, bangle size, chain length...). categoryId is optional: set,
@@ -3079,6 +3106,23 @@ model Size {
   @@unique([id, companyId])
   @@index([companyId])
   @@map("sizes")
+}
+
+// A stone/metal setting style (prong, bezel, pave...) offered on New Tag. JewelryTag.settingType
+// stays free text (stores the chosen name), so retiring or renaming a master row never rewrites a tag.
+model SettingType {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id])
+  code      String
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@unique([companyId, code])
+  @@unique([id, companyId])
+  @@index([companyId])
+  @@map("setting_types")
 }
 
 model Collection {
@@ -3119,10 +3163,10 @@ model MaterialCode {
   isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
 
-  tagMaterials  JewelryTagMaterial[]
-  makingCharges MakingCharge[]
-  vendorRates   VendorComponentRate[]
-  poComponents  PoItemComponent[]
+  tagMaterials      JewelryTagMaterial[]
+  makingCharges     MakingCharge[]
+  vendorRates       VendorComponentRate[]
+  poComponents      PoItemComponent[]
   grnComponentRates GrnItemComponentRate[]
 
   @@unique([companyId, code])
@@ -3375,9 +3419,9 @@ model StoneType {
   isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
 
-  stoneGrades StoneGrade[]
-  vendorRates VendorComponentRate[]
-  poComponents PoItemComponent[]
+  stoneGrades       StoneGrade[]
+  vendorRates       VendorComponentRate[]
+  poComponents      PoItemComponent[]
   grnComponentRates GrnItemComponentRate[]
 
   @@unique([companyId, code])
@@ -3407,10 +3451,10 @@ model StoneGrade {
   isActive    Boolean   @default(true)
   createdAt   DateTime  @default(now())
 
-  priceMasters PriceMaster[]
-  tagMaterials JewelryTagMaterial[]
-  vendorRates  VendorComponentRate[]
-  poComponents PoItemComponent[]
+  priceMasters      PriceMaster[]
+  tagMaterials      JewelryTagMaterial[]
+  vendorRates       VendorComponentRate[]
+  poComponents      PoItemComponent[]
   grnComponentRates GrnItemComponentRate[]
 
   // composite-FK target: lets the database refuse a child that points at another company's StoneGrade

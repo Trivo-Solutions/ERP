@@ -89,7 +89,7 @@ type ScopedModel =
   // Phase 1 of full company isolation — the masters are company-owned now, so every master id a
   // request supplies (a tag's category, an invoice line's category, a making charge's material
   // code, ...) must be verified against the caller's company like any other foreign id.
-  | 'designCategory' | 'karatMaster' | 'productCategory' | 'subCategory' | 'collection' | 'size'
+  | 'designCategory' | 'karatMaster' | 'productCategory' | 'subCategory' | 'collection' | 'size' | 'settingType'
   | 'materialCode' | 'stockType' | 'stoneType' | 'stoneGrade'
   // Phase 2 — identity/membership
   | 'companyUser' | 'companyInvitation'

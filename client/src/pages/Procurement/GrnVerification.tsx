@@ -298,6 +298,8 @@ function TagFromGrnDialog({ grn, item, onClose }: { grn: any | null; item: any |
     },
   });
   const categoryId = watch('categoryId');
+  // A sub-category belongs to specific categories — changing the category clears a stale pick.
+  useEffect(() => { setValue('subCategoryId', ''); }, [categoryId, setValue]);
 
   useEffect(() => {
     if (!item) return;
@@ -331,7 +333,7 @@ function TagFromGrnDialog({ grn, item, onClose }: { grn: any | null; item: any |
   const { data: collections } = useQuery({ queryKey: ['master-collections'], queryFn: () => apiGet<any>('/masters/collections'), enabled: open });
   const { data: subcats } = useQuery({
     queryKey: ['master-subcategories', categoryId],
-    queryFn: () => apiGet<any>('/masters/subcategories', { categoryId }),
+    queryFn: () => apiGet<any>('/masters/subcategories', { categoryId, active: 'true' }),
     enabled: open && !!categoryId,
   });
   const list = (x: any): any[] => x?.data ?? x ?? [];
