@@ -216,7 +216,9 @@ export const PERMISSION_CATALOG: PermissionCatalogGroup[] = [
       // above when IT shipped ahead of a starter-role grant.
       {
         key: 'gstIntegration', label: 'GST Integration (e-Invoice/IRP Foundation)',
-        capabilities: [cap('gst:integration_view'), cap('gst:integration_manage'), cap('gst:integration_test')],
+        capabilities: [cap('gst:integration_view'), cap('gst:integration_manage'), cap('gst:integration_test'),
+          // G8c: a statutory MUTATION (registers an IRN) — its own permission, never riding the view one. SUPER_ADMIN only until granted.
+          cap('gst:einvoice_generate')],
       },
       {
         key: 'creditNoteTemplate', label: 'Credit Note Templates',

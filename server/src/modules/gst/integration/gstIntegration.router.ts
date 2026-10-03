@@ -13,6 +13,8 @@ import { requirePermission } from '../../../middleware/rbac';
 import { resolveTenantContext, rejectClientTenantSelectors } from '../../../middleware/tenant';
 import { validate } from '../../../middleware/validate';
 import * as gstIntegrationService from './gstIntegration.service';
+import * as gstinLookupService from './gstinLookup.service';
+import * as eInvoiceService from './eInvoice.service';
 
 export const gstIntegrationRouter = Router();
 gstIntegrationRouter.use(authenticate, resolveTenantContext);
@@ -20,6 +22,7 @@ gstIntegrationRouter.use(authenticate, resolveTenantContext);
 const VIEW = requirePermission('gst:integration_view');
 const MANAGE = requirePermission('gst:integration_manage');
 const TEST = requirePermission('gst:integration_test');
+const GENERATE_EINVOICE = requirePermission('gst:einvoice_generate');
 
 const credentialsSchema = z.record(z.string().min(1).max(100), z.string().min(1).max(4000)).optional();
 
@@ -41,6 +44,35 @@ gstIntegrationRouter.get(
   async (req: Request, res: Response) => {
     const data = await gstIntegrationService.listIntegrationConfigs(req.tenant!, req.params.gstRegistrationId);
     res.json({ success: true, data });
+  }
+);
+
+// G8b — GSTIN lookup via this registration's configured provider. Read-only; optional
+// ?environment=SANDBOX|PRODUCTION disambiguates when a registration has more than one active config.
+gstIntegrationRouter.get(
+  '/registrations/:gstRegistrationId/gstin/:gstin', rejectClientTenantSelectors, VIEW,
+  async (req: Request, res: Response) => {
+    const environment = typeof req.query.environment === 'string' ? req.query.environment : undefined;
+    const { details, correlationId } = await gstinLookupService.lookupGstin(req.tenant!, req.params.gstRegistrationId, req.params.gstin, environment);
+    res.json({ success: true, data: details, correlationId });
+  }
+);
+
+// G8c — register an IRN for one persisted invoice. The body is IGNORED (the server builds the request
+// from the stored invoice); a tenant selector anywhere in the request is rejected.
+gstIntegrationRouter.post(
+  '/registrations/:gstRegistrationId/invoices/:invoiceId/irn', rejectClientTenantSelectors, GENERATE_EINVOICE,
+  async (req: Request, res: Response) => {
+    const environment = typeof req.query.environment === 'string' ? req.query.environment : undefined;
+    try {
+      const out = await eInvoiceService.generateIrnForInvoice(req.tenant!, req.params.gstRegistrationId, req.params.invoiceId, environment);
+      res.status(out.httpStatus).json({ success: true, data: out.record, correlationId: out.correlationId });
+    } catch (err) {
+      if (err instanceof eInvoiceService.EInvoiceNotEligibleError) {
+        return res.status(422).json({ success: false, error: err.message, eligibility: err.eligibility });
+      }
+      throw err;
+    }
   }
 );
 

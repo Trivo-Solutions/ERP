@@ -178,6 +178,7 @@ model Company {
   gstIntegrationConfigs      GstIntegrationConfig[]
   gstIntegrationCredentials  GstIntegrationCredential[]
   gstIntegrationRequestLogs  GstIntegrationRequestLog[]
+  eInvoiceRecords            EInvoiceRecord[]
 
   @@map("companies")
 }
@@ -224,6 +225,8 @@ model CompanyGstRegistration {
   gst2bStatements Gst2bStatement[]
   // G8a: every GST integration config (provider × environment) scoped to this registration.
   integrationConfigs GstIntegrationConfig[]
+  // G8c: e-invoice (IRN) operation records issued under this registration.
+  eInvoiceRecords    EInvoiceRecord[]
 
   @@unique([companyId, gstin])
   // composite-FK target: lets the database refuse a Branch pointing at another company's registration
@@ -742,6 +745,7 @@ model User {
   // attributed to a user in this phase, since none is performed).
   gstIntegrationConfigsCreated GstIntegrationConfig[] @relation("GstIntegrationConfigCreatedBy")
   gstIntegrationConfigsUpdated GstIntegrationConfig[] @relation("GstIntegrationConfigUpdatedBy")
+  eInvoiceRecordsCreated EInvoiceRecord[] @relation("EInvoiceRecordCreatedBy")
 
   @@map("users")
 }
@@ -3437,6 +3441,7 @@ model SalesInvoice {
   repairJob       RepairJob?
   creditNotes     CreditNote[]
   salesDebitNotes SalesDebitNote[]
+  eInvoiceRecords EInvoiceRecord[]
 
   @@unique([companyId, invoiceNumber])
   // composite-FK target: lets the database refuse a child that points at another company's SalesInvoice
@@ -4179,4 +4184,59 @@ model ApprovalHistory {
   @@index([companyId])
   @@index([referenceType, referenceId])
   @@map("approval_history")
+}
+
+// G8c — one e-invoice (IRN) operation record per (registration, document type, document, environment).
+// The unique index IS the idempotency + concurrency gate: a second concurrent attempt cannot insert a
+// second row. Status: PENDING (claimed, provider call in flight) | SUCCESS | FAILED (provider
+// definitively rejected / never reached — safe to attempt again) | AMBIGUOUS (the outcome is unknown —
+// timeout, 5xx, malformed reply, duplicate-at-provider — NEVER regenerated automatically; needs a
+// controlled Get-IRN lookup, a later phase). Holds NO credential, token or auth header, and not the
+// request payload; signedInvoice/signedQrCode are the provider's own signed artefacts (the legal
+// e-invoice), which is the whole point of the row.
+model EInvoiceRecord {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+
+  gstRegistration   CompanyGstRegistration @relation(fields: [gstRegistrationId, companyId], references: [id, companyId], onDelete: Restrict)
+  gstRegistrationId String
+
+  invoice   SalesInvoice @relation(fields: [invoiceId, companyId], references: [id, companyId], onDelete: Restrict)
+  invoiceId String
+
+  // INV today (CRN/DBN are not built yet) — free string, same convention as the other G8 columns.
+  documentType String
+  provider     String
+  // SANDBOX | PRODUCTION
+  environment  String
+  status       String @default("PENDING")
+
+  correlationId  String
+  idempotencyKey String
+
+  irn               String?
+  ackNumber         String?
+  ackDate           DateTime?
+  signedInvoice     String?   @db.Text
+  signedQrCode      String?   @db.Text
+  providerStatus    String?
+  providerTimestamp DateTime?
+  generatedAt       DateTime?
+
+  errorCategory String?
+  errorCode     String?
+  errorMessage  String?
+
+  attempts    Int      @default(1)
+  createdById String?
+  createdBy   User?    @relation("EInvoiceRecordCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([companyId, gstRegistrationId, documentType, invoiceId, environment])
+  @@unique([companyId, idempotencyKey])
+  @@index([companyId])
+  @@index([invoiceId])
+  @@map("einvoice_records")
 }

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { UnconfiguredProvider } from './unconfiguredProvider';
 import { resolveProvider } from './resolveProvider';
+import { NicIrpProvider } from './nicIrpProvider';
 import { GstIntegrationCallContext, GST_PROVIDERS } from '../types';
 
 const ctx: GstIntegrationCallContext = {
@@ -27,7 +28,7 @@ describe('G8a UnconfiguredProvider: deterministic, never fakes a real result', (
     const provider = new UnconfiguredProvider('CYGNET_IRP');
     const results = await Promise.all([
       provider.getGstinDetails(ctx, '24AAAAA0000A1Z8'),
-      provider.generateIrn(ctx, {}),
+      provider.generateIrn(ctx, {} as never),
       provider.cancelIrn(ctx, {}),
       provider.getIrn(ctx, 'some-irn'),
       provider.getIrnByDocument(ctx, {}),
@@ -42,17 +43,19 @@ describe('G8a UnconfiguredProvider: deterministic, never fakes a real result', (
 
   it('never generates anything resembling a fake IRN — no "irn" field anywhere in the result', async () => {
     const provider = new UnconfiguredProvider('CLEAR_IRP');
-    const result = await provider.generateIrn(ctx, { invoiceNumber: 'INV-1' });
+    const result = await provider.generateIrn(ctx, { documentNumber: 'INV-1' } as never);
     expect(JSON.stringify(result)).not.toMatch(/"irn"\s*:/i);
     expect((result as any).irn).toBeUndefined();
   });
 });
 
-describe('G8a resolveProvider: every known provider name resolves today, all to UnconfiguredProvider', () => {
+describe('resolveProvider: every known provider name resolves; only implemented adapters are real', () => {
   it.each(GST_PROVIDERS)('resolves %s without throwing', (name) => {
     const provider = resolveProvider(name);
     expect(provider.name).toBe(name);
-    expect(provider).toBeInstanceOf(UnconfiguredProvider);
+    // G8b: NIC_IRP is the first real adapter; every other name is still UnconfiguredProvider.
+    if (name === 'NIC_IRP') expect(provider).toBeInstanceOf(NicIrpProvider);
+    else expect(provider).toBeInstanceOf(UnconfiguredProvider);
   });
 
   it('falls back to OTHER for an unrecognized provider string rather than throwing', () => {

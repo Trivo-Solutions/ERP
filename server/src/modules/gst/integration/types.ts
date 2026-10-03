@@ -4,6 +4,8 @@
 // shared/taxCategory.ts. Nothing here performs I/O; see httpClient.ts / encryption.ts / providers/
 // for the pieces that do.
 
+import type { CanonicalIrnRequest, EInvoiceGenerationResult } from './eInvoice.types';
+
 // ─── Provider & environment ────────────────────────────────────────────────
 
 // Only providers genuinely anticipated by this architecture (G8a brief §5) — never a placeholder
@@ -77,6 +79,34 @@ export interface GstIntegrationCallContext {
   environment: GstIntegrationEnvironment;
   correlationId: string;
   credentials: Readonly<Record<string, string>>;
+  /** Session token from this provider's own authenticate(), set by the orchestration service
+   *  before a non-auth call (G8b). Opaque; never logged or returned over HTTP. */
+  authToken?: string;
+}
+
+// ─── GSTIN details (G8b) — provider-neutral canonical response ─────────────
+//
+// Every field a provider does not supply stays null — never fabricated or defaulted.
+export type GstinCompositionStatus = 'COMPOSITION' | 'NOT_COMPOSITION';
+
+export interface GstinDetails {
+  gstin: string;
+  legalName: string | null;
+  tradeName: string | null;
+  /** Provider's own status code/text as supplied (e.g. 'ACT', 'CNL') — not remapped. */
+  registrationStatus: string | null;
+  registrationDate: string | null;   // ISO date (YYYY-MM-DD) when parseable
+  cancellationDate: string | null;
+  constitutionOfBusiness: string | null;
+  taxpayerType: string | null;
+  stateCode: string | null;
+  stateName: string | null;
+  principalPlaceOfBusiness: string | null;
+  natureOfBusiness: string[] | null;
+  compositionStatus: GstinCompositionStatus | null;
+  eInvoiceEnabled: boolean | null;
+  provider: GstProviderName;
+  fetchedAt: string; // ISO timestamp
 }
 
 // A capability this phase does not implement returns this deterministic shape instead of throwing
@@ -118,14 +148,21 @@ export interface GstIntegrationAuthResult {
 // normalizes into a request-log row.
 export interface GstIntegrationProvider {
   readonly name: GstProviderName;
+  /** G8c: true only for an adapter whose IRN-generation wire format is verified AND implemented. The
+   *  orchestration service refuses (501) before authenticating or claiming a record when this is not
+   *  true, so an unverified adapter is never contacted for a statutory mutation. */
+  readonly supportsIrnGeneration?: boolean;
 
   authenticate(ctx: GstIntegrationCallContext): Promise<GstIntegrationAuthResult>;
   health(ctx: GstIntegrationCallContext): Promise<GstIntegrationHealthResult>;
 
   // Future e-invoice/EWB capabilities — G8a ships none of these; every one resolves to
   // UnsupportedOperationResult via unsupported(name, '<OPERATION>') until a real adapter exists.
-  getGstinDetails(ctx: GstIntegrationCallContext, gstin: string): Promise<UnsupportedOperationResult>;
-  generateIrn(ctx: GstIntegrationCallContext, payload: unknown): Promise<UnsupportedOperationResult>;
+  // G8b: the first capability a real adapter may implement. `gstin` is already validated/normalized.
+  getGstinDetails(ctx: GstIntegrationCallContext, gstin: string): Promise<GstinDetails | UnsupportedOperationResult>;
+  /** G8c. Provider-neutral in, provider-neutral out. Must throw a GstIntegrationError (never return a
+   *  half-parsed body) on any failure, and must NOT retry internally — IRN generation is not retry-safe. */
+  generateIrn(ctx: GstIntegrationCallContext, request: CanonicalIrnRequest): Promise<EInvoiceGenerationResult | UnsupportedOperationResult>;
   cancelIrn(ctx: GstIntegrationCallContext, payload: unknown): Promise<UnsupportedOperationResult>;
   getIrn(ctx: GstIntegrationCallContext, irn: string): Promise<UnsupportedOperationResult>;
   getIrnByDocument(ctx: GstIntegrationCallContext, payload: unknown): Promise<UnsupportedOperationResult>;

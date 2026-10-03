@@ -4,6 +4,7 @@
 // risk of an accidental live call to a real IRP/GSP. A real adapter (G8b+) implements the same
 // GstIntegrationProvider interface and is wired in via resolveProvider.ts — nothing in
 // gstIntegration.service.ts or the routes needs to change when that happens.
+import type { CanonicalIrnRequest } from '../eInvoice.types';
 import {
   GstIntegrationProvider, GstIntegrationCallContext, GstIntegrationAuthResult,
   GstIntegrationHealthResult, UnsupportedOperationResult, GstProviderName, unsupported,
@@ -28,7 +29,7 @@ export class UnconfiguredProvider implements GstIntegrationProvider {
   async getGstinDetails(_ctx: GstIntegrationCallContext, _gstin: string): Promise<UnsupportedOperationResult> {
     return unsupported(this.name, 'GET_GSTIN_DETAILS');
   }
-  async generateIrn(_ctx: GstIntegrationCallContext, _payload: unknown): Promise<UnsupportedOperationResult> {
+  async generateIrn(_ctx: GstIntegrationCallContext, _request: CanonicalIrnRequest): Promise<UnsupportedOperationResult> {
     return unsupported(this.name, 'GENERATE_IRN');
   }
   async cancelIrn(_ctx: GstIntegrationCallContext, _payload: unknown): Promise<UnsupportedOperationResult> {
