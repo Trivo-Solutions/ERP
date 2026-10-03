@@ -879,12 +879,17 @@ export function NewTagPage() {
   // dialog closes. Listening for `afterprint` (rather than just chaining after window.print())
   // is what makes this safe regardless of whether the browser treats window.print() as blocking
   // — the reset can never race ahead of the print portal still being on screen.
+  // Printing now goes straight to the thermal printer configured on the Hardware page (via the
+  // local print agent) — no browser print dialog. A newly created tag always prints; an edit only
+  // prints when "Print & continue" is ticked. "Print & continue" then resets to a blank form.
   useEffect(() => {
-    if (!createdTag || !autoContinueRef.current) return;
+    if (!createdTag) return;
+    const wantsContinue = autoContinueRef.current;
     autoContinueRef.current = false;
-    const onAfterPrint = () => { window.removeEventListener('afterprint', onAfterPrint); handleSaveAndNew(); };
-    window.addEventListener('afterprint', onAfterPrint);
-    handlePrint();
+    if (isEditMode && !wantsContinue) return;
+    printLabelMutation.mutate(undefined, {
+      onSuccess: () => { if (wantsContinue) handleSaveAndNew(); },
+    });
   }, [createdTag]);
 
   // ─────────────────────────────────────────────────────────────────────────
