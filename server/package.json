@@ -20,7 +20,9 @@
     "company:provision": "ts-node --require dotenv/config scripts/provision-company.ts",
     "test:rls": "node scripts/test-rls.js",
     "audit:tenant": "ts-node scripts/tenant-audit.ts --strict",
-    "db:secure": "prisma db execute --file prisma/db-secure.sql --schema prisma/schema.prisma"
+    "db:secure": "prisma db execute --file prisma/db-secure.sql --schema prisma/schema.prisma",
+    "start:prod": "node scripts/start-prod.js",
+    "deploy:db": "powershell -ExecutionPolicy Bypass -File scripts/deploy-db.ps1"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",

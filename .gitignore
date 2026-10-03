@@ -31,3 +31,8 @@ client/public/downloads/*
 # local tooling / scratch — not part of the product
 .claude/
 /estimation_smoke10.js
+
+# pre-migration database dumps (contain every company - never commit)
+/server/backups/
+*.dump
+*.dump.sha256
