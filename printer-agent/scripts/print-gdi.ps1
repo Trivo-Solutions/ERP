@@ -62,7 +62,9 @@ try {
                     $dotMm = 25.4 / $g.DpiX
                     $modMm = [Math]::Max(2, [Math]::Round(($it.narrow / $dpm) / $dotMm)) * $dotMm
                     $bh = [Math]::Round(($it.height / $dpm) / $dotMm) * $dotMm
-                    $x = 10 * $modMm   # quiet zone
+                    # Bars start exactly at the placed X (as TSPL's BARCODE does); the quiet zone is the
+                    # label's own margin, not an offset that shifts the barcode away from its position.
+                    $x = 0
                     $isBar = $true
                     foreach ($w in $it.sbs) {
                         if ($isBar) { $g.FillRectangle($black, [single]$x, [single]0, [single]($w * $modMm), [single]$bh) }
@@ -71,7 +73,7 @@ try {
                     }
                     if ($it.readable) {
                         $font = New-Object System.Drawing.Font('Arial', [single]2.2, [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Millimeter)
-                        $g.DrawString([string]$it.text, $font, $black, [single](10 * $modMm), [single]($bh + 0.3), $fmt)
+                        $g.DrawString([string]$it.text, $font, $black, [single]0, [single]($bh + 0.3), $fmt)
                         $font.Dispose()
                     }
                 }
