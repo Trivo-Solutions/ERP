@@ -1949,10 +1949,14 @@ model VendorComponentRate {
   company       Company     @relation(fields: [companyId], references: [id])
   supplierId    String
   supplier      Supplier    @relation(fields: [supplierId, companyId], references: [id, companyId], onDelete: Restrict)
-  stoneTypeId   String
-  stoneType     StoneType   @relation(fields: [stoneTypeId, companyId], references: [id, companyId], onDelete: Restrict)
+  // A component is EITHER a stone (stoneTypeId, optionally narrowed by stoneGradeId) OR a Material Code (materialCodeId) —
+  // exactly one, enforced by a CHECK constraint (see migration 20261003150000).
+  stoneTypeId   String?
+  stoneType     StoneType?  @relation(fields: [stoneTypeId, companyId], references: [id, companyId], onDelete: Restrict)
   stoneGradeId  String?
   stoneGrade    StoneGrade? @relation(fields: [stoneGradeId, companyId], references: [id, companyId], onDelete: Restrict)
+  materialCodeId String?
+  materialCode   MaterialCode? @relation(fields: [materialCodeId, companyId], references: [id, companyId], onDelete: Restrict)
   unit          String      @default("CT")
   costRate      Decimal     @db.Decimal(12, 4)
   effectiveDate DateTime    @default(now())
@@ -1963,6 +1967,7 @@ model VendorComponentRate {
 
   @@index([companyId])
   @@index([supplierId, stoneTypeId])
+  @@index([supplierId, materialCodeId])
   @@map("vendor_component_rates")
 }
 
@@ -1975,10 +1980,12 @@ model PoItemComponent {
   company      Company     @relation(fields: [companyId], references: [id])
   poItem       PoItem      @relation(fields: [poItemId, companyId], references: [id, companyId], onDelete: Cascade)
   poItemId     String
-  stoneTypeId  String
-  stoneType    StoneType   @relation(fields: [stoneTypeId, companyId], references: [id, companyId], onDelete: Restrict)
+  stoneTypeId  String?
+  stoneType    StoneType?  @relation(fields: [stoneTypeId, companyId], references: [id, companyId], onDelete: Restrict)
   stoneGradeId String?
   stoneGrade   StoneGrade? @relation(fields: [stoneGradeId, companyId], references: [id, companyId], onDelete: Restrict)
+  materialCodeId String?
+  materialCode   MaterialCode? @relation(fields: [materialCodeId, companyId], references: [id, companyId], onDelete: Restrict)
   unit         String      @default("CT")
   costRate     Decimal     @db.Decimal(12, 4)
   rateSource   String      @default("MANUAL") // VENDOR_MASTER | MANUAL
@@ -1997,10 +2004,12 @@ model GrnItemComponentRate {
   company      Company     @relation(fields: [companyId], references: [id])
   grnItem      GrnItem     @relation(fields: [grnItemId, companyId], references: [id, companyId], onDelete: Cascade)
   grnItemId    String
-  stoneTypeId  String
-  stoneType    StoneType   @relation(fields: [stoneTypeId, companyId], references: [id, companyId], onDelete: Restrict)
+  stoneTypeId  String?
+  stoneType    StoneType?  @relation(fields: [stoneTypeId, companyId], references: [id, companyId], onDelete: Restrict)
   stoneGradeId String?
   stoneGrade   StoneGrade? @relation(fields: [stoneGradeId, companyId], references: [id, companyId], onDelete: Restrict)
+  materialCodeId String?
+  materialCode   MaterialCode? @relation(fields: [materialCodeId, companyId], references: [id, companyId], onDelete: Restrict)
   unit         String      @default("CT")
   costRate     Decimal     @db.Decimal(12, 4)
 
@@ -3112,6 +3121,9 @@ model MaterialCode {
 
   tagMaterials  JewelryTagMaterial[]
   makingCharges MakingCharge[]
+  vendorRates   VendorComponentRate[]
+  poComponents  PoItemComponent[]
+  grnComponentRates GrnItemComponentRate[]
 
   @@unique([companyId, code])
   // composite-FK target: lets the database refuse a child that points at another company's MaterialCode

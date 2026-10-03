@@ -108,10 +108,10 @@ procurementRouter.get('/vendor-rates', requirePermission('po:view'), async (req:
 });
 procurementRouter.get('/vendor-rates/resolve', requirePermission('po:view'), async (req: Request, res: Response) => {
   const s = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
-  const supplierId = s(req.query.supplierId), stoneTypeId = s(req.query.stoneTypeId);
-  if (!supplierId || !stoneTypeId) throw new AppError('supplierId and stoneTypeId are required', 400);
+  const supplierId = s(req.query.supplierId), stoneTypeId = s(req.query.stoneTypeId), materialCodeId = s(req.query.materialCodeId);
+  if (!supplierId || (!stoneTypeId && !materialCodeId)) throw new AppError('supplierId and a stoneTypeId or materialCodeId are required', 400);
   const asOf = parseOptionalDate(req.query.asOf, 'As-of date');
-  res.json({ success: true, data: await vendorRateSvc.previewVendorRate(req.tenant!, { supplierId, stoneTypeId, stoneGradeId: s(req.query.stoneGradeId), unit: s(req.query.unit), asOf }) });
+  res.json({ success: true, data: await vendorRateSvc.previewVendorRate(req.tenant!, { supplierId, stoneTypeId, materialCodeId, stoneGradeId: s(req.query.stoneGradeId), unit: s(req.query.unit), asOf }) });
 });
 procurementRouter.post('/vendor-rates',requirePermission('po:create'), async (req: Request, res: Response) => {
   const body = { ...req.body, effectiveDate: parseOptionalDate(req.body.effectiveDate, 'Effective date') };

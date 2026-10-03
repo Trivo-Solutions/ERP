@@ -24,6 +24,8 @@ describe('vendor component rates (PO -> GRN -> Tagging)', () => {
   let pearlId: string;        // StoneType (unit CT) — priced grade-less
   let pearlGradeId: string;
   let otherStoneTypeId: string;
+  let beadsId: string;        // MaterialCode (non-metal, unit GM) — the tag screen's "Materials" group
+  let otherMaterialId: string;
   const poIds: string[] = [];
   const lotIds: string[] = [];
   const tagIds: string[] = [];
@@ -71,6 +73,8 @@ describe('vendor component rates (PO -> GRN -> Tagging)', () => {
     vvsGradeId = (await prisma.stoneGrade.create({ data: { companyId: tenant.company.id, stoneTypeId: diamondId, clarity: 'VVS' } })).id;
     pearlGradeId = (await prisma.stoneGrade.create({ data: { companyId: tenant.company.id, stoneTypeId: pearlId, quality: 'AA' } })).id;
     otherStoneTypeId = (await prisma.stoneType.create({ data: { companyId: other.company.id, code: `ODIA-${suffix}`, name: 'Other Diamond' } })).id;
+    beadsId = (await prisma.materialCode.create({ data: { companyId: tenant.company.id, code: `BEAD-${suffix}`, name: 'Gold Beads', materialType: 'OTHER', unit: 'GM' } })).id;
+    otherMaterialId = (await prisma.materialCode.create({ data: { companyId: other.company.id, code: `OBEAD-${suffix}`, name: 'Other Beads', materialType: 'OTHER', unit: 'GM' } })).id;
   });
 
   afterAll(async () => {
@@ -85,6 +89,7 @@ describe('vendor component rates (PO -> GRN -> Tagging)', () => {
     await prisma.supplier.deleteMany({ where: { id: supplierId } });
     await prisma.stoneGrade.deleteMany({ where: { companyId: tenant.company.id } });
     await prisma.stoneType.deleteMany({ where: { companyId: { in: [tenant.company.id, other.company.id] } } });
+    await prisma.materialCode.deleteMany({ where: { id: { in: [beadsId, otherMaterialId] } } });
     await prisma.stockType.deleteMany({ where: { id: stockTypeId } });
     await prisma.productCategory.deleteMany({ where: { id: ringCat } });
     await cleanupTestTenant(tenant);
@@ -264,6 +269,78 @@ describe('vendor component rates (PO -> GRN -> Tagging)', () => {
       expect((await prisma.jewelryTagMaterial.findFirstOrThrow({ where: { tagId: a.id } })).costRate).toBeNull();
       const b = await createTag({ materials: [{ code: 'DIA', materialType: 'DIAMOND', stoneGradeId: vsGradeId, weight: 0.25, unit: 'CT', costRate: 100, costAmount: 25 }] });
       expect(Number(b.costPrice)).toBe(25);
+    });
+  });
+
+  describe('Material Code components (the tag screen Materials group)', () => {
+    const beadRate = (extra: Record<string, unknown> = {}) => createVendorRate(tenant.ctx, userId, {
+      supplierId, materialCodeId: beadsId, costRate: 650, effectiveDate: new Date('2026-01-01'), ...extra,
+    } as any);
+
+    it('a vendor rate for a Material Code defaults a PO component (unit from the material), and an override leaves the master alone', async () => {
+      const vr = await beadRate();
+      expect(vr.unit).toBe('GM');
+      expect(vr.stoneTypeId).toBeNull();
+      const dflt = await newPO(lump({ components: [{ materialCodeId: beadsId }] }));
+      const c = dflt.poItems[0].components[0];
+      expect(c.materialCodeId).toBe(beadsId);
+      expect(c.stoneTypeId).toBeNull();
+      expect(Number(c.costRate)).toBe(650);
+      expect(c.rateSource).toBe('VENDOR_MASTER');
+
+      const typed = await newPO(lump({ components: [{ materialCodeId: beadsId, costRate: 600 }] }));
+      expect(Number(typed.poItems[0].components[0].costRate)).toBe(600);
+      expect(typed.poItems[0].components[0].rateSource).toBe('MANUAL');
+      expect(Number((await prisma.vendorComponentRate.findUniqueOrThrow({ where: { id: vr.id } })).costRate)).toBe(650);
+    });
+
+    it('previewVendorRate answers for a Material Code; no rate is NONE', async () => {
+      const found = await previewVendorRate(tenant.ctx, { supplierId, materialCodeId: beadsId, asOf: new Date() });
+      expect(found).toMatchObject({ status: 'MATCH', unit: 'GM', rate: { costRate: 650 } });
+      const none = await previewVendorRate(tenant.ctx, { supplierId, materialCodeId: beadsId, unit: 'CT', asOf: new Date() });
+      expect(none.status).toBe('NONE');
+    });
+
+    it('a component is a stone OR a material — never both, never neither, and a grade only narrows a stone', async () => {
+      for (const components of [
+        [{ materialCodeId: beadsId, stoneTypeId: diamondId, costRate: 1 }],
+        [{ costRate: 1 }],
+        [{ materialCodeId: beadsId, stoneGradeId: vsGradeId, costRate: 1 }],
+      ]) {
+        await expect(createPO({ supplierId, poType: 'OUTRIGHT', orderDate: new Date(), items: [lump({ components }) as any] }, tenant.ctx, userId))
+          .rejects.toMatchObject({ statusCode: 400 });
+      }
+      await expect(beadRate({ stoneTypeId: diamondId })).rejects.toMatchObject({ statusCode: 400 });
+      await expect(createPO({ supplierId, poType: 'OUTRIGHT', orderDate: new Date(), items: [lump({ components: [{ materialCodeId: beadsId, costRate: 1 }, { materialCodeId: beadsId, costRate: 2 }] }) as any] }, tenant.ctx, userId))
+        .rejects.toMatchObject({ statusCode: 400 });
+    });
+
+    it('the database itself refuses a row with both or neither identity', async () => {
+      const base = { companyId: tenant.company.id, supplierId, unit: 'GM', costRate: 1 };
+      await expect(prisma.vendorComponentRate.create({ data: { ...base } })).rejects.toThrow();
+      await expect(prisma.vendorComponentRate.create({ data: { ...base, stoneTypeId: diamondId, materialCodeId: beadsId } })).rejects.toThrow();
+    });
+
+    it('snapshots on the GRN and tagging auto-fills a Material Code row: 2 g at ₹600/g = ₹1,200', async () => {
+      const po = await newPO(lump({ components: [{ materialCodeId: beadsId, costRate: 600 }] }));
+      const { grn, lot } = await receive(po);
+      const snap = await prisma.grnItemComponentRate.findMany({ where: { grnItemId: grn.grnItems[0].id } });
+      expect(snap).toHaveLength(1);
+      expect(snap[0].materialCodeId).toBe(beadsId);
+
+      const tag = await createTag({
+        purchaseLotId: lot!.id,
+        materials: [{ code: 'BEAD', materialType: 'OTHER', materialCodeId: beadsId, weight: 2, unit: 'GM' }],
+      });
+      const mat = await prisma.jewelryTagMaterial.findFirstOrThrow({ where: { tagId: tag.id } });
+      expect(Number(mat.costRate)).toBe(600);
+      expect(Number(mat.costAmount)).toBe(1200);
+    });
+
+    it("another company's material is a 404 on a PO line and on a vendor rate", async () => {
+      await expect(createPO({ supplierId, poType: 'OUTRIGHT', orderDate: new Date(), items: [lump({ components: [{ materialCodeId: otherMaterialId, costRate: 1 }] }) as any] }, tenant.ctx, userId))
+        .rejects.toMatchObject({ statusCode: 404 });
+      await expect(beadRate({ materialCodeId: otherMaterialId })).rejects.toMatchObject({ statusCode: 404 });
     });
   });
 

@@ -10,11 +10,11 @@ import { tenantQuery } from './tenantContext';
 //                         later vendor-rate edit (resolvePoComponents writes it from a default or the buyer's override).
 //   GrnItemComponentRate  a copy of the PO line's rates taken at receipt; tagging reads this (rateForTagMaterial).
 //
-// A component is identified by its StoneType, optionally narrowed to a StoneGrade (the variant / quality), plus the
-// unit it is priced in. Nothing is guessed between candidates: two rates that could both apply are reported as
+// A component is identified EITHER by its StoneType, optionally narrowed to a StoneGrade (the variant / quality) — the
+// tag screen's "Stones" — OR by a MaterialCode — its "Materials" — plus the unit it is priced in. Nothing is guessed between candidates: two rates that could both apply are reported as
 // AMBIGUOUS and the caller refuses, rather than one being picked arbitrarily.
 
-export interface ComponentKey { stoneTypeId: string; stoneGradeId: string | null; unit: string }
+export interface ComponentKey { stoneTypeId: string | null; stoneGradeId: string | null; materialCodeId: string | null; unit: string }
 
 export type VendorRateResolution =
   | { status: 'NONE' }
@@ -33,7 +33,7 @@ export async function resolveVendorComponentRate(
   companyId: string, supplierId: string, key: ComponentKey, asOf: Date,
 ): Promise<VendorRateResolution> {
   const find = (stoneGradeId: string | null) => tenantQuery(companyId, (tx) => tx.vendorComponentRate.findMany({
-    where: { companyId, supplierId, isActive: true, stoneTypeId: key.stoneTypeId, stoneGradeId, unit: key.unit, effectiveDate: { lte: asOf } },
+    where: { companyId, supplierId, isActive: true, stoneTypeId: key.stoneTypeId, stoneGradeId, materialCodeId: key.materialCodeId, unit: key.unit, effectiveDate: { lte: asOf } },
     orderBy: { effectiveDate: 'desc' },
   }));
   let rows = await find(key.stoneGradeId);
@@ -46,7 +46,7 @@ export async function resolveVendorComponentRate(
   return { status: 'MATCH', rate: { id: latest[0].id, costRate: Number(latest[0].costRate) } };
 }
 
-export interface PoComponentInput { stoneTypeId: string; stoneGradeId?: string | null; unit?: string; costRate?: number | string | null }
+export interface PoComponentInput { stoneTypeId?: string | null; stoneGradeId?: string | null; materialCodeId?: string | null; unit?: string; costRate?: number | string | null }
 export interface ResolvedPoComponent extends ComponentKey { costRate: number; rateSource: 'VENDOR_MASTER' | 'MANUAL' }
 
 /**
@@ -62,13 +62,22 @@ export async function resolvePoComponents(
   if (inputs.length === 0) return [];
 
   for (const c of inputs) {
-    if (!c || typeof c.stoneTypeId !== 'string' || !c.stoneTypeId) throw new AppError(`${lineName}: each component needs a stone/pearl/bead type`, 400);
+    const hasStone = !!c && typeof c.stoneTypeId === 'string' && !!c.stoneTypeId;
+    const hasMaterial = !!c && typeof c.materialCodeId === 'string' && !!c.materialCodeId;
+    if (hasStone === hasMaterial) throw new AppError(`${lineName}: each component needs either a stone or a material (not both)`, 400);
+    if (hasMaterial && c.stoneGradeId) throw new AppError(`${lineName}: a grade only applies to a stone`, 400);
   }
-  await assertAllOwned('stoneType', inputs.map((c) => c.stoneTypeId), companyId, 'Stone type');
+  const stoneIds = inputs.map((c) => c.stoneTypeId).filter((x): x is string => !!x);
+  const materialIds = inputs.map((c) => c.materialCodeId).filter((x): x is string => !!x);
+  await assertAllOwned('stoneType', stoneIds, companyId, 'Stone type');
+  await assertAllOwned('materialCode', materialIds, companyId, 'Material');
   await assertAllOwned('stoneGrade', inputs.map((c) => c.stoneGradeId ?? undefined), companyId, 'Stone grade');
 
-  const types = await tenantQuery(companyId, (tx) => tx.stoneType.findMany({
-    where: { companyId, id: { in: inputs.map((c) => c.stoneTypeId) } }, select: { id: true, name: true, unit: true },
+  const types = stoneIds.length === 0 ? [] : await tenantQuery(companyId, (tx) => tx.stoneType.findMany({
+    where: { companyId, id: { in: stoneIds } }, select: { id: true, name: true, unit: true },
+  }));
+  const materials = materialIds.length === 0 ? [] : await tenantQuery(companyId, (tx) => tx.materialCode.findMany({
+    where: { companyId, id: { in: materialIds } }, select: { id: true, name: true, unit: true },
   }));
   const gradeIds = inputs.map((c) => c.stoneGradeId).filter((g): g is string => !!g);
   const grades = gradeIds.length === 0 ? [] : await tenantQuery(companyId, (tx) => tx.stoneGrade.findMany({
@@ -78,15 +87,16 @@ export async function resolvePoComponents(
   const seen = new Set<string>();
   const out: ResolvedPoComponent[] = [];
   for (const c of inputs) {
-    const type = types.find((t) => t.id === c.stoneTypeId)!;
-    const at = `${lineName}, component ${type.name}`;
+    const type = c.stoneTypeId ? types.find((t) => t.id === c.stoneTypeId)! : null;
+    const material = c.materialCodeId ? materials.find((m) => m.id === c.materialCodeId)! : null;
+    const at = `${lineName}, component ${(type ?? material)!.name}`;
     const stoneGradeId = c.stoneGradeId || null;
     if (stoneGradeId && grades.find((g) => g.id === stoneGradeId)?.stoneTypeId !== c.stoneTypeId) {
       throw new AppError(`${at}: the chosen grade does not belong to this stone type`, 400);
     }
-    const unit = (c.unit || type.unit).toUpperCase();
-    const key: ComponentKey = { stoneTypeId: c.stoneTypeId, stoneGradeId, unit };
-    const dup = `${key.stoneTypeId}:${key.stoneGradeId ?? ''}:${key.unit}`;
+    const unit = (c.unit || (type ?? material)!.unit).toUpperCase();
+    const key: ComponentKey = { stoneTypeId: type?.id ?? null, stoneGradeId, materialCodeId: material?.id ?? null, unit };
+    const dup = `${key.stoneTypeId ?? ''}:${key.stoneGradeId ?? ''}:${key.materialCodeId ?? ''}:${key.unit}`;
     if (seen.has(dup)) throw new AppError(`${at}: listed twice on this line — give one rate per component, grade and unit`, 400);
     seen.add(dup);
 
@@ -114,7 +124,7 @@ export async function snapshotGrnComponentRates(
   if (comps.length === 0) return;
   await tx.grnItemComponentRate.createMany({
     data: comps.map((c) => ({
-      companyId, grnItemId, stoneTypeId: c.stoneTypeId, stoneGradeId: c.stoneGradeId, unit: c.unit, costRate: c.costRate,
+      companyId, grnItemId, stoneTypeId: c.stoneTypeId, stoneGradeId: c.stoneGradeId, materialCodeId: c.materialCodeId, unit: c.unit, costRate: c.costRate,
     })),
   });
 }
@@ -126,15 +136,23 @@ export async function snapshotGrnComponentRates(
  * nothing is chosen between candidates; a unit that differs is simply not applied — there is no unit conversion.
  */
 export async function rateForTagMaterial(
-  companyId: string, grnItemId: string, row: { stoneGradeId?: string | null; unit: string },
+  companyId: string, grnItemId: string, row: { stoneGradeId?: string | null; materialCodeId?: string | null; unit: string },
 ): Promise<number | null> {
+  const unit = row.unit.toUpperCase();
+  if (row.materialCodeId) {
+    // A Material Code row matches its own snapshot rate only — there is no grade to fall back across.
+    const snaps = await tenantQuery(companyId, (tx) => tx.grnItemComponentRate.findMany({
+      where: { companyId, grnItemId, materialCodeId: row.materialCodeId!, unit },
+    }));
+    return snaps.length === 1 ? Number(snaps[0].costRate) : null;
+  }
   if (!row.stoneGradeId) return null;
   const grade = await tenantQuery(companyId, (tx) => tx.stoneGrade.findFirst({
     where: { id: row.stoneGradeId!, companyId }, select: { stoneTypeId: true },
   }));
   if (!grade) return null;
   const snaps = await tenantQuery(companyId, (tx) => tx.grnItemComponentRate.findMany({
-    where: { companyId, grnItemId, stoneTypeId: grade.stoneTypeId, unit: row.unit.toUpperCase() },
+    where: { companyId, grnItemId, stoneTypeId: grade.stoneTypeId, unit },
   }));
   const exact = snaps.filter((s) => s.stoneGradeId === row.stoneGradeId);
   const pool = exact.length > 0 ? exact : snaps.filter((s) => s.stoneGradeId === null);

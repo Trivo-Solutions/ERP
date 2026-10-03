@@ -14,6 +14,7 @@ import { StatusChip } from '../../components/common/StatusChip';
 import { useAuthStore } from '../../store/auth.store';
 import { SelectField } from '../../components/fields/SelectField';
 import { computeMakingAmount } from '../../utils/estimateCalc';
+import { stoneGradeCode } from '../../utils/stoneGrade';
 import { AddSupplierDialog } from '../../components/common/AddSupplierDialog';
 
 const PO_APPROVAL_THRESHOLD = 500000;
@@ -394,29 +395,36 @@ function LotCategoryRows({ control, setValue, getValues, idx, categories, karats
 // matched here. The PO rate follows the default until the buyer types their own; an untouched rate is not sent, so
 // the server records it as the vendor default, and a typed one is sent as costRate (an override, vendor master untouched).
 
-const BLANK_COMPONENT = { stoneTypeId: '', stoneGradeId: '', unit: 'CT', rate: '' as string | number, rateEdited: false };
+const BLANK_COMPONENT = { stoneTypeId: '', stoneGradeId: '', materialCodeId: '', unit: 'CT', rate: '' as string | number, rateEdited: false };
 const COMPONENT_UNITS = ['CT', 'GM', 'PC'];
 const inr = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 4 })}`;
-const gradeLabel = (g: any) => [g.shape, g.color, g.clarity, g.cut, g.quality].filter(Boolean).join(' / ') || 'Grade';
+const gradeLabel = (g: any) => {
+  const bits = [g.shape, g.color, g.clarity, g.cut, g.quality].filter(Boolean);
+  return `${stoneGradeCode(g)} — ${g.stoneType?.name ?? g.stoneType?.code ?? 'Stone'}${bits.length ? ' (' + bits.join('/') + ')' : ''}`;
+};
 
-function ComponentRow({ control, setValue, idx, j, row, supplierId, asOf, stoneTypes, onRemove }: {
-  control: any; setValue: any; idx: number; j: number; row: any; supplierId: string; asOf: string; stoneTypes: any[]; onRemove: () => void;
+// What a component can be — the same two masters the tag screen's Materials row picks from: Material Codes
+// ("Materials") and Stone Grades ("Stones"). A stone type with no grade chosen is "any quality".
+interface ComponentCatalog { stoneTypes: any[]; stoneGrades: any[]; materialCodes: any[] }
+const pickerValue = (row: any) =>
+  row?.materialCodeId ? `mc:${row.materialCodeId}` : row?.stoneGradeId ? `sg:${row.stoneGradeId}` : row?.stoneTypeId ? `st:${row.stoneTypeId}` : '';
+
+function ComponentRow({ setValue, idx, j, row, supplierId, asOf, catalog, onRemove }: {
+  setValue: any; idx: number; j: number; row: any; supplierId: string; asOf: string; catalog: ComponentCatalog; onRemove: () => void;
 }) {
   const at = (k: string) => `items.${idx}.components.${j}.${k}`;
   const typeId: string = row?.stoneTypeId ?? '';
   const gradeId: string = row?.stoneGradeId ?? '';
+  const materialId: string = row?.materialCodeId ?? '';
   const unit: string = row?.unit ?? 'CT';
 
-  const { data: gradeData } = useQuery({
-    queryKey: ['master-stone-grades', typeId], enabled: !!typeId,
-    queryFn: () => apiGet<any>('/masters/stone-grades', { stoneTypeId: typeId }),
-  });
-  const grades: any[] = (gradeData as any)?.data ?? gradeData ?? [];
-
-  const ready = !!supplierId && !!typeId;
+  const ready = !!supplierId && (!!typeId || !!materialId);
   const { data: resolved, error: resolveError, isFetching } = useQuery({
-    queryKey: ['vendor-rate-resolve', supplierId, typeId, gradeId, unit, asOf], enabled: ready, retry: false,
-    queryFn: () => apiGet<any>('/procurement/vendor-rates/resolve', { supplierId, stoneTypeId: typeId, stoneGradeId: gradeId || undefined, unit, asOf }),
+    queryKey: ['vendor-rate-resolve', supplierId, typeId, gradeId, materialId, unit, asOf], enabled: ready, retry: false,
+    queryFn: () => apiGet<any>('/procurement/vendor-rates/resolve', {
+      supplierId, unit, asOf,
+      ...(materialId ? { materialCodeId: materialId } : { stoneTypeId: typeId, stoneGradeId: gradeId || undefined }),
+    }),
   });
   const r = (resolved as any)?.data ?? resolved;
   const defaultRate: number | null = r?.status === 'MATCH' ? Number(r.rate.costRate) : null;
@@ -428,7 +436,7 @@ function ComponentRow({ control, setValue, idx, j, row, supplierId, asOf, stoneT
 
   let defaultText: string;
   if (!supplierId) defaultText = 'Select a supplier first';
-  else if (!typeId) defaultText = '—';
+  else if (!typeId && !materialId) defaultText = '—';
   else if (isFetching && !r) defaultText = '…';
   else if (resolveError) defaultText = `Could not check: ${(resolveError as any)?.response?.data?.error ?? 'error'}`;
   else if (defaultRate != null) defaultText = `${inr(defaultRate)} / ${r.unit ?? unit}`;
@@ -439,26 +447,37 @@ function ComponentRow({ control, setValue, idx, j, row, supplierId, asOf, stoneT
   return (
     <TableRow>
       <TableCell sx={head}>
-        <Controller name={at('stoneTypeId') as any} control={control}
-          render={({ field }) => <SelectField {...field} size="small" emptyLabel="Select…" inputProps={{ 'aria-label': 'Component' }}
-            options={stoneTypes.map((t: any) => ({ value: t.id, label: t.name }))}
-            onChange={(e: any) => {
-              field.onChange(e);
-              const t = stoneTypes.find((x: any) => x.id === e.target.value);
-              setValue(at('stoneGradeId'), ''); setValue(at('unit'), t?.unit ?? 'CT'); resetRate();
-            }} />} />
+        <SelectField size="small" emptyLabel="Select…" inputProps={{ 'aria-label': 'Component' }} value={pickerValue(row)}
+          onChange={(e: any) => {
+            const [kind, id] = String(e.target.value).split(':');
+            const clear = { stoneTypeId: '', stoneGradeId: '', materialCodeId: '' };
+            let next = { ...clear, unit: 'CT' };
+            if (kind === 'mc') {
+              const m = catalog.materialCodes.find((x: any) => x.id === id);
+              if (m) next = { ...clear, materialCodeId: m.id, unit: m.unit ?? 'GM' };
+            } else if (kind === 'sg') {
+              const g = catalog.stoneGrades.find((x: any) => x.id === id);
+              if (g) next = { ...clear, stoneTypeId: g.stoneTypeId, stoneGradeId: g.id, unit: g.stoneType?.unit ?? 'CT' };
+            } else if (kind === 'st') {
+              const t = catalog.stoneTypes.find((x: any) => x.id === id);
+              if (t) next = { ...clear, stoneTypeId: t.id, unit: t.unit ?? 'CT' };
+            }
+            (Object.keys(next) as Array<keyof typeof next>).forEach((k) => setValue(at(k), next[k]));
+            resetRate();
+          }}>
+          <optgroup label="Materials">
+            {catalog.materialCodes.map((m: any) => <option key={m.id} value={`mc:${m.id}`}>{m.code}{m.name ? ` — ${m.name}` : ''}</option>)}
+          </optgroup>
+          <optgroup label="Stones">
+            {catalog.stoneTypes.map((t: any) => <option key={`t${t.id}`} value={`st:${t.id}`}>{t.name} — any quality</option>)}
+            {catalog.stoneGrades.map((g: any) => <option key={g.id} value={`sg:${g.id}`}>{gradeLabel(g)}</option>)}
+          </optgroup>
+        </SelectField>
       </TableCell>
       <TableCell sx={head}>
-        <Controller name={at('stoneGradeId') as any} control={control}
-          render={({ field }) => <SelectField {...field} size="small" emptyLabel="Any quality" inputProps={{ 'aria-label': 'Grade' }}
-            options={grades.map((g: any) => ({ value: g.id, label: gradeLabel(g) }))}
-            onChange={(e: any) => { field.onChange(e); resetRate(); }} />} />
-      </TableCell>
-      <TableCell sx={head}>
-        <Controller name={at('unit') as any} control={control}
-          render={({ field }) => <SelectField {...field} size="small" inputProps={{ 'aria-label': 'Unit' }}
-            options={Array.from(new Set([...COMPONENT_UNITS, unit])).map((u) => ({ value: u, label: u }))}
-            onChange={(e: any) => { field.onChange(e); resetRate(); }} />} />
+        <SelectField size="small" inputProps={{ 'aria-label': 'Unit' }} value={unit}
+          options={Array.from(new Set([...COMPONENT_UNITS, unit])).map((u) => ({ value: u, label: u }))}
+          onChange={(e: any) => { setValue(at('unit'), e.target.value); resetRate(); }} />
       </TableCell>
       <TableCell sx={head}>
         <Typography variant="caption" color={defaultRate != null ? 'text.primary' : 'text.secondary'} sx={{ fontFamily: 'monospace' }}>
@@ -480,8 +499,8 @@ function ComponentRow({ control, setValue, idx, j, row, supplierId, asOf, stoneT
   );
 }
 
-function LineComponents({ control, setValue, idx, rows, supplierId, asOf, stoneTypes }: {
-  control: any; setValue: any; idx: number; rows: any[]; supplierId: string; asOf: string; stoneTypes: any[];
+function LineComponents({ control, setValue, idx, rows, supplierId, asOf, catalog }: {
+  control: any; setValue: any; idx: number; rows: any[]; supplierId: string; asOf: string; catalog: ComponentCatalog;
 }) {
   const { fields, append, remove } = useFieldArray({ control, name: `items.${idx}.components` });
   const head = { fontSize: '0.7rem', py: 0.75, px: 0.75 } as const;
@@ -491,18 +510,17 @@ function LineComponents({ control, setValue, idx, rows, supplierId, asOf, stoneT
         <Table size="small" sx={{ tableLayout: 'fixed', minWidth: 760 }}>
           <TableHead>
             <TableRow>
-              <TableCell sx={{ ...head, width: '22%' }}>Component</TableCell>
-              <TableCell sx={{ ...head, width: '22%' }}>Grade</TableCell>
+              <TableCell sx={{ ...head, width: '40%' }}>Material / Stone</TableCell>
               <TableCell sx={{ ...head, width: '10%' }}>Unit</TableCell>
-              <TableCell sx={{ ...head, width: '24%' }}>Vendor default</TableCell>
-              <TableCell sx={{ ...head, width: '16%' }}>PO rate (₹)</TableCell>
+              <TableCell sx={{ ...head, width: '20%' }}>Vendor default</TableCell>
+              <TableCell sx={{ ...head, width: '20%' }}>PO rate (₹)</TableCell>
               <TableCell sx={{ ...head, width: 48 }} />
             </TableRow>
           </TableHead>
           <TableBody>
             {fields.map((f, j) => (
-              <ComponentRow key={f.id} control={control} setValue={setValue} idx={idx} j={j} row={rows[j]}
-                supplierId={supplierId} asOf={asOf} stoneTypes={stoneTypes} onRemove={() => remove(j)} />
+              <ComponentRow key={f.id} setValue={setValue} idx={idx} j={j} row={rows[j]}
+                supplierId={supplierId} asOf={asOf} catalog={catalog} onRemove={() => remove(j)} />
             ))}
           </TableBody>
         </Table>
@@ -540,6 +558,11 @@ function CreatePODialog({ open, onClose, suppliers }: { open: boolean; onClose: 
   });
   const { data: stoneTypeData } = useQuery({ queryKey: ['master-stone-types'], queryFn: () => apiGet<any>('/masters/stone-types'), enabled: open });
   const stoneTypeList: any[] = ((stoneTypeData as any)?.data ?? stoneTypeData ?? []).filter((t: any) => t.isActive !== false);
+  const { data: matCodeData } = useQuery({ queryKey: ['master-material-codes'], queryFn: () => apiGet<any>('/masters/material-codes'), enabled: open });
+  const materialCodeList: any[] = ((matCodeData as any)?.data ?? matCodeData ?? []).filter((m: any) => m.isActive !== false);
+  const { data: stoneGradeData } = useQuery({ queryKey: ['master-stone-grades'], queryFn: () => apiGet<any>('/masters/stone-grades'), enabled: open });
+  const stoneGradeList: any[] = ((stoneGradeData as any)?.data ?? stoneGradeData ?? []).filter((g: any) => g.isActive !== false);
+  const catalog: ComponentCatalog = { stoneTypes: stoneTypeList, stoneGrades: stoneGradeList, materialCodes: materialCodeList };
   const { data: catData } = useQuery({ queryKey: ['master-categories'], queryFn: () => apiGet<any>('/masters/categories'), enabled: open });
   const categoryList: any[] = (catData as any)?.data ?? catData ?? [];
   const { data: karatData } = useQuery({ queryKey: ['master-karats'], queryFn: () => apiGet<any>('/masters/karats'), enabled: open });
@@ -595,11 +618,12 @@ function CreatePODialog({ open, onClose, suppliers }: { open: boolean; onClose: 
         items: rest.items.map(({ gstPercent, lotAmount, categories, components, ...i }: any) => ({
           ...i, ...(gstPercent !== '' && gstPercent != null && { taxRate: Number(gstPercent) / 100 }),
           // A component's rate is sent only when the buyer typed one (an override); left alone, the server applies the
-          // vendor default itself. Rows with no component chosen are dropped.
-          ...((components ?? []).some((c: any) => c.stoneTypeId) && {
-            components: (components as any[]).filter((c) => c.stoneTypeId).map((c) => ({
-              stoneTypeId: c.stoneTypeId, unit: c.unit,
-              ...(c.stoneGradeId && { stoneGradeId: c.stoneGradeId }),
+          // vendor default itself. Rows with nothing chosen are dropped.
+          ...((components ?? []).some((c: any) => c.stoneTypeId || c.materialCodeId) && {
+            components: (components as any[]).filter((c) => c.stoneTypeId || c.materialCodeId).map((c) => ({
+              unit: c.unit,
+              ...(c.materialCodeId ? { materialCodeId: c.materialCodeId } : { stoneTypeId: c.stoneTypeId }),
+              ...(c.stoneGradeId && !c.materialCodeId && { stoneGradeId: c.stoneGradeId }),
               ...(c.rateEdited && c.rate !== '' && { costRate: Number(c.rate) }),
             })),
           }),
@@ -765,7 +789,7 @@ function CreatePODialog({ open, onClose, suppliers }: { open: boolean; onClose: 
                     <TableCell colSpan={7} sx={{ pt: 0, pb: isLot ? 0 : 1, px: 0.75, borderBottom: isLot ? 'none' : undefined }}>
                       <Box sx={{ overflowX: 'auto' }}>
                         <LineComponents control={control} setValue={setValue} idx={idx} rows={(watchedItems?.[idx] as any)?.components ?? []}
-                          supplierId={watchedSupplierId} asOf={watchedOrderDate} stoneTypes={stoneTypeList} />
+                          supplierId={watchedSupplierId} asOf={watchedOrderDate} catalog={catalog} />
                       </Box>
                     </TableCell>
                   </TableRow>

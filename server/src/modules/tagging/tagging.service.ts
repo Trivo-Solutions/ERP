@@ -425,16 +425,16 @@ async function assertSizeForCategory(ctx: TenantContext, sizeId: string | null |
   }
 }
 
-async function withLotComponentRates<T extends { materialType: string; stoneGradeId?: string; weight: number; unit?: string; costRate?: number; costAmount?: number }>(
+async function withLotComponentRates<T extends { materialType: string; stoneGradeId?: string; materialCodeId?: string; weight: number; unit?: string; costRate?: number; costAmount?: number }>(
   companyId: string, purchaseLotId: string, rows: T[],
 ): Promise<T[]> {
   // null (an empty form field) counts as "not entered", same as undefined; costAmount keeps its strict check
-  if (typeof purchaseLotId !== 'string' || !rows.some((m) => m.materialType !== 'METAL' && m.stoneGradeId && m.costRate == null && m.costAmount === undefined)) return rows;
+  if (typeof purchaseLotId !== 'string' || !rows.some((m) => m.materialType !== 'METAL' && (m.stoneGradeId || m.materialCodeId) && m.costRate == null && m.costAmount === undefined)) return rows;
   const lot = await tenantQuery(companyId, (_tx) => _tx.purchaseLot.findFirst({ where: { id: purchaseLotId, companyId }, select: { grnItemId: true } }));
   if (!lot) return rows; // an unknown lot is rejected, with a 404, by allocateFromLot inside the transaction
   return Promise.all(rows.map(async (m) => {
-    if (m.materialType === 'METAL' || !m.stoneGradeId || m.costRate != null || m.costAmount !== undefined) return m;
-    const rate = await rateForTagMaterial(companyId, lot.grnItemId, { stoneGradeId: m.stoneGradeId, unit: m.unit ?? 'CT' });
+    if (m.materialType === 'METAL' || !(m.stoneGradeId || m.materialCodeId) || m.costRate != null || m.costAmount !== undefined) return m;
+    const rate = await rateForTagMaterial(companyId, lot.grnItemId, { stoneGradeId: m.stoneGradeId, materialCodeId: m.materialCodeId, unit: m.unit ?? 'CT' });
     if (rate === null) return m;
     return { ...m, costRate: rate, costAmount: Math.round((Number(m.weight) * rate + Number.EPSILON) * 100) / 100 };
   }));

@@ -11,6 +11,7 @@ const INCLUDE = {
   supplier: { select: { id: true, name: true } },
   stoneType: { select: { id: true, name: true, unit: true } },
   stoneGrade: { select: { id: true, shape: true, color: true, clarity: true, cut: true, quality: true } },
+  materialCode: { select: { id: true, code: true, name: true, unit: true } },
 } as const;
 
 function parseRate(v: unknown): number {
@@ -32,47 +33,54 @@ export async function listVendorRates(ctx: TenantContext, q: { supplierId?: stri
  * What a new PO line would default to for this vendor + component + grade + unit as of `asOf` — the same resolver the
  * PO create uses, exposed read-only so the PO screen shows the backend's answer instead of re-deriving it.
  */
-export async function previewVendorRate(ctx: TenantContext, q: { supplierId: string; stoneTypeId: string; stoneGradeId?: string; unit?: string; asOf?: Date }) {
-  await assertOwnedByCompany('supplier', q.supplierId, ctx.companyId, 'Supplier');
-  await assertOwnedByCompany('stoneType', q.stoneTypeId, ctx.companyId, 'Stone type');
-  await assertOwnedIfPresent('stoneGrade', q.stoneGradeId || undefined, ctx.companyId, 'Stone grade');
-  const type = await tenantQuery(ctx.companyId, (tx) => tx.stoneType.findFirstOrThrow({ where: { id: q.stoneTypeId, companyId: ctx.companyId }, select: { unit: true } }));
-  const stoneGradeId = q.stoneGradeId || null;
+/** The component a rate is for — a stone (type + optional grade) or a Material Code — validated, with its default unit. */
+async function resolveComponentIdentity(
+  ctx: TenantContext, q: { stoneTypeId?: string | null; stoneGradeId?: string | null; materialCodeId?: string | null; unit?: string },
+) {
+  const stoneTypeId = q.stoneTypeId || null, materialCodeId = q.materialCodeId || null, stoneGradeId = q.stoneGradeId || null;
+  if (!!stoneTypeId === !!materialCodeId) throw new AppError('Give either a stone type or a material (not both)', 400);
+  if (materialCodeId) {
+    if (stoneGradeId) throw new AppError('A grade only applies to a stone', 400);
+    await assertOwnedByCompany('materialCode', materialCodeId, ctx.companyId, 'Material');
+    const m = await tenantQuery(ctx.companyId, (tx) => tx.materialCode.findFirstOrThrow({ where: { id: materialCodeId, companyId: ctx.companyId }, select: { unit: true } }));
+    return { stoneTypeId: null, stoneGradeId: null, materialCodeId, unit: (q.unit || m.unit).toUpperCase() };
+  }
+  await assertOwnedByCompany('stoneType', stoneTypeId!, ctx.companyId, 'Stone type');
+  await assertOwnedIfPresent('stoneGrade', stoneGradeId || undefined, ctx.companyId, 'Stone grade');
+  const type = await tenantQuery(ctx.companyId, (tx) => tx.stoneType.findFirstOrThrow({ where: { id: stoneTypeId!, companyId: ctx.companyId }, select: { unit: true } }));
   if (stoneGradeId) {
     const g = await tenantQuery(ctx.companyId, (tx) => tx.stoneGrade.findFirst({ where: { id: stoneGradeId, companyId: ctx.companyId }, select: { stoneTypeId: true } }));
-    if (g?.stoneTypeId !== q.stoneTypeId) throw new AppError('The chosen grade does not belong to this stone type', 400);
+    if (g?.stoneTypeId !== stoneTypeId) throw new AppError('The chosen grade does not belong to this stone type', 400);
   }
-  const unit = (q.unit || type.unit).toUpperCase();
-  const found = await resolveVendorComponentRate(ctx.companyId, q.supplierId, { stoneTypeId: q.stoneTypeId, stoneGradeId, unit }, q.asOf ?? new Date());
-  return { unit, ...found };
+  return { stoneTypeId, stoneGradeId, materialCodeId: null, unit: (q.unit || type.unit).toUpperCase() };
+}
+
+export async function previewVendorRate(ctx: TenantContext, q: { supplierId: string; stoneTypeId?: string; stoneGradeId?: string; materialCodeId?: string; unit?: string; asOf?: Date }) {
+  await assertOwnedByCompany('supplier', q.supplierId, ctx.companyId, 'Supplier');
+  const key = await resolveComponentIdentity(ctx, q);
+  const found = await resolveVendorComponentRate(ctx.companyId, q.supplierId, key, q.asOf ?? new Date());
+  return { unit: key.unit, ...found };
 }
 
 export async function createVendorRate(ctx: TenantContext, userId: string, data: {
-  supplierId: string; stoneTypeId: string; stoneGradeId?: string | null; unit?: string;
+  supplierId: string; stoneTypeId?: string | null; stoneGradeId?: string | null; materialCodeId?: string | null; unit?: string;
   costRate: number | string; effectiveDate?: Date; notes?: string;
 }) {
   await assertOwnedByCompany('supplier', data.supplierId, ctx.companyId, 'Supplier');
-  await assertOwnedByCompany('stoneType', data.stoneTypeId, ctx.companyId, 'Stone type');
-  await assertOwnedIfPresent('stoneGrade', data.stoneGradeId || undefined, ctx.companyId, 'Stone grade');
-  const type = await tenantQuery(ctx.companyId, (tx) => tx.stoneType.findFirstOrThrow({ where: { id: data.stoneTypeId, companyId: ctx.companyId }, select: { unit: true } }));
-  const stoneGradeId = data.stoneGradeId || null;
-  if (stoneGradeId) {
-    const g = await tenantQuery(ctx.companyId, (tx) => tx.stoneGrade.findFirst({ where: { id: stoneGradeId, companyId: ctx.companyId }, select: { stoneTypeId: true } }));
-    if (g?.stoneTypeId !== data.stoneTypeId) throw new AppError('The chosen grade does not belong to this stone type', 400);
-  }
-  const unit = (data.unit || type.unit).toUpperCase();
+  const key = await resolveComponentIdentity(ctx, data);
+  const { unit } = key;
   const effectiveDate = data.effectiveDate ?? new Date();
 
   // Two active rates for the same component on the same day could not be told apart — refuse at the source.
   const clash = await tenantQuery(ctx.companyId, (tx) => tx.vendorComponentRate.count({
-    where: { companyId: ctx.companyId, supplierId: data.supplierId, stoneTypeId: data.stoneTypeId, stoneGradeId, unit, isActive: true, effectiveDate },
+    where: { companyId: ctx.companyId, supplierId: data.supplierId, stoneTypeId: key.stoneTypeId, stoneGradeId: key.stoneGradeId, materialCodeId: key.materialCodeId, unit, isActive: true, effectiveDate },
   }));
   if (clash > 0) throw new AppError('This vendor already has an active rate for this component with the same effective date — change that one, or use a later date', 409);
 
   const row = await tenantQuery(ctx.companyId, (tx) => tx.vendorComponentRate.create({
     data: {
-      companyId: ctx.companyId, supplierId: data.supplierId, stoneTypeId: data.stoneTypeId, stoneGradeId, unit,
-      costRate: parseRate(data.costRate), effectiveDate, notes: data.notes,
+      companyId: ctx.companyId, supplierId: data.supplierId, stoneTypeId: key.stoneTypeId, stoneGradeId: key.stoneGradeId,
+      materialCodeId: key.materialCodeId, unit, costRate: parseRate(data.costRate), effectiveDate, notes: data.notes,
     },
     include: INCLUDE,
   }));
