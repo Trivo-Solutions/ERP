@@ -274,6 +274,8 @@ describe('Phase 4: runtime isolation', () => {
       const cat = (await va.api.get('/masters/categories')).body.data[0].id;
       const tag = await va.api.post('/tagging/tags', { branchId: va.branchId, stockTypeId: stock, categoryId: cat, name: 'Vasavi Export Ring', metalType: 'GOLD', metalKarat: '22K', grossWeight: 5, netWeight: 5, sellingPrice: 30000 });
       ids.tag = tag.body.data.id;
+      // a second, never-sold tag: a SOLD tag can no longer be reprinted, so the print control needs one still in stock
+      ids.printTag = (await va.api.post('/tagging/tags', { branchId: va.branchId, stockTypeId: stock, categoryId: cat, name: 'Vasavi Print Ring', metalType: 'GOLD', metalKarat: '22K', grossWeight: 5, netWeight: 5, sellingPrice: 30000 })).body.data.id;
       const client = await va.api.post('/orders/clients', { name: 'Vasavi Export Client', type: 'RETAIL' });
       ids.client = client.body.data.id;
       const inv = await va.api.post('/sales/invoices', { clientId: ids.client, invoiceDate: new Date().toISOString(), invoiceType: 'RETAIL', branchId: va.branchId, currency: 'INR', items: [{ productCode: 'X', description: 'Vasavi Export Ring', quantity: 1, grossWeight: 5, netGoldWeight: 5, rateType: 'FIXED', goldRate: 30000, karat: '22K', tagId: ids.tag }] });
@@ -289,7 +291,8 @@ describe('Phase 4: runtime isolation', () => {
     });
 
     it('control: the owning company can print its own tag and read its own estimate', async () => {
-      expect((await va.api.get(`/tagging/tags/${ids.tag}/print`)).status).toBe(200);
+      expect((await va.api.get(`/tagging/tags/${ids.printTag}/print`)).status).toBe(200);
+      expect((await va.api.get(`/tagging/tags/${ids.tag}/print`)).status).toBe(409); // sold → no reprint
       expect(ids.estimate).toBeTruthy();
       expect((await va.api.get(`/estimation/estimates/${ids.estimate}`)).status).toBe(200);
     });

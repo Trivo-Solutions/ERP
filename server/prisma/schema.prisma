@@ -144,6 +144,7 @@ model Company {
   productCategories     ProductCategory[]
   subCategories         SubCategory[]
   collections           Collection[]
+  sizes                 Size[]
   materialCodes         MaterialCode[]
   stockTypes            StockType[]
   stoneTypes            StoneType[]
@@ -2834,6 +2835,11 @@ model JewelryTag {
   subCategory    SubCategory?     @relation(fields: [subCategoryId, companyId], references: [id, companyId], onDelete: Restrict)
   collectionId   String?
   collection     Collection?      @relation(fields: [collectionId, companyId], references: [id, companyId], onDelete: Restrict)
+  // Size from the Size master (ring size, bangle size...) — optional, only for categories where it applies.
+  sizeId         String?
+  size           Size?            @relation(fields: [sizeId, companyId], references: [id, companyId], onDelete: Restrict)
+  // Number of physical pieces this one tag covers (e.g. a pair of earrings = 2). Null on tags that predate it.
+  noOfPcs        Int?
   // Which vendor/manufacturer this piece was sourced from — a Client (type "MANUFACTURER"),
   // reusing the party master rather than a separate table (CLAUDE.md: reuse and extend).
   manufacturerId String?
@@ -2934,6 +2940,7 @@ model ProductCategory {
   makingCharges    MakingCharge[]
   invoiceItems     InvoiceItem[]
   poItemCategories PoItemCategory[]
+  sizes            Size[]
 
   @@unique([companyId, code])
   // composite-FK target: lets the database refuse a child that points at another company's ProductCategory
@@ -2960,6 +2967,28 @@ model SubCategory {
   @@unique([id, companyId])
   @@index([companyId])
   @@map("sub_categories")
+}
+
+// A size a piece can carry (ring size, bangle size, chain length...). categoryId is optional: set,
+// the size is offered only for that category on New Tag; unset, it is offered for every category.
+model Size {
+  id         String           @id @default(cuid())
+  companyId  String
+  company    Company          @relation(fields: [companyId], references: [id])
+  code       String
+  name       String
+  categoryId String?
+  category   ProductCategory? @relation(fields: [categoryId, companyId], references: [id, companyId], onDelete: Restrict)
+  isActive   Boolean          @default(true)
+  createdAt  DateTime         @default(now())
+
+  jewelryTags JewelryTag[]
+
+  @@unique([companyId, code])
+  // composite-FK target: lets the database refuse a tag that points at another company's Size
+  @@unique([id, companyId])
+  @@index([companyId])
+  @@map("sizes")
 }
 
 model Collection {

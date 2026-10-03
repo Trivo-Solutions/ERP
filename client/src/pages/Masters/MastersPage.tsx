@@ -199,7 +199,7 @@ function GenericMasterSection({
 }: {
   title: string; description?: string; queryKey: string; apiPath: string; listParams?: Record<string, any>; invalidateKeys?: string[];
   columns: Array<{ key: string; label: string; render?: (row: any) => React.ReactNode; filterValue?: (row: any) => string }>;
-  fields: Array<{ name: string; label: string; type?: string; required?: boolean; options?: string[] }>;
+  fields: Array<{ name: string; label: string; type?: string; required?: boolean; options?: string[]; optionList?: Array<{ value: string; label: string }> }>;
 }) {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
@@ -260,6 +260,13 @@ function GenericMasterSection({
               render={({ field, fieldState }) => {
                 if (f.type === 'boolean') {
                   return <FormControlLabel control={<Switch checked={!!field.value} onChange={(e) => field.onChange(e.target.checked)} />} label={f.label} />;
+                }
+                if (f.optionList) {
+                  return <TextField {...field} select fullWidth size="small" label={f.label} error={!!fieldState.error}
+                    SelectProps={{ native: true }} InputLabelProps={{ shrink: true }}>
+                    <option value="">{f.required ? '' : '— All categories —'}</option>
+                    {f.optionList.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </TextField>;
                 }
                 if (f.options) {
                   return <TextField {...field} select fullWidth size="small" label={f.label} error={!!fieldState.error}
@@ -854,6 +861,28 @@ function exportToCSV(rows: any[]) {
 // Bespoke (not GenericMasterSection) because Karat needs a live dropdown fed by the KaratMaster
 // master, and GenericMasterSection's `fields` only support a static option list.
 
+// Sizes (ring size, bangle size, chain length...). Optional category: a size tied to a category is only
+// offered for that category on New Tag; with no category it is offered for every one. Deactivate with the
+// Status chip — tags already carrying the size keep it.
+function SizesTab() {
+  const { data: cats } = useQuery({ queryKey: ['master-categories'], queryFn: () => apiGet<any>('/masters/categories') });
+  const catList: any[] = (cats as any)?.data ?? (cats as any) ?? [];
+  return (
+    <GenericMasterSection title="Size" queryKey="master-sizes-manage" apiPath="/masters/sizes" invalidateKeys={['master-sizes']}
+      description="Sizes offered on New Tag (ring size, bangle size, chain length...). Tie a size to a category to offer it only there, or leave the category empty to offer it everywhere. Not every item needs a size — the field on New Tag is optional."
+      columns={[
+        { key: 'code', label: 'Code', render: (r: any) => <Typography fontFamily="monospace" fontWeight={700} color="#44C47A" fontSize={12}>{r.code}</Typography> },
+        { key: 'name', label: 'Size' },
+        { key: 'category', label: 'Category', filterValue: (r: any) => r.category?.name ?? 'All categories', render: (r: any) => r.category?.name ?? 'All categories' },
+      ]}
+      fields={[
+        { name: 'code', label: 'Code (e.g. R12)', required: true },
+        { name: 'name', label: 'Size (e.g. 12 or 2.6)', required: true },
+        { name: 'categoryId', label: 'Category (optional)', optionList: catList.map((c: any) => ({ value: c.id, label: c.name })) },
+      ]} />
+  );
+}
+
 function MaterialCodesTab() {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
@@ -1350,6 +1379,7 @@ const SECTIONS: Array<{ key: string; label: string; icon: React.ReactNode }> = [
   { key: 'stockTypes', label: 'Stock Types', icon: <Inventory2 fontSize="small" /> },
   { key: 'clients', label: 'Clients', icon: <Business fontSize="small" /> },
   { key: 'collections', label: 'Collections', icon: <CollectionsIcon fontSize="small" /> },
+  { key: 'sizes', label: 'Sizes', icon: <Category fontSize="small" /> },
   { key: 'karats', label: 'Karats', icon: <Diamond fontSize="small" /> },
   { key: 'materialCodes', label: 'Material Codes', icon: <Diamond fontSize="small" /> },
   { key: 'stoneTypes', label: 'Stone Types', icon: <AutoAwesome fontSize="small" /> },
@@ -1428,6 +1458,8 @@ export function MastersPage() {
                 { name: 'description', label: 'Description', type: 'textarea' },
               ]} />
           )}
+
+          {section === 'sizes' && <SizesTab />}
 
           {section === 'karats' && (
             <GenericMasterSection title="Karat" queryKey="master-karats-manage" apiPath="/masters/karats"

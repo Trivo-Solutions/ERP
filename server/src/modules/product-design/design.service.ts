@@ -201,3 +201,73 @@ export async function upsertMetalRate(companyId: string, data: {
     update: { ratePerGram: data.ratePerGram, source: data.source },
   }));
 }
+
+// ─── Daily rate sheet (one date, every purity) ───────────────────────────────
+
+const RATE_CURRENCY = 'INR';
+
+/**
+ * Every active karat/purity of the company with the rate saved for EXACTLY `date` (null when none yet),
+ * plus the most recent earlier rate as a hint for typing a new one. Reads the same MetalRate rows the
+ * single-rate POST /rates writes — no separate storage; a different date is never touched.
+ */
+export async function getRateSheet(companyId: string, date: Date) {
+  return tenantTransaction(companyId, async (tx) => {
+    const [karats, onDate, earlier] = await Promise.all([
+      tx.karatMaster.findMany({ where: { companyId, isActive: true }, orderBy: [{ metalType: 'asc' }, { purity: 'desc' }] }),
+      tx.metalRate.findMany({ where: { companyId, date, currency: RATE_CURRENCY } }),
+      tx.metalRate.findMany({
+        where: { companyId, date: { lt: date }, currency: RATE_CURRENCY },
+        orderBy: { date: 'desc' },
+      }),
+    ]);
+    const byKarat = new Map(onDate.map((r) => [r.karat, r]));
+    const prevByKarat = new Map<string, (typeof earlier)[number]>();
+    for (const r of earlier) if (!prevByKarat.has(r.karat)) prevByKarat.set(r.karat, r);
+    return karats.map((k) => {
+      const r = byKarat.get(k.code);
+      const prev = prevByKarat.get(k.code);
+      return {
+        karat: k.code,
+        metalType: k.metalType,
+        purity: k.purity,
+        ratePerGram: r ? r.ratePerGram : null,
+        source: r?.source ?? null,
+        previousRate: prev ? prev.ratePerGram : null,
+        previousDate: prev ? prev.date : null,
+      };
+    });
+  });
+}
+
+/**
+ * Saves several purities' rates for one date in a single transaction (all-or-nothing). Each row is the
+ * same (company, date, karat, currency) upsert upsertMetalRate does, so re-saving a date edits it and
+ * no other date changes. Karats must be this company's own active karats (the purity comes from there).
+ */
+export async function saveRateSheet(companyId: string, date: Date, rates: Array<{ karat: string; ratePerGram: number }>, source?: string) {
+  if (!Array.isArray(rates) || rates.length === 0) throw new AppError('No rates to save', 400);
+  const seen = new Set<string>();
+  for (const r of rates) {
+    if (typeof r?.karat !== 'string' || !r.karat) throw new AppError('Karat is required', 400);
+    if (seen.has(r.karat)) throw new AppError(`Duplicate karat ${r.karat}`, 400);
+    seen.add(r.karat);
+    if (typeof r.ratePerGram !== 'number' || !Number.isFinite(r.ratePerGram) || r.ratePerGram <= 0) {
+      throw new AppError(`Rate for ${r.karat} must be a number greater than 0`, 400);
+    }
+  }
+  return tenantTransaction(companyId, async (tx) => {
+    const karats = await tx.karatMaster.findMany({ where: { companyId, code: { in: [...seen] }, isActive: true } });
+    const purityByCode = new Map(karats.map((k) => [k.code, k.purity]));
+    for (const code of seen) if (!purityByCode.has(code)) throw new AppError(`Unknown karat/purity code: ${code}`, 400);
+    const saved = [];
+    for (const r of rates) {
+      saved.push(await tx.metalRate.upsert({
+        where: { companyId_date_karat_currency: { companyId, date, karat: r.karat, currency: RATE_CURRENCY } },
+        create: { companyId, date, karat: r.karat, currency: RATE_CURRENCY, ratePerGram: r.ratePerGram, purity: purityByCode.get(r.karat)!, source },
+        update: { ratePerGram: r.ratePerGram, source },
+      }));
+    }
+    return saved;
+  });
+}

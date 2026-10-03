@@ -12,6 +12,8 @@ import { PageHeader } from '../../components/common/PageHeader';
 import { StatusChip } from '../../components/common/StatusChip';
 import { DataTable } from '../../components/common/DataTable';
 
+// Mirrors the server (tagging.service.ts: LOCKED_TAG_STATUSES) — the server is what actually enforces it.
+const TAG_LOCKED = ['SOLD', 'RETIRED'];
 const TAG_STATUSES = ['IN_STOCK', 'ON_APPROVAL', 'TRANSFERRED', 'SOLD', 'RETURNED', 'RETIRED'];
 
 function todayStr() {
@@ -53,7 +55,8 @@ function TagDrawer({ tagId, onClose }: { tagId: string; onClose: () => void }) {
           <Typography variant="h6" fontWeight={700}>Tag Detail</Typography>
           <Stack direction="row" spacing={0.5}>
             {tag && (
-              <IconButton onClick={() => navigate(`/tagging/tags/${tagId}/edit`)} title="Edit tag details">
+              <IconButton onClick={() => navigate(`/tagging/tags/${tagId}/edit`)} disabled={TAG_LOCKED.includes(tag.status)}
+                title={TAG_LOCKED.includes(tag.status) ? 'Sold / retired tags cannot be edited' : 'Edit tag details'}>
                 <Edit fontSize="small" />
               </IconButton>
             )}
@@ -355,7 +358,8 @@ export function TagsPage() {
           {
             key: 'actions', label: 'Edit', align: 'center', width: 56, hideable: false, filterable: false,
             render: (t: any) => (
-              <IconButton size="small" title="Edit tag details"
+              <IconButton size="small" disabled={TAG_LOCKED.includes(t.status)}
+                title={TAG_LOCKED.includes(t.status) ? 'Sold / retired tags cannot be edited' : 'Edit tag details'}
                 onClick={(e) => { e.stopPropagation(); navigate(`/tagging/tags/${t.id}/edit`); }}>
                 <Edit fontSize="small" />
               </IconButton>

@@ -201,6 +201,57 @@ mastersRouter.delete('/collections/:id', requirePermission('masters:delete'), as
   res.json({ success: true, message: 'Collection deleted' });
 });
 
+// ─── Sizes (ring size, bangle size, chain length ...) ─────────────────────────
+// categoryId is optional: set, the size is offered only for that category on New Tag; unset, for
+// every category. `?active=true` (New Tag) hides deactivated rows; `?categoryId=` returns that
+// category's sizes plus the category-less ones.
+
+const SIZE_FIELDS = ['code', 'name', 'categoryId', 'isActive'] as const;
+
+mastersRouter.get('/sizes', requirePermission('masters:view'), async (req: Request, res: Response) => {
+  const companyId = req.tenant!.companyId;
+  const categoryId = typeof req.query.categoryId === 'string' && req.query.categoryId ? req.query.categoryId : undefined;
+  const data = await tenantQuery(companyId, (tx) =>
+    tx.size.findMany({
+      where: {
+        companyId,
+        ...(req.query.active === 'true' && { isActive: true }),
+        ...(categoryId && { OR: [{ categoryId }, { categoryId: null }] }),
+      },
+      include: { category: { select: { name: true, code: true } } },
+      orderBy: { name: 'asc' },
+    })
+  );
+  res.json({ success: true, data });
+});
+
+mastersRouter.post('/sizes', requirePermission('masters:create'), async (req: Request, res: Response) => {
+  const companyId = req.tenant!.companyId;
+  const body = { ...req.body, categoryId: req.body.categoryId || null };
+  await assertOwnedIfPresent('productCategory', body.categoryId, companyId, 'Category');
+  const data = withUpperCode(pick(body, SIZE_FIELDS)) as { code: string; name: string };
+  const item = await tenantQuery(companyId, (tx) => tx.size.create({ data: { ...data, companyId } }));
+  res.status(201).json({ success: true, data: item });
+});
+
+mastersRouter.patch('/sizes/:id', requirePermission('masters:edit'), async (req: Request, res: Response) => {
+  const companyId = req.tenant!.companyId;
+  await assertOwnedByCompany('size', req.params.id, companyId, 'Size');
+  const body = req.body.categoryId === '' ? { ...req.body, categoryId: null } : req.body;
+  await assertOwnedIfPresent('productCategory', body.categoryId, companyId, 'Category');
+  const item = await tenantQuery(companyId, (tx) =>
+    tx.size.update({ where: { id: req.params.id }, data: withUpperCode(pick(body, SIZE_FIELDS)) })
+  );
+  res.json({ success: true, data: item });
+});
+
+mastersRouter.delete('/sizes/:id', requirePermission('masters:delete'), async (req: Request, res: Response) => {
+  const companyId = req.tenant!.companyId;
+  await assertOwnedByCompany('size', req.params.id, companyId, 'Size');
+  await deleteUnusedMaster(companyId, 'This size', (tx) => tx.size.delete({ where: { id: req.params.id } }));
+  res.json({ success: true, message: 'Size deleted' });
+});
+
 // ─── Material Codes ───────────────────────────────────────────────────────────
 
 const MATERIAL_CODE_FIELDS = ['code', 'name', 'materialType', 'karat', 'unit', 'description', 'isActive'] as const;

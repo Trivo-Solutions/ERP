@@ -127,7 +127,7 @@ function TagImageUpload({ file, onChange }: { file: File | null; onChange: (f: F
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 const EMPTY = {
-  branchId: '', makeType: 'GOLD', stockTypeId: '', categoryId: '', subCategoryId: '', collectionId: '', manufacturerId: '',
+  branchId: '', makeType: 'GOLD', stockTypeId: '', categoryId: '', subCategoryId: '', collectionId: '', sizeId: '', noOfPcs: '', manufacturerId: '',
   metalKarat: '22K', huid: '', settingType: '', notes: '',
   costPrice: '', sellingPrice: '',
   // Not shown anywhere in the UI — every tag created through this wizard derives its weight from
@@ -209,6 +209,8 @@ export function NewTagPage() {
     gcTime: 0,
   });
   const editTag = (editTagQuery.data as any)?.data ?? editTagQuery.data;
+  // The server rejects edits/reprints of SOLD / RETIRED (purchase-returned) tags; this only mirrors that in the UI.
+  const tagLocked = isEditMode && !!editTag && ['SOLD', 'RETIRED'].includes(editTag.status);
   const appliedTagId = useRef<string | null>(null);
 
   const lotsQuery = useQuery({
@@ -283,6 +285,8 @@ export function NewTagPage() {
       categoryId: editTag.categoryId ?? '',
       subCategoryId: editTag.subCategoryId ?? '',
       collectionId: editTag.collectionId ?? '',
+      sizeId: editTag.sizeId ?? '',
+      noOfPcs: editTag.noOfPcs != null ? String(editTag.noOfPcs) : '',
       manufacturerId: editTag.manufacturerId ?? '',
       metalKarat: editTag.metalKarat ?? '',
       huid: editTag.huid ?? '',
@@ -370,6 +374,15 @@ export function NewTagPage() {
 
   const { data: collections } = useQuery({ queryKey: ['master-collections'], queryFn: () => apiGet<any>('/masters/collections') });
   const collectionList: any[] = (collections as any)?.data ?? (collections as any) ?? [];
+
+  // Size master — active sizes for the chosen category (plus category-less ones). Not every category
+  // uses a size, so the field is optional and simply stays empty/disabled until a category is picked.
+  const { data: sizes } = useQuery({
+    queryKey: ['master-sizes', selectedCatId],
+    queryFn: () => apiGet<any>('/masters/sizes', { active: 'true', categoryId: selectedCatId }),
+    enabled: !!selectedCatId,
+  });
+  const sizeList: any[] = (sizes as any)?.data ?? (sizes as any) ?? [];
 
   // No standalone "Item Name" field in the UI (matches the counter-inward form this page is
   // modeled on) — the tag's required `name` is derived from Classification instead, falling
@@ -751,6 +764,9 @@ export function NewTagPage() {
         categoryId:   data.categoryId   || undefined,
         subCategoryId: data.subCategoryId || undefined,
         collectionId: data.collectionId  || undefined,
+        // null (edit only) clears a previously saved value; undefined leaves it out on create
+        sizeId:       data.sizeId || (isEditMode ? null : undefined),
+        noOfPcs:      data.noOfPcs ? Number(data.noOfPcs) : (isEditMode ? null : undefined),
         manufacturerId: data.manufacturerId || undefined,
         costPrice:    totalCostAmt || Number(data.costPrice    || 0),
         sellingPrice: totalSaleAmt || Number(data.sellingPrice || 0),
@@ -868,6 +884,11 @@ export function NewTagPage() {
 
       <Box sx={{ '@media print': { display: 'none' } }}>
         <PageHeader title={isEditMode ? `Edit Tag${editTag?.tagNumber ? ` ${editTag.tagNumber}` : ''}` : 'New Tag'} />
+        {tagLocked && (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            This tag is {editTag.status === 'SOLD' ? 'sold' : 'retired / purchase-returned'} — it can no longer be edited or reprinted.
+          </Alert>
+        )}
 
         <Grid container spacing={3} alignItems="flex-start">
 
@@ -1017,7 +1038,7 @@ export function NewTagPage() {
                               <TextField {...field} select fullWidth label="Category *" error={!!fieldState.error}
                                 SelectProps={{ native: true }} InputLabelProps={{ shrink: true }}
                                 onChange={(e) => {
-                                  field.onChange(e); setValue('subCategoryId', '');
+                                  field.onChange(e); setValue('subCategoryId', ''); setValue('sizeId', '');
                                   const rows = rowsFor(e.target.value);
                                   if (rows.length === 1) setValue('metalKarat', rows[0].karat);
                                   applyMakingCharge(getValues('metalKarat'), e.target.value);
@@ -1046,6 +1067,29 @@ export function NewTagPage() {
                                 <option value="">None</option>
                                 {collectionList.map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
                               </TextField>
+                            )} />
+                        </Grid>
+                        <Grid item xs={6} sm={3}>
+                          <Controller name="sizeId" control={control}
+                            render={({ field }) => (
+                              <TextField {...field} select fullWidth label="Size" disabled={!selectedCatId}
+                                SelectProps={{ native: true }} InputLabelProps={{ shrink: true }}>
+                                <option value="">None</option>
+                                {sizeList.map((z: any) => <option key={z.id} value={z.id}>{z.name}</option>)}
+                                {/* a deactivated size already on this tag stays visible so saving doesn't silently drop it */}
+                                {field.value && !sizeList.some((z: any) => z.id === field.value) && editTag?.size
+                                  && <option value={field.value}>{editTag.size.name}</option>}
+                              </TextField>
+                            )} />
+                        </Grid>
+                        <Grid item xs={6} sm={3}>
+                          <Controller name="noOfPcs" control={control}
+                            rules={{ validate: (v) => v === '' || v == null || (Number.isInteger(Number(v)) && Number(v) >= 1) || 'Whole number, at least 1' }}
+                            render={({ field, fieldState }) => (
+                              <TextField {...field} fullWidth label="No. of Pcs" type="number"
+                                error={!!fieldState.error} helperText={fieldState.error?.message}
+                                inputProps={{ min: 1, step: 1 }} InputLabelProps={{ shrink: true }}
+                                onWheel={(e) => (e.target as HTMLInputElement).blur()} />
                             )} />
                         </Grid>
                         <Grid item xs={12} sm={6}>
@@ -1394,7 +1438,7 @@ export function NewTagPage() {
                             label="Print & continue"
                             title="Print the tag automatically after creating it, then jump straight back to Identity for the next one" />
                           <Button type="submit" variant="contained" size="large"
-                            startIcon={<AddCircleOutline />} disabled={mutation.isPending}>
+                            startIcon={<AddCircleOutline />} disabled={mutation.isPending || tagLocked}>
                             {mutation.isPending ? (isEditMode ? 'Saving...' : 'Creating...') : (isEditMode ? 'Save Changes' : 'Create Tag')}
                           </Button>
                         </Stack>

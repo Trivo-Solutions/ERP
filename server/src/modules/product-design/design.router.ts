@@ -5,6 +5,7 @@ import { requirePermission } from '../../middleware/rbac';
 import { validate } from '../../middleware/validate';
 import { resolveTenantContext } from '../../middleware/tenant';
 import { qs, qsNum } from '../../shared/query';
+import { parseDate } from '../../shared/parseDate';
 import { prisma } from '../../config/database';
 import * as designService from './design.service';
 import { tenantQuery } from '../../shared/tenantContext';
@@ -33,6 +34,20 @@ const designSchema = z.object({
 designRouter.post('/rates', requirePermission('system:config'), async (req: Request, res: Response) => {
   const rate = await designService.upsertMetalRate(req.tenant!.companyId, req.body);
   res.json({ success: true, data: rate });
+});
+
+// Rate sheet for ONE date — every active purity with that date's saved rate (editable in one go).
+designRouter.get('/rates/sheet', requirePermission('design:view'), async (req: Request, res: Response) => {
+  const rows = await designService.getRateSheet(req.tenant!.companyId, parseDate(req.query.date, 'Date'));
+  res.json({ success: true, data: rows });
+});
+
+// Saves several purities' rates for one date atomically (same rows POST /rates writes).
+designRouter.post('/rates/batch', requirePermission('system:config'), async (req: Request, res: Response) => {
+  const saved = await designService.saveRateSheet(
+    req.tenant!.companyId, parseDate(req.body.date, 'Date'), req.body.rates, typeof req.body.source === 'string' ? req.body.source : undefined,
+  );
+  res.json({ success: true, data: saved });
 });
 
 designRouter.get('/rates/latest', requirePermission('design:view'), async (req: Request, res: Response) => {

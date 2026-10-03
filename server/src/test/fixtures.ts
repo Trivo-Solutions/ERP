@@ -82,6 +82,7 @@ export async function addBranch(companyId: string, suffix: string) {
  * through createTestTenant.
  */
 export async function deleteCompanyMasters(companyId: string) {
+  await prisma.size.deleteMany({ where: { companyId } }); // refs product_categories (RESTRICT)
   await prisma.stoneGrade.deleteMany({ where: { companyId } });
   await prisma.subCategory.deleteMany({ where: { companyId } });
   await Promise.all([

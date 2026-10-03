@@ -363,6 +363,7 @@ export async function getTag(ctx: TenantContext, id: string) {
     where: { id },
     include: {
       branch: true,
+      size: { select: { id: true, code: true, name: true, isActive: true } },
       design: { select: { designCode: true, name: true } },
       jobCard: { select: { jobNumber: true, status: true } },
       createdBy: { select: { name: true } },
@@ -391,6 +392,38 @@ export async function getTag(ctx: TenantContext, id: string) {
   return tag;
 }
 
+/**
+ * Lifecycle protection: a SOLD tag is on a customer's invoice, and a RETIRED tag has left stock for good
+ * (a purchase return flips its tag to RETIRED, as does a manual retire) — their details must not change
+ * and a fresh label must not be printed for a piece that is no longer ours. Enforced here, not just in the UI.
+ */
+export const LOCKED_TAG_STATUSES = ['SOLD', 'RETIRED'] as const;
+export function assertTagEditable(status: string, action: 'edited' | 'reprinted') {
+  if ((LOCKED_TAG_STATUSES as readonly string[]).includes(status)) {
+    const why = status === 'SOLD' ? 'sold' : 'retired / purchase-returned';
+    throw new AppError(`This tag is ${why} and can no longer be ${action}`, 409);
+  }
+}
+
+function assertValidPieceCount(n: unknown) {
+  if (n === undefined || n === null) return;
+  if (typeof n !== 'number' || !Number.isInteger(n) || n < 1) {
+    throw new AppError('No. of Pcs must be a whole number of at least 1', 400);
+  }
+}
+
+// A Size must be this company's, active, and — when the size is tied to a category — match the tag's.
+// A category-less size applies to every category. Never required: no size is always allowed.
+async function assertSizeForCategory(ctx: TenantContext, sizeId: string | null | undefined, categoryId: string | null | undefined) {
+  if (!sizeId) return;
+  await assertOwnedByCompany('size', sizeId, ctx.companyId, 'Size');
+  const size = await tenantQuery(ctx.companyId, (_tx) => _tx.size.findFirst({ where: { id: sizeId, companyId: ctx.companyId } }));
+  if (!size || !size.isActive) throw new AppError('Size is inactive or not found', 400);
+  if (size.categoryId && size.categoryId !== categoryId) {
+    throw new AppError("This size does not apply to the tag's category", 400);
+  }
+}
+
 export async function createTag(ctx: TenantContext, data: {
   branchId: string; name: string; makeType?: string;
   metalType: string; metalKarat?: string;
@@ -411,6 +444,7 @@ export async function createTag(ctx: TenantContext, data: {
   // (see shared/numberSequence.ts's nextTagNumber), so there's no sensible way to number a tag
   // without them.
   stockTypeId: string; categoryId: string; subCategoryId?: string; collectionId?: string;
+  sizeId?: string; noOfPcs?: number; // Size master row (optional) / pieces this tag covers
   manufacturerId?: string; // vendor the piece was sourced from — a Client, type MANUFACTURER
   // Cut this piece out of a bought-in lot (bag): checked against the bag's category rows and caps (see
   // shared/purchaseLot.ts). The piece's cost is whatever the Materials / MC & VA tabs build (pre-filled from the
@@ -443,6 +477,8 @@ export async function createTag(ctx: TenantContext, data: {
   // the tag number.)
   await assertOwnedIfPresent('subCategory', data.subCategoryId, ctx.companyId, 'Sub-category');
   await assertOwnedIfPresent('collection', data.collectionId, ctx.companyId, 'Collection');
+  await assertSizeForCategory(ctx, data.sizeId, data.categoryId);
+  assertValidPieceCount(data.noOfPcs);
   await assertOwnedIfPresent('client', data.manufacturerId, ctx.companyId, 'Manufacturer');
   // Layer 2: jobCardId/designId are plain (non-composite) FKs left over from the manufacturing
   // era — unlike every other optional id above, nothing previously checked these, so a forged
@@ -523,6 +559,8 @@ export async function createTag(ctx: TenantContext, data: {
         categoryId:   data.categoryId,
         subCategoryId: data.subCategoryId,
         collectionId: data.collectionId,
+        sizeId:       data.sizeId || undefined,
+        noOfPcs:      data.noOfPcs ?? undefined,
         manufacturerId: data.manufacturerId,
         createdById:  userId,
       },
@@ -581,6 +619,7 @@ export async function updateTag(id: string, data: {
   costMcRate?: number; costVaPercent?: number;
   notes?: string;
   stockTypeId?: string; categoryId?: string; subCategoryId?: string; collectionId?: string;
+  sizeId?: string | null; noOfPcs?: number | null; // null clears
   manufacturerId?: string;
   materials?: Array<{
     code: string; materialType: string; materialCodeId?: string;
@@ -596,6 +635,7 @@ export async function updateTag(id: string, data: {
   if (!existing || existing.companyId !== ctx.companyId || !canAccessBranch(ctx, existing.branchId)) {
     throw new AppError('Tag not found', 404);
   }
+  assertTagEditable(existing.status, 'edited');
   if (data.branchId !== undefined) await assertBranchAccessible(data.branchId, ctx);
 
   if (data.metalKarat && !(await isValidKarat(ctx.companyId, data.metalKarat))) {
@@ -606,6 +646,11 @@ export async function updateTag(id: string, data: {
   await assertOwnedIfPresent('productCategory', data.categoryId, ctx.companyId, 'Category');
   await assertOwnedIfPresent('subCategory', data.subCategoryId, ctx.companyId, 'Sub-category');
   await assertOwnedIfPresent('collection', data.collectionId, ctx.companyId, 'Collection');
+  // A size must fit the category the tag will have AFTER this edit (the new one if it is changing too).
+  if (data.sizeId || data.categoryId) {
+    await assertSizeForCategory(ctx, data.sizeId ?? existing.sizeId, data.categoryId ?? existing.categoryId);
+  }
+  if (data.noOfPcs !== undefined && data.noOfPcs !== null) assertValidPieceCount(data.noOfPcs);
   await assertOwnedIfPresent('client', data.manufacturerId, ctx.companyId, 'Manufacturer');
   await assertAllOwned('materialCode', (data.materials ?? []).map((m) => m.materialCodeId), ctx.companyId, 'Material code');
   await assertAllOwned('stoneGrade', (data.materials ?? []).map((m) => m.stoneGradeId), ctx.companyId, 'Stone grade');
@@ -663,6 +708,8 @@ export async function updateTag(id: string, data: {
         ...(data.categoryId !== undefined && { categoryId: data.categoryId }),
         ...(data.subCategoryId !== undefined && { subCategoryId: data.subCategoryId }),
         ...(data.collectionId !== undefined && { collectionId: data.collectionId }),
+        ...(data.sizeId !== undefined && { sizeId: data.sizeId || null }),
+        ...(data.noOfPcs !== undefined && { noOfPcs: data.noOfPcs }),
         ...(data.manufacturerId !== undefined && { manufacturerId: data.manufacturerId }),
       },
       include: { branch: { select: { name: true } }, category: true, subCategory: true, stockType: true },
@@ -930,6 +977,7 @@ export async function getTagPrintTspl(ctx: TenantContext, tagId: string, templat
   if (!tag || tag.companyId !== ctx.companyId || !canAccessBranch(ctx, tag.branchId)) {
     throw new AppError('Tag not found', 404);
   }
+  assertTagEditable(tag.status, 'reprinted');
 
   const template = templateId
     ? await tenantQuery(ctx.companyId, (_tx) => _tx.tagTemplate.findUnique({ where: { id: templateId } }))
