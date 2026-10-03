@@ -22,7 +22,9 @@ type BoundField =
   | 'huid' | 'settingType'
   | 'categoryName' | 'subCategoryName' | 'collectionName' | 'stockTypeName' | 'manufacturerName'
   | 'sellingPrice' | 'saleMcRate' | 'saleVaPercent' | 'costPrice'
-  | 'notes' | 'taggedDate' | 'branchName' | 'branchCode';
+  | 'notes' | 'taggedDate' | 'branchName' | 'branchCode'
+  | 'categoryCode' | 'subCategoryCode' | 'collectionCode' | 'stockTypeCode'
+  | 'sizeName' | 'sizeCode' | 'noOfPcs' | 'status' | 'costMcRate' | 'costVaPercent' | 'netPurity';
 
 const BOUND_FIELD_OPTIONS: { value: BoundField; label: string }[] = [
   { value: 'tagNumber', label: 'Tag Number' },
@@ -51,6 +53,17 @@ const BOUND_FIELD_OPTIONS: { value: BoundField; label: string }[] = [
   { value: 'taggedDate', label: 'Tagged Date' },
   { value: 'branchName', label: 'Branch Name' },
   { value: 'branchCode', label: 'Branch Code' },
+  { value: 'categoryCode', label: 'Category Code' },
+  { value: 'subCategoryCode', label: 'Sub-Category Code' },
+  { value: 'collectionCode', label: 'Collection Code' },
+  { value: 'stockTypeCode', label: 'Stock Type Code' },
+  { value: 'sizeName', label: 'Size' },
+  { value: 'sizeCode', label: 'Size Code' },
+  { value: 'noOfPcs', label: 'No. of Pieces' },
+  { value: 'status', label: 'Status' },
+  { value: 'costMcRate', label: 'Cost Making Charge (per g, internal)' },
+  { value: 'costVaPercent', label: 'Cost Wastage / VA % (internal)' },
+  { value: 'netPurity', label: 'Karat + Net Weight' },
 ];
 
 type ElementType = 'text' | 'barcode' | 'qrcode' | 'box' | 'line' | 'image';

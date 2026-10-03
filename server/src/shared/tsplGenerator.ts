@@ -19,12 +19,14 @@ const KNOWN_BOUND_FIELDS = [
   'grossWeight', 'netWeight', 'stoneWeight', 'diamondWeight', 'colorStoneWeight', 'stonePieces',
   'huid', 'settingType',
   'categoryName', 'subCategoryName', 'collectionName', 'stockTypeName', 'manufacturerName',
+  'categoryCode', 'subCategoryCode', 'collectionCode', 'stockTypeCode',
+  'sizeName', 'sizeCode', 'noOfPcs', 'status', 'costMcRate', 'costVaPercent', 'netPurity',
   'sellingPrice', 'saleMcRate', 'saleVaPercent', 'costPrice',
   'notes', 'taggedDate', 'branchName', 'branchCode',
 ] as const;
 export type BoundField = typeof KNOWN_BOUND_FIELDS[number];
 
-type NamedRef = { name: string } | null | undefined;
+type NamedRef = { name: string; code?: string | null } | null | undefined;
 
 // Only the first eight are guaranteed; every other column is optional so a caller that loaded a
 // lighter tag (or a test) still type-checks — an absent value just prints as an empty string.
@@ -32,6 +34,7 @@ export type TagForPrint = Pick<JewelryTag,
   'tagNumber' | 'name' | 'metalKarat' | 'grossWeight' | 'netWeight' | 'stoneWeight' | 'huid' | 'sellingPrice'
 > & Partial<Pick<JewelryTag,
   'makeType' | 'metalType' | 'settingType' | 'costPrice' | 'saleMcRate' | 'saleVaPercent' | 'notes' | 'createdAt'
+  | 'noOfPcs' | 'status' | 'costMcRate' | 'costVaPercent'
 >> & {
   branch?: { name: string; branchCode?: string | null } | null;
   category?: NamedRef;
@@ -39,6 +42,7 @@ export type TagForPrint = Pick<JewelryTag,
   collection?: NamedRef;
   stockType?: NamedRef;
   manufacturer?: NamedRef;
+  size?: NamedRef;
   materials?: { materialType: string; weight: NumericInput; pieces?: number | null }[];
 };
 
@@ -132,6 +136,17 @@ function resolveBoundField(tag: TagForPrint, field: string): string {
     case 'taggedDate':       return tag.createdAt ? tag.createdAt.toLocaleDateString('en-GB').replace(/\//g, '-') : '';
     case 'branchName':       return tag.branch?.name ?? '';
     case 'branchCode':       return tag.branch?.branchCode ?? '';
+    case 'categoryCode':     return tag.category?.code ?? '';
+    case 'subCategoryCode':  return tag.subCategory?.code ?? '';
+    case 'collectionCode':   return tag.collection?.code ?? '';
+    case 'stockTypeCode':    return tag.stockType?.code ?? '';
+    case 'sizeName':         return tag.size?.name ?? '';
+    case 'sizeCode':         return tag.size?.code ?? '';
+    case 'noOfPcs':          return tag.noOfPcs == null ? '' : String(tag.noOfPcs);
+    case 'status':           return tag.status ?? '';
+    case 'costMcRate':       return tag.costMcRate == null ? '' : `${Number(tag.costMcRate).toFixed(2)}/g`;
+    case 'costVaPercent':    return tag.costVaPercent == null ? '' : `${Number(tag.costVaPercent).toFixed(2)}%`;
+    case 'netPurity':        return tag.metalKarat ? `${tag.metalKarat} / ${Number(tag.netWeight).toFixed(3)}g` : `${Number(tag.netWeight).toFixed(3)}g`;
   }
 }
 
