@@ -88,6 +88,9 @@ model Company {
   supplierPayments      SupplierPayment[]
   purchaseLots          PurchaseLot[]
   poItemCategories      PoItemCategory[]
+  vendorComponentRates  VendorComponentRate[]
+  poItemComponents      PoItemComponent[]
+  grnItemComponentRates GrnItemComponentRate[]
   purchaseReturnItems   PurchaseReturnItem[]
   purchaseOrders        PurchaseOrder[]
   poItems               PoItem[]
@@ -1109,6 +1112,7 @@ model Supplier {
   artisans       Artisan[]
   returns        PurchaseReturn[]
   payments       SupplierPayment[]
+  componentRates VendorComponentRate[]
   debitNotes     DebitNote[]
   // G2g-7d: inward RCM foundation.
   rcmLiabilities RcmLiability[]
@@ -1799,6 +1803,8 @@ model PoItem {
   grnItems   GrnItem[]
   // FINISHED_LOT lines only: what is in the bag, category by category (see PoItemCategory).
   categories PoItemCategory[]
+  // The agreed cost rate of each stone/pearl/bead component this line's pieces carry (see PoItemComponent).
+  components PoItemComponent[]
 
   // composite-FK target: lets the database refuse a child that points at another company's PoItem
   @@unique([id, companyId])
@@ -1921,11 +1927,86 @@ model GrnItem {
   // classified as RCM_APPLICABLE. Null for the overwhelming majority of lines (rcmCategory NONE).
   rcmLiability RcmLiability?
 
+  // Snapshot of the PO's component cost rates taken when this line was received (see GrnItemComponentRate).
+  componentRates GrnItemComponentRate[]
+
   // composite-FK target: lets the database refuse a lot that points at another company's GrnItem
   @@unique([id, companyId])
   @@index([companyId])
   @@index([buyerRegistrationId])
   @@map("grn_items")
+}
+
+// A supplier's standing cost rate for a stone/pearl/bead component (a StoneType, optionally narrowed to a
+// StoneGrade variant/quality) in a unit — e.g. Diamond / VS / CT = 30,000. It is only the DEFAULT a new PO line
+// starts from: the PO's own rate (PoItemComponent) is what is agreed for that purchase, and changing or retiring a
+// vendor rate here never touches an existing PO or GRN. Among the active rows for one supplier+stone+grade+unit
+// the one with the latest effectiveDate on or before the PO date applies; two with the same latest date are
+// ambiguous and are reported, never picked between (shared/vendorRates.ts).
+model VendorComponentRate {
+  id            String      @id @default(cuid())
+  companyId     String
+  company       Company     @relation(fields: [companyId], references: [id])
+  supplierId    String
+  supplier      Supplier    @relation(fields: [supplierId, companyId], references: [id, companyId], onDelete: Restrict)
+  stoneTypeId   String
+  stoneType     StoneType   @relation(fields: [stoneTypeId, companyId], references: [id, companyId], onDelete: Restrict)
+  stoneGradeId  String?
+  stoneGrade    StoneGrade? @relation(fields: [stoneGradeId, companyId], references: [id, companyId], onDelete: Restrict)
+  unit          String      @default("CT")
+  costRate      Decimal     @db.Decimal(12, 4)
+  effectiveDate DateTime    @default(now())
+  isActive      Boolean     @default(true)
+  notes         String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([companyId])
+  @@index([supplierId, stoneTypeId])
+  @@map("vendor_component_rates")
+}
+
+// The cost rate agreed ON THIS PO for one component its pieces carry. Copied from the vendor's standing rate when
+// the buyer did not type one (rateSource VENDOR_MASTER) or entered/overridden by the buyer (MANUAL); either way it
+// is the purchase's own figure and later vendor-rate edits never reach it.
+model PoItemComponent {
+  id           String      @id @default(cuid())
+  companyId    String
+  company      Company     @relation(fields: [companyId], references: [id])
+  poItem       PoItem      @relation(fields: [poItemId, companyId], references: [id, companyId], onDelete: Cascade)
+  poItemId     String
+  stoneTypeId  String
+  stoneType    StoneType   @relation(fields: [stoneTypeId, companyId], references: [id, companyId], onDelete: Restrict)
+  stoneGradeId String?
+  stoneGrade   StoneGrade? @relation(fields: [stoneGradeId, companyId], references: [id, companyId], onDelete: Restrict)
+  unit         String      @default("CT")
+  costRate     Decimal     @db.Decimal(12, 4)
+  rateSource   String      @default("MANUAL") // VENDOR_MASTER | MANUAL
+
+  @@index([companyId])
+  @@index([poItemId])
+  @@map("po_item_components")
+}
+
+// Historical snapshot of the PO's component rates, written when the GRN line is received and never recomputed.
+// Tagging a piece out of the received goods reads THESE rows, so a later PO edit or vendor-rate change can't
+// reprice goods already received.
+model GrnItemComponentRate {
+  id           String      @id @default(cuid())
+  companyId    String
+  company      Company     @relation(fields: [companyId], references: [id])
+  grnItem      GrnItem     @relation(fields: [grnItemId, companyId], references: [id, companyId], onDelete: Cascade)
+  grnItemId    String
+  stoneTypeId  String
+  stoneType    StoneType   @relation(fields: [stoneTypeId, companyId], references: [id, companyId], onDelete: Restrict)
+  stoneGradeId String?
+  stoneGrade   StoneGrade? @relation(fields: [stoneGradeId, companyId], references: [id, companyId], onDelete: Restrict)
+  unit         String      @default("CT")
+  costRate     Decimal     @db.Decimal(12, 4)
+
+  @@index([companyId])
+  @@index([grnItemId])
+  @@map("grn_item_component_rates")
 }
 
 // A bag of finished pieces bought on ONE supplier invoice line (a category's worth: e.g. 14 rings, 22K,
@@ -3283,6 +3364,9 @@ model StoneType {
   createdAt   DateTime @default(now())
 
   stoneGrades StoneGrade[]
+  vendorRates VendorComponentRate[]
+  poComponents PoItemComponent[]
+  grnComponentRates GrnItemComponentRate[]
 
   @@unique([companyId, code])
   // composite-FK target: lets the database refuse a child that points at another company's StoneType
@@ -3313,6 +3397,9 @@ model StoneGrade {
 
   priceMasters PriceMaster[]
   tagMaterials JewelryTagMaterial[]
+  vendorRates  VendorComponentRate[]
+  poComponents PoItemComponent[]
+  grnComponentRates GrnItemComponentRate[]
 
   // composite-FK target: lets the database refuse a child that points at another company's StoneGrade
   @@unique([id, companyId])

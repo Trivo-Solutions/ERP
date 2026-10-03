@@ -8,6 +8,7 @@ import { nextDocumentNumber, nextSimpleCode } from '../../shared/numberSequence'
 import { TenantContext, tenantQuery, tenantBatch, tenantTransaction } from '../../shared/tenantContext';
 import { assertOwnedByCompany, assertBranchAccessible, assertAllOwned } from '../../middleware/tenant';
 import { isValidKarat } from '../../shared/karatMaster';
+import { resolvePoComponents, snapshotGrnComponentRates, PoComponentInput } from '../../shared/vendorRates';
 import { FINISHED_GOODS_MATERIAL_TYPE, FINISHED_LOT_MATERIAL_TYPE, DEFAULT_HSN_CODE } from '../../shared/constants';
 import { round2, resolveSupplierStateCode, splitInputGst, resolveBuyerRegistration } from '../../shared/inputGst';
 import { isValidTaxCategory, DEFAULT_TAX_CATEGORY } from '../../shared/taxCategory';
@@ -62,7 +63,7 @@ const round4 = (n: number) => Math.round((n + Number.EPSILON) * 10000) / 10000;
 // A PO with its lines — and, on a FINISHED_LOT line, the bag's category rows (named, for display).
 const PO_INCLUDE = {
   supplier: true,
-  poItems: { include: { categories: { include: { category: { select: { name: true, code: true } } } } } },
+  poItems: { include: { categories: { include: { category: { select: { name: true, code: true } } } }, components: true } },
 } as const;
 
 // One category's row of a bag, as sent: the invoice's gross weight plus any one of stone / net (the other is
@@ -88,7 +89,12 @@ async function resolveLotCategories(
   const name = item.materialName || 'Lot line';
   if (!(Number(item.lotAmount) > 0)) throw new AppError(`${name}: the lot amount (before GST) is required`, 400);
   const rows = item.categories;
-  if (!Array.isArray(rows) || rows.length === 0) throw new AppError(`${name}: add at least one category to the lot`, 400);
+  // The category breakup is optional: a supplier may bill the bag as one lump (weight + amount) with nothing broken down.
+  if (rows === undefined || rows === null || (Array.isArray(rows) && rows.length === 0)) {
+    if (!(Number(item.weight) > 0)) throw new AppError(`${name}: enter the lot's weight (or add its category breakup)`, 400);
+    return [];
+  }
+  if (!Array.isArray(rows)) throw new AppError(`${name}: categories must be a list`, 400);
 
   await assertAllOwned('productCategory', rows.map((r) => r.categoryId), companyId, 'Category');
   const given = (v: unknown) => v !== undefined && v !== null && v !== '';
@@ -154,6 +160,9 @@ export async function createPO(data: {
     /** FINISHED_LOT lines only (a bag): weight = the bag's gross, lotAmount = its ONE amount before GST, and
      *  categories = what is in it, one row per category+karat. quantity/ratePerUnit are ignored (a bag is one unit). */
     lotAmount?: number; categories?: LotCategoryInput[];
+    /** Stone / pearl / bead components this line's pieces carry, each with the cost rate agreed for this PO. A rate left
+     *  out defaults from the supplier's vendor rate (VendorComponentRate); one given is the PO's own and overrides it. */
+    components?: PoComponentInput[];
     /** HSN code for the GST rate lookup — defaults to DEFAULT_HSN_CODE (jewellery, 3%). */
     hsnCode?: string;
     /** GST rate as a fraction (0.03 = 3%) exactly as charged on the supplier's bill. Omitted: the HSN
@@ -199,6 +208,12 @@ export async function createPO(data: {
   const missingHsn = hsnCodes.filter((c) => !hsnByCode.has(c));
   if (missingHsn.length > 0) throw new AppError(`Unknown HSN code(s): ${missingHsn.join(', ')}`, 400);
 
+  // Component rates: the buyer's own, else the vendor's standing rate (see shared/vendorRates.ts).
+  const componentsByLine = new Map<(typeof data.items)[number], Awaited<ReturnType<typeof resolvePoComponents>>>();
+  for (const i of data.items) {
+    componentsByLine.set(i, await resolvePoComponents(ctx.companyId, data.supplierId, data.orderDate, i.materialName || 'PO line', i.components));
+  }
+
   const items = data.items.map((src) => {
     const { hsnCode, taxRate: explicitRate, materialCode, materialName, materialType, quantity, weight, unit, karat, ratePerUnit } = src;
     const hsn = hsnByCode.get(hsnCode ?? DEFAULT_HSN_CODE)!;
@@ -216,15 +231,17 @@ export async function createPO(data: {
     const rcmCategory = src.rcmCategory ?? DEFAULT_RCM_CATEGORY;
     const base = { materialCode, materialName, materialType, hsnCodeId: hsn.id, taxRate, taxCategory, rcmCategory };
     const cats = lotCategories.get(src);
+    const comps = componentsByLine.get(src)!;
     if (cats) {
       // One bag = one unit. The invoice states the bag's amount, not a rate; its weights are the category rows'.
       const amount = round2(Number(src.lotAmount));
       return {
         ...base, quantity: 1, unit: 'BAG', weight: round4(Number(weight) > 0 ? Number(weight) : cats.reduce((s, c) => s + c.grossWeight, 0)),
-        netWeight: round4(cats.reduce((s, c) => s + c.netWeight, 0)), karat: undefined, ratePerUnit: amount, totalAmount: amount, cats,
+        // No breakup: the bag's gross weight stands in as its net, so its cost still splits by weight across the pieces.
+        netWeight: round4(cats.length > 0 ? cats.reduce((s, c) => s + c.netWeight, 0) : Number(weight)), karat: undefined, ratePerUnit: amount, totalAmount: amount, cats, comps,
       };
     }
-    return { ...base, quantity, weight, unit, karat, ratePerUnit, totalAmount: quantity * ratePerUnit, netWeight: undefined, cats: undefined };
+    return { ...base, quantity, weight, unit, karat, ratePerUnit, totalAmount: quantity * ratePerUnit, netWeight: undefined, cats: undefined, comps };
   });
 
   const subtotal = items.reduce((sum, i) => sum + i.totalAmount, 0);
@@ -249,9 +266,12 @@ export async function createPO(data: {
       },
     });
     // Lines one by one (not createMany): a lot line's category rows need its id.
-    for (const { cats, ...line } of items) {
+    for (const { cats, comps, ...line } of items) {
       const created = await tx.poItem.create({ data: { companyId: ctx.companyId, poId: header.id, ...line } });
-      if (cats) {
+      if (comps.length > 0) {
+        await tx.poItemComponent.createMany({ data: comps.map((c) => ({ companyId: ctx.companyId, poItemId: created.id, ...c })) });
+      }
+      if (cats && cats.length > 0) {
         await tx.poItemCategory.createMany({ data: cats.map((c) => ({ companyId: ctx.companyId, poItemId: created.id, ...c })) });
       }
     }
@@ -284,9 +304,8 @@ async function openPurchaseLot(tx: Prisma.TransactionClient, a: {
   if (already) throw new AppError(`${poItem.materialName}: this lot line has already been received`, 409);
   if (poItem.netWeight == null) throw new AppError(`${poItem.materialName}: the PO line has no net weight — it is not a valid lot line`, 400);
   const categories = await tx.poItemCategory.findMany({ where: { companyId: ctx.companyId, poItemId: poItem.id } });
-  if (categories.length === 0) throw new AppError(`${poItem.materialName}: the PO line has no category breakdown — it is not a valid lot line`, 400);
-  // A total piece count exists only when every category row states one.
-  const pieces = categories.every((c) => c.pieces != null) ? categories.reduce((s, c) => s + (c.pieces ?? 0), 0) : null;
+  // A total piece count exists only when there is a breakup and every category row states one.
+  const pieces = categories.length > 0 && categories.every((c) => c.pieces != null) ? categories.reduce((s, c) => s + (c.pieces ?? 0), 0) : null;
 
   const taxable = round2(Number(poItem.totalAmount));
   const gst = splitInputGst(taxable, Number(poItem.taxRate), a.supplierStateCode, a.companyStateCode);
@@ -404,6 +423,10 @@ export async function createGRN(data: {
       },
       include: { grnItems: true },
     });
+
+    // Snapshot each line's agreed component rates (stone / pearl / bead) so tagging uses what THIS PO agreed, whatever
+    // the PO or the vendor's rate list says later.
+    for (const g of grn.grnItems) await snapshotGrnComponentRates(tx, ctx.companyId, g.id, g.poItemId);
 
     // FINISHED_LOT lines: open the lot and book the whole bill (goods + input GST) now — see openPurchaseLot.
     const lotLines = grn.grnItems.filter((g) => po.poItems.find((p) => p.id === g.poItemId)?.materialType === FINISHED_LOT_MATERIAL_TYPE);

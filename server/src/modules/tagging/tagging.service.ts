@@ -8,6 +8,7 @@ import { resolveMetalRate } from '../../shared/metalRate';
 import { resolveSupplierStateCode, splitInputGst, round2, resolveBuyerRegistration } from '../../shared/inputGst';
 import { resolvePriceMaster } from '../../shared/priceMaster';
 import { allocateFromLot } from '../../shared/purchaseLot';
+import { rateForTagMaterial } from '../../shared/vendorRates';
 import { postAutoJournalEntry } from '../finance/finance.service';
 import { LEDGER_ACCOUNT } from '../../shared/ledgerAccounts';
 import { bookRcmLiabilityIfApplicable } from '../finance/gst/gstr3bRcmBooking.service';
@@ -424,6 +425,21 @@ async function assertSizeForCategory(ctx: TenantContext, sizeId: string | null |
   }
 }
 
+async function withLotComponentRates<T extends { materialType: string; stoneGradeId?: string; weight: number; unit?: string; costRate?: number; costAmount?: number }>(
+  companyId: string, purchaseLotId: string, rows: T[],
+): Promise<T[]> {
+  // null (an empty form field) counts as "not entered", same as undefined; costAmount keeps its strict check
+  if (typeof purchaseLotId !== 'string' || !rows.some((m) => m.materialType !== 'METAL' && m.stoneGradeId && m.costRate == null && m.costAmount === undefined)) return rows;
+  const lot = await tenantQuery(companyId, (_tx) => _tx.purchaseLot.findFirst({ where: { id: purchaseLotId, companyId }, select: { grnItemId: true } }));
+  if (!lot) return rows; // an unknown lot is rejected, with a 404, by allocateFromLot inside the transaction
+  return Promise.all(rows.map(async (m) => {
+    if (m.materialType === 'METAL' || !m.stoneGradeId || m.costRate != null || m.costAmount !== undefined) return m;
+    const rate = await rateForTagMaterial(companyId, lot.grnItemId, { stoneGradeId: m.stoneGradeId, unit: m.unit ?? 'CT' });
+    if (rate === null) return m;
+    return { ...m, costRate: rate, costAmount: Math.round((Number(m.weight) * rate + Number.EPSILON) * 100) / 100 };
+  }));
+}
+
 export async function createTag(ctx: TenantContext, data: {
   branchId: string; name: string; makeType?: string;
   metalType: string; metalKarat?: string;
@@ -501,11 +517,16 @@ export async function createTag(ctx: TenantContext, data: {
   // gets one resolved from the PriceMaster rate card, by weight — before the cost/sale totals
   // below, so a resolved amount actually rolls into the tag's sellingPrice like a hand-entered
   // one would.
-  const materials = await Promise.all((data.materials ?? []).map(async (m) => {
+  const priced = await Promise.all((data.materials ?? []).map(async (m) => {
     if (m.materialType === 'METAL' || !m.stoneGradeId || m.saleAmount !== undefined) return m;
     const resolved = await resolvePriceMaster(ctx.companyId, m.stoneGradeId, Number(m.weight));
     return resolved ? { ...m, saleRate: resolved.saleRate, saleAmount: resolved.saleAmount } : m;
   }));
+
+  // A piece cut from a lot: a stone/pearl/bead row with no cost entered takes the rate the PO agreed for that
+  // component, via the GRN snapshot (shared/vendorRates.ts) — so it is not typed again on every tag. A row that
+  // already has a cost rate or amount is never touched, and a row with no matching snapshot rate is left as it was.
+  const materials = data.purchaseLotId ? await withLotComponentRates(ctx.companyId, data.purchaseLotId, priced) : priced;
 
   // Auto-compute grossWeight / netWeight from materials if provided and not explicitly set
   const metalWeight = materials

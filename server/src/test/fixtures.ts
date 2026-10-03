@@ -110,6 +110,10 @@ export async function cleanupTestTenant(t: TestTenant) {
   // tags, drop the lots, and only then can Wave 1 remove the GRN lines.
   await prisma.jewelryTag.updateMany({ where: { companyId, purchaseLotId: { not: null } }, data: { purchaseLotId: null } });
   await prisma.purchaseLot.deleteMany({ where: { companyId } });
+  // Vendor component pricing: rates hang off GRN lines / PO lines / suppliers / stone masters (RESTRICT or cascade).
+  await prisma.grnItemComponentRate.deleteMany({ where: { companyId } });
+  await prisma.poItemComponent.deleteMany({ where: { companyId } });
+  await prisma.vendorComponentRate.deleteMany({ where: { companyId } });
 
   // Wave 1 — deepest leaves (detail/child rows with no further children of their own).
   await Promise.all([

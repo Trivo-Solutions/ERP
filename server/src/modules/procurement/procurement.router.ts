@@ -5,6 +5,7 @@ import { resolveTenantContext } from '../../middleware/tenant';
 import { AppError } from '../../middleware/error';
 import { prisma } from '../../config/database';
 import * as svc from './procurement.service';
+import * as vendorRateSvc from './vendorRate.service';
 import * as debitNoteSvc from './debitNote.service';
 import * as debitNoteTemplateSvc from './debitNoteTemplate.service';
 import { tenantQuery } from '../../shared/tenantContext';
@@ -98,6 +99,27 @@ procurementRouter.patch('/orders/:id/status', requirePermission('po:approve'), a
     data: { status: req.body.status },
   }));
   res.json({ success: true, data: po });
+});
+
+// Vendor component rates (stone / pearl / bead cost rates a new PO line defaults from)
+procurementRouter.get('/vendor-rates', requirePermission('po:view'), async (req: Request, res: Response) => {
+  const supplierId = typeof req.query.supplierId === 'string' ? req.query.supplierId : undefined;
+  res.json({ success: true, data: await vendorRateSvc.listVendorRates(req.tenant!, { supplierId, activeOnly: req.query.activeOnly === 'true' }) });
+});
+procurementRouter.get('/vendor-rates/resolve', requirePermission('po:view'), async (req: Request, res: Response) => {
+  const s = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
+  const supplierId = s(req.query.supplierId), stoneTypeId = s(req.query.stoneTypeId);
+  if (!supplierId || !stoneTypeId) throw new AppError('supplierId and stoneTypeId are required', 400);
+  const asOf = parseOptionalDate(req.query.asOf, 'As-of date');
+  res.json({ success: true, data: await vendorRateSvc.previewVendorRate(req.tenant!, { supplierId, stoneTypeId, stoneGradeId: s(req.query.stoneGradeId), unit: s(req.query.unit), asOf }) });
+});
+procurementRouter.post('/vendor-rates',requirePermission('po:create'), async (req: Request, res: Response) => {
+  const body = { ...req.body, effectiveDate: parseOptionalDate(req.body.effectiveDate, 'Effective date') };
+  res.status(201).json({ success: true, data: await vendorRateSvc.createVendorRate(req.tenant!, req.user!.userId, body) });
+});
+procurementRouter.patch('/vendor-rates/:id', requirePermission('po:create'), async (req: Request, res: Response) => {
+  const { costRate, notes, isActive } = req.body;
+  res.json({ success: true, data: await vendorRateSvc.updateVendorRate(req.tenant!, req.user!.userId, req.params.id, { costRate, notes, isActive }) });
 });
 
 // GRN

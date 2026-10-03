@@ -149,8 +149,9 @@ describe('purchase lots (PO bag line -> GRN opens the lot -> tag pieces out of i
     it('rejects a bag line that is incomplete, inconsistent or points outside the company', async () => {
       const bad = (extra: Record<string, unknown>) =>
         createPO({ supplierId, poType: 'OUTRIGHT', orderDate: new Date(), items: [bagLine(extra)] }, tenant.ctx, userId);
-      await expect(bad({ categories: [] })).rejects.toThrow(/at least one category/);
-      await expect(bad({ categories: undefined })).rejects.toThrow(/at least one category/);
+      // (the category breakup is optional — an empty/absent one is a lump-sum lot, see vendorComponentRates.test.ts —
+      //  but a lump-sum lot still needs its weight)
+      await expect(bad({ categories: [], weight: 0 })).rejects.toThrow(/lot's weight/);
       await expect(bad({ lotAmount: 0 })).rejects.toThrow(/lot amount/);
       await expect(bad({ categories: [ringRow({ netWeight: undefined }), neckRow()] })).rejects.toThrow(/net weight or the stone weight/);
       await expect(bad({ categories: [ringRow({ netWeight: 41 }), neckRow()] })).rejects.toThrow(/cannot exceed gross/);

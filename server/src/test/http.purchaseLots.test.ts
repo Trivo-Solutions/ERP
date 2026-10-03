@@ -74,7 +74,7 @@ describe('HTTP: purchase lots (bags)', () => {
 
     // an incomplete bag line is a 400, not a 500
     const noRows = await a.post('/procurement/orders', {
-      supplierId: A.supplierId, poType: 'OUTRIGHT', orderDate: '2026-09-01', items: [bagLine(A, { categories: [] })],
+      supplierId: A.supplierId, poType: 'OUTRIGHT', orderDate: '2026-09-01', items: [bagLine(A, { categories: [], weight: 0 })],   // breakup is optional, but a lump lot still needs its weight
     });
     expect(noRows.status).toBe(400);
     const wrongSum = await a.post('/procurement/orders', {

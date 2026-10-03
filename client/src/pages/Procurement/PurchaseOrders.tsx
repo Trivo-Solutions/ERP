@@ -1,4 +1,4 @@
-import { useState, Fragment } from 'react';
+import { useState, useEffect, useRef, Fragment } from 'react';
 import {
   Box, Card, Table, TableHead, TableBody, TableRow, TableCell, Typography, Button,
   Grid, MenuItem, TextField, Chip, Dialog, DialogTitle, DialogContent, DialogActions,
@@ -314,7 +314,7 @@ function LotCategoryRows({ control, setValue, getValues, idx, categories, karats
 
   return (
     <Box sx={{ mt: 1, pl: 2, borderLeft: 3, borderColor: 'primary.light' }}>
-      <Table size="small" sx={{ tableLayout: 'fixed', minWidth: 900 }}>
+      {fields.length > 0 && <Table size="small" sx={{ tableLayout: 'fixed', minWidth: 900 }}>
         <TableHead>
           <TableRow>
             <TableCell colSpan={6} sx={head} />
@@ -356,17 +356,25 @@ function LotCategoryRows({ control, setValue, getValues, idx, categories, karats
               <TableCell sx={cell}>{numField(j, 'mcRate', 'Making ₹/g', { step: 0.01, min: 0 })}</TableCell>
               <TableCell sx={cell}>{numField(j, 'vaPercent', 'VA %', { step: 0.01, min: 0, max: 100 })}</TableCell>
               <TableCell sx={{ ...cell, textAlign: 'right' }}>
-                <IconButton size="small" color="error" disabled={fields.length === 1} onClick={() => remove(j)}><Close fontSize="small" /></IconButton>
+                <IconButton size="small" color="error" aria-label="Remove category row" onClick={() => remove(j)}><Close fontSize="small" /></IconButton>
               </TableCell>
             </TableRow>
           ))}
         </TableBody>
-      </Table>
+      </Table>}
       <Stack direction="row" spacing={2} alignItems="center" sx={{ mt: 1 }}>
-        <Button size="small" startIcon={<Add />} onClick={() => append({ ...BLANK_CATEGORY })}>Add category</Button>
-        <Typography variant="caption" color={off ? 'error' : 'text.secondary'} sx={{ fontFamily: 'monospace' }}>
-          Categories total {total.toFixed(3)} g{bagGross > 0 ? ` of the bag's ${bagGross.toFixed(3)} g` : ''}{off ? ' — they must add up to the bag' : ''}
-        </Typography>
+        <Button size="small" startIcon={<Add />} onClick={() => append({ ...BLANK_CATEGORY })}>
+          {fields.length === 0 ? 'Add category breakup (optional)' : 'Add category'}
+        </Button>
+        {fields.length === 0 ? (
+          <Typography variant="caption" color="text.secondary">
+            No breakup: the bag is billed as one lump (gross weight + amount). Pieces can then be tagged from it in any category.
+          </Typography>
+        ) : (
+          <Typography variant="caption" color={off ? 'error' : 'text.secondary'} sx={{ fontFamily: 'monospace' }}>
+            Categories total {total.toFixed(3)} g{bagGross > 0 ? ` of the bag's ${bagGross.toFixed(3)} g` : ''}{off ? ' — they must add up to the bag' : ''}
+          </Typography>
+        )}
       </Stack>
       {anyRates && (
         <Typography variant="caption" color={rateOff ? 'warning.main' : 'text.secondary'} sx={{ display: 'block', mt: 0.5, fontFamily: 'monospace' }}>
@@ -375,6 +383,136 @@ function LotCategoryRows({ control, setValue, getValues, idx, categories, karats
           {rateOff ? ' — check the rates or the amount' : ''}
         </Typography>
       )}
+    </Box>
+  );
+}
+
+// ─── Stone / pearl / bead components of a line ────────────────────────────────────────────────
+//
+// Vendor rate = the default; PO rate = what was agreed for THIS purchase (it is what flows on to the GRN and tags).
+// The default shown is whatever the server's resolver says (GET /procurement/vendor-rates/resolve) — nothing is
+// matched here. The PO rate follows the default until the buyer types their own; an untouched rate is not sent, so
+// the server records it as the vendor default, and a typed one is sent as costRate (an override, vendor master untouched).
+
+const BLANK_COMPONENT = { stoneTypeId: '', stoneGradeId: '', unit: 'CT', rate: '' as string | number, rateEdited: false };
+const COMPONENT_UNITS = ['CT', 'GM', 'PC'];
+const inr = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 4 })}`;
+const gradeLabel = (g: any) => [g.shape, g.color, g.clarity, g.cut, g.quality].filter(Boolean).join(' / ') || 'Grade';
+
+function ComponentRow({ control, setValue, idx, j, row, supplierId, asOf, stoneTypes, onRemove }: {
+  control: any; setValue: any; idx: number; j: number; row: any; supplierId: string; asOf: string; stoneTypes: any[]; onRemove: () => void;
+}) {
+  const at = (k: string) => `items.${idx}.components.${j}.${k}`;
+  const typeId: string = row?.stoneTypeId ?? '';
+  const gradeId: string = row?.stoneGradeId ?? '';
+  const unit: string = row?.unit ?? 'CT';
+
+  const { data: gradeData } = useQuery({
+    queryKey: ['master-stone-grades', typeId], enabled: !!typeId,
+    queryFn: () => apiGet<any>('/masters/stone-grades', { stoneTypeId: typeId }),
+  });
+  const grades: any[] = (gradeData as any)?.data ?? gradeData ?? [];
+
+  const ready = !!supplierId && !!typeId;
+  const { data: resolved, error: resolveError, isFetching } = useQuery({
+    queryKey: ['vendor-rate-resolve', supplierId, typeId, gradeId, unit, asOf], enabled: ready, retry: false,
+    queryFn: () => apiGet<any>('/procurement/vendor-rates/resolve', { supplierId, stoneTypeId: typeId, stoneGradeId: gradeId || undefined, unit, asOf }),
+  });
+  const r = (resolved as any)?.data ?? resolved;
+  const defaultRate: number | null = r?.status === 'MATCH' ? Number(r.rate.costRate) : null;
+  const shown = row?.rateEdited ? row.rate : (defaultRate ?? '');
+  const differs = row?.rateEdited && defaultRate != null && row.rate !== '' && Number(row.rate) !== defaultRate;
+
+  // Changing what the component IS invalidates a rate typed for the old one.
+  const resetRate = () => { setValue(at('rate'), ''); setValue(at('rateEdited'), false); };
+
+  let defaultText: string;
+  if (!supplierId) defaultText = 'Select a supplier first';
+  else if (!typeId) defaultText = '—';
+  else if (isFetching && !r) defaultText = '…';
+  else if (resolveError) defaultText = `Could not check: ${(resolveError as any)?.response?.data?.error ?? 'error'}`;
+  else if (defaultRate != null) defaultText = `${inr(defaultRate)} / ${r.unit ?? unit}`;
+  else if (r?.status === 'AMBIGUOUS') defaultText = `Ambiguous (${r.candidates.map((c: any) => inr(Number(c.costRate))).join(' or ')}) — enter the PO rate`;
+  else defaultText = 'Not available';
+
+  const head = { py: 0.75, px: 0.75, borderBottom: 'none' } as const;
+  return (
+    <TableRow>
+      <TableCell sx={head}>
+        <Controller name={at('stoneTypeId') as any} control={control}
+          render={({ field }) => <SelectField {...field} size="small" emptyLabel="Select…" inputProps={{ 'aria-label': 'Component' }}
+            options={stoneTypes.map((t: any) => ({ value: t.id, label: t.name }))}
+            onChange={(e: any) => {
+              field.onChange(e);
+              const t = stoneTypes.find((x: any) => x.id === e.target.value);
+              setValue(at('stoneGradeId'), ''); setValue(at('unit'), t?.unit ?? 'CT'); resetRate();
+            }} />} />
+      </TableCell>
+      <TableCell sx={head}>
+        <Controller name={at('stoneGradeId') as any} control={control}
+          render={({ field }) => <SelectField {...field} size="small" emptyLabel="Any quality" inputProps={{ 'aria-label': 'Grade' }}
+            options={grades.map((g: any) => ({ value: g.id, label: gradeLabel(g) }))}
+            onChange={(e: any) => { field.onChange(e); resetRate(); }} />} />
+      </TableCell>
+      <TableCell sx={head}>
+        <Controller name={at('unit') as any} control={control}
+          render={({ field }) => <SelectField {...field} size="small" inputProps={{ 'aria-label': 'Unit' }}
+            options={Array.from(new Set([...COMPONENT_UNITS, unit])).map((u) => ({ value: u, label: u }))}
+            onChange={(e: any) => { field.onChange(e); resetRate(); }} />} />
+      </TableCell>
+      <TableCell sx={head}>
+        <Typography variant="caption" color={defaultRate != null ? 'text.primary' : 'text.secondary'} sx={{ fontFamily: 'monospace' }}>
+          {defaultText}
+        </Typography>
+      </TableCell>
+      <TableCell sx={head}>
+        <TextField size="small" fullWidth type="number" value={shown}
+          placeholder={defaultRate == null && ready ? 'Enter rate' : undefined}
+          inputProps={{ step: 0.01, min: 0, 'aria-label': 'PO rate' }}
+          helperText={differs ? `Differs from vendor default ${inr(defaultRate!)}` : undefined}
+          FormHelperTextProps={{ sx: { color: 'warning.main', mx: 0 } }}
+          onChange={(e) => { setValue(at('rate'), e.target.value); setValue(at('rateEdited'), true); }} />
+      </TableCell>
+      <TableCell sx={{ ...head, textAlign: 'right' }}>
+        <IconButton size="small" color="error" aria-label="Remove component" onClick={onRemove}><Close fontSize="small" /></IconButton>
+      </TableCell>
+    </TableRow>
+  );
+}
+
+function LineComponents({ control, setValue, idx, rows, supplierId, asOf, stoneTypes }: {
+  control: any; setValue: any; idx: number; rows: any[]; supplierId: string; asOf: string; stoneTypes: any[];
+}) {
+  const { fields, append, remove } = useFieldArray({ control, name: `items.${idx}.components` });
+  const head = { fontSize: '0.7rem', py: 0.75, px: 0.75 } as const;
+  return (
+    <Box sx={{ mt: 0.5, pl: 2, borderLeft: 3, borderColor: 'divider' }}>
+      {fields.length > 0 && (
+        <Table size="small" sx={{ tableLayout: 'fixed', minWidth: 760 }}>
+          <TableHead>
+            <TableRow>
+              <TableCell sx={{ ...head, width: '22%' }}>Component</TableCell>
+              <TableCell sx={{ ...head, width: '22%' }}>Grade</TableCell>
+              <TableCell sx={{ ...head, width: '10%' }}>Unit</TableCell>
+              <TableCell sx={{ ...head, width: '24%' }}>Vendor default</TableCell>
+              <TableCell sx={{ ...head, width: '16%' }}>PO rate (₹)</TableCell>
+              <TableCell sx={{ ...head, width: 48 }} />
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {fields.map((f, j) => (
+              <ComponentRow key={f.id} control={control} setValue={setValue} idx={idx} j={j} row={rows[j]}
+                supplierId={supplierId} asOf={asOf} stoneTypes={stoneTypes} onRemove={() => remove(j)} />
+            ))}
+          </TableBody>
+        </Table>
+      )}
+      <Stack direction="row" spacing={2} alignItems="center">
+        <Button size="small" startIcon={<Add />} sx={{ flexShrink: 0, whiteSpace: 'nowrap' }} onClick={() => append({ ...BLANK_COMPONENT })}>Add component rate</Button>
+        <Typography variant="caption" color="text.secondary">
+          Optional. The vendor default only pre-fills the PO rate; the PO rate is what this purchase carries to the GRN and tags. Changing it never changes the vendor's rate list, and a later vendor change never changes this PO.
+        </Typography>
+      </Stack>
     </Box>
   );
 }
@@ -397,9 +535,11 @@ function CreatePODialog({ open, onClose, suppliers }: { open: boolean; onClose: 
     defaultValues: {
       supplierId: '', poType: 'OUTRIGHT', orderDate: new Date().toISOString().split('T')[0],
       currency: 'INR', prId: '',
-      items: [{ materialCode: '', materialName: '', materialType: 'METAL', quantity: 1, weight: 0, lotAmount: '' as string | number, categories: [] as Array<typeof BLANK_CATEGORY>, unit: 'GM', karat: '22K', ratePerUnit: 0, gstPercent: '' as string | number }],
+      items: [{ materialCode: '', materialName: '', materialType: 'METAL', quantity: 1, weight: 0, lotAmount: '' as string | number, categories: [] as Array<typeof BLANK_CATEGORY>, components: [] as Array<typeof BLANK_COMPONENT>, unit: 'GM', karat: '22K', ratePerUnit: 0, gstPercent: '' as string | number }],
     },
   });
+  const { data: stoneTypeData } = useQuery({ queryKey: ['master-stone-types'], queryFn: () => apiGet<any>('/masters/stone-types'), enabled: open });
+  const stoneTypeList: any[] = ((stoneTypeData as any)?.data ?? stoneTypeData ?? []).filter((t: any) => t.isActive !== false);
   const { data: catData } = useQuery({ queryKey: ['master-categories'], queryFn: () => apiGet<any>('/masters/categories'), enabled: open });
   const categoryList: any[] = (catData as any)?.data ?? catData ?? [];
   const { data: karatData } = useQuery({ queryKey: ['master-karats'], queryFn: () => apiGet<any>('/masters/karats'), enabled: open });
@@ -408,6 +548,22 @@ function CreatePODialog({ open, onClose, suppliers }: { open: boolean; onClose: 
 
   const watchedPrId = watch('prId');
   const watchedItems = watch('items');
+  const watchedSupplierId = watch('supplierId');
+  const watchedOrderDate = watch('orderDate');
+
+  // A PO rate typed under one supplier must never ride along to another: on a supplier change, drop every typed
+  // component rate so the new supplier's vendor default shows (and a fresh override can be entered).
+  const prevSupplierId = useRef(watchedSupplierId);
+  useEffect(() => {
+    if (prevSupplierId.current === watchedSupplierId) return;
+    prevSupplierId.current = watchedSupplierId;
+    (getValues('items') ?? []).forEach((it: any, i: number) => {
+      (it.components ?? []).forEach((_c: any, j: number) => {
+        setValue(`items.${i}.components.${j}.rate` as any, '');
+        setValue(`items.${i}.components.${j}.rateEdited` as any, false);
+      });
+    });
+  }, [watchedSupplierId, getValues, setValue]);
 
   const { data: prDetail } = useQuery({
     queryKey: ['pr-detail-for-po', watchedPrId],
@@ -436,13 +592,23 @@ function CreatePODialog({ open, onClose, suppliers }: { open: boolean; onClose: 
         ...rest, orderDate: new Date(rest.orderDate),
         // GST % as typed off the supplier's bill -> the fraction the API stores; blank = let the server
         // apply the HSN rate for a GST-registered supplier (0 for an unregistered one).
-        items: rest.items.map(({ gstPercent, lotAmount, categories, ...i }: any) => ({
+        items: rest.items.map(({ gstPercent, lotAmount, categories, components, ...i }: any) => ({
           ...i, ...(gstPercent !== '' && gstPercent != null && { taxRate: Number(gstPercent) / 100 }),
+          // A component's rate is sent only when the buyer typed one (an override); left alone, the server applies the
+          // vendor default itself. Rows with no component chosen are dropped.
+          ...((components ?? []).some((c: any) => c.stoneTypeId) && {
+            components: (components as any[]).filter((c) => c.stoneTypeId).map((c) => ({
+              stoneTypeId: c.stoneTypeId, unit: c.unit,
+              ...(c.stoneGradeId && { stoneGradeId: c.stoneGradeId }),
+              ...(c.rateEdited && c.rate !== '' && { costRate: Number(c.rate) }),
+            })),
+          }),
           // The bag's amount and category rows only mean something on a bag line; blank strings must not reach the API.
           // Of gross/stone/net only what was entered is sent — the server works out the third.
           ...(i.materialType === 'FINISHED_LOT' && {
             lotAmount: Number(lotAmount), quantity: 1, weight: Number(i.weight),
-            categories: (categories ?? []).map((c: any) => ({
+            // The breakup is optional: a row left entirely blank is not a row.
+            categories: (categories ?? []).filter((c: any) => c.categoryId || numOrNull(c.grossWeight) != null || numOrNull(c.netWeight) != null).map((c: any) => ({
               categoryId: c.categoryId, karat: c.karat, grossWeight: Number(c.grossWeight),
               ...(numOrNull(c.costRate) != null && { costRate: Number(c.costRate) }),
               ...(numOrNull(c.mcRate) != null && { mcRate: Number(c.mcRate) }),
@@ -533,7 +699,7 @@ function CreatePODialog({ open, onClose, suppliers }: { open: boolean; onClose: 
             {fields.map((field, idx) => {
               const type = watchedItems?.[idx]?.materialType;
               const isLot = type === 'FINISHED_LOT';
-              const cell = { py: 1, px: 0.75, borderBottom: isLot ? 'none' : undefined } as const;
+              const cell = { py: 1, px: 0.75, borderBottom: 'none' } as const;
               return (
                 <TableBody key={field.id}>
                   <TableRow>
@@ -560,7 +726,6 @@ function CreatePODialog({ open, onClose, suppliers }: { open: boolean; onClose: 
                               if (e.target.value === 'FINISHED_LOT') {
                                 setValue(`items.${idx}.quantity`, 1);
                                 setValue(`items.${idx}.unit`, 'BAG');
-                                if ((getValues(`items.${idx}.categories`) ?? []).length === 0) setValue(`items.${idx}.categories`, [{ ...BLANK_CATEGORY }]);
                               }
                             }}
                             options={[
@@ -596,6 +761,14 @@ function CreatePODialog({ open, onClose, suppliers }: { open: boolean; onClose: 
                       <IconButton size="small" color="error" onClick={() => remove(idx)}><Close fontSize="small" /></IconButton>
                     </TableCell>
                   </TableRow>
+                  <TableRow>
+                    <TableCell colSpan={7} sx={{ pt: 0, pb: isLot ? 0 : 1, px: 0.75, borderBottom: isLot ? 'none' : undefined }}>
+                      <Box sx={{ overflowX: 'auto' }}>
+                        <LineComponents control={control} setValue={setValue} idx={idx} rows={(watchedItems?.[idx] as any)?.components ?? []}
+                          supplierId={watchedSupplierId} asOf={watchedOrderDate} stoneTypes={stoneTypeList} />
+                      </Box>
+                    </TableCell>
+                  </TableRow>
                   {isLot && (
                     <TableRow>
                       <TableCell colSpan={7} sx={{ pt: 0, pb: 2, px: 0.75 }}>
@@ -614,7 +787,7 @@ function CreatePODialog({ open, onClose, suppliers }: { open: boolean; onClose: 
           </Table>
           </Box>
           <Button size="small" startIcon={<Add />} sx={{ mt: 1 }}
-            onClick={() => append({ materialCode: '', materialName: '', materialType: 'METAL', quantity: 1, weight: 0, lotAmount: '', categories: [], unit: 'GM', karat: '22K', ratePerUnit: 0, gstPercent: '' })}>
+            onClick={() => append({ materialCode: '', materialName: '', materialType: 'METAL', quantity: 1, weight: 0, lotAmount: '', categories: [], components: [], unit: 'GM', karat: '22K', ratePerUnit: 0, gstPercent: '' })}>
             Add Line Item
           </Button>
         </DialogContent>
