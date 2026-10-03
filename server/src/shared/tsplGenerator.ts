@@ -45,17 +45,31 @@ export type TagForPrint = Pick<JewelryTag,
 export interface TagTemplateElement {
   id: string;
   wing: 'front' | 'back';
-  type: 'text' | 'barcode' | 'qrcode' | 'line' | 'box';
+  type: 'text' | 'barcode' | 'qrcode' | 'line' | 'box' | 'image';
   xMm: number;
   yMm: number;
   widthMm?: number;   // box/line only
   heightMm?: number;  // barcode height, or box/line height
   boundField?: BoundField;
   literalText?: string;
-  fontSize?: number;
+  fontSize?: number;  // points (text only); any value, 8 = the legacy default size
+  fontFamily?: string; // text only; one of TAG_FONT_FAMILIES, defaults to Arial
+  bold?: boolean;
+  italic?: boolean;
+  imageData?: string; // image only: data:image/(png|jpeg);base64,... (downscaled by the designer)
   rotation?: 0 | 90 | 180 | 270;
   humanReadable?: boolean; // barcode only, defaults true
 }
+
+// Fonts the print agent may ask Windows for. A whitelist, not free text: the name is sent to the
+// counter PC's GDI, and an unknown face would silently fall back to a different one on print.
+export const TAG_FONT_FAMILIES = [
+  'Arial', 'Arial Narrow', 'Times New Roman', 'Courier New', 'Verdana', 'Tahoma',
+  'Georgia', 'Calibri', 'Segoe UI', 'Trebuchet MS', 'Impact', 'Consolas',
+] as const;
+const MAX_IMAGE_DATA_CHARS = 400_000;
+const IMAGE_DATA_RE = /^data:image\/(png|jpeg);base64,([A-Za-z0-9+/=]+)$/;
+const PT_TO_MM = 25.4 / 72;
 
 export interface TagTemplateLayout {
   elements: TagTemplateElement[];
@@ -132,6 +146,27 @@ function elementContent(el: TagTemplateElement, tag: TagForPrint): string {
   return el.literalText ?? '';
 }
 
+// The agent prints through the Windows driver, which can draw any installed font at any size; a
+// printer that is sent this program raw ignores the REM line and falls back to the TEXT command's
+// built-in font below. REM is TSPL's own comment command, so the program stays valid either way.
+function textExtension(el: TagTemplateElement): string {
+  const family = (TAG_FONT_FAMILIES as readonly string[]).includes(el.fontFamily ?? '') ? el.fontFamily : 'Arial';
+  const sizeMm = Math.max(0.5, Number(el.fontSize ?? 8)) * PT_TO_MM;
+  return `REM TRIVO-TEXT ${JSON.stringify({ font: family, bold: !!el.bold, italic: !!el.italic, sizeMm: Math.round(sizeMm * 100) / 100 })}`;
+}
+
+function imageCommand(el: TagTemplateElement): string | null {
+  const m = IMAGE_DATA_RE.exec(el.imageData ?? '');
+  if (!m || (el.imageData as string).length > MAX_IMAGE_DATA_CHARS) {
+    throw new AppError('Tag template image is missing, not a PNG/JPEG, or too large', 400);
+  }
+  return `REM TRIVO-IMG ${JSON.stringify({
+    x: mmToDots(el.xMm), y: mmToDots(el.yMm),
+    w: mmToDots(el.widthMm ?? 10), h: mmToDots(el.heightMm ?? 10),
+    rot: el.rotation ?? 0, data: m[2],
+  })}`;
+}
+
 function textCommand(el: TagTemplateElement, content: string): string {
   // TSPL's built-in fonts are indexed, not point-sized — approximate an arbitrary fontSize as an
   // integer magnification of the standard "3" font's 8pt baseline (TSPL rejects fractional/zero
@@ -177,7 +212,8 @@ export function generateTsplForTag(template: TagTemplateForPrint, tag: TagForPri
   for (const el of template.layout.elements ?? []) {
     const content = elementContent(el, tag);
     switch (el.type) {
-      case 'text':    lines.push(textCommand(el, content)); break;
+      case 'text':    lines.push(textExtension(el), textCommand(el, content)); break;
+      case 'image':   lines.push(imageCommand(el) as string); break;
       case 'barcode': lines.push(barcodeCommand(el, content)); break;
       case 'qrcode':  lines.push(qrcodeCommand(el, content)); break;
       case 'box':     lines.push(boxCommand(el)); break;

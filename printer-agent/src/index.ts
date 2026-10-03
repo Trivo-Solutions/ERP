@@ -29,7 +29,7 @@ const app = express();
 // Loopback-only bind (below) is the actual security boundary here, not CORS — nothing outside
 // this PC can reach the agent regardless of ALLOWED_ORIGIN.
 app.use(cors({ origin: ALLOWED_ORIGIN }));
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '5mb' }));
 
 app.get('/status', async (_req, res) => {
   if (!state.printerName) {

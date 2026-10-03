@@ -139,3 +139,32 @@ describe('extended bound fields', () => {
     expect(lean).toContain(',""');
   });
 });
+
+describe('font + image elements', () => {
+  const make = (el: any) => generateTsplForTag(
+    { widthMm: 50, heightMm: 30, gapMm: 2, layout: { elements: [{ id: 'e', wing: 'front', xMm: 1, yMm: 1, ...el }] } },
+    tag,
+  );
+  const PNG = 'data:image/png;base64,iVBORw0KGgo=';
+
+  it('sends font family, style and an unquantized size (pt -> mm) ahead of the TEXT line', () => {
+    const out = make({ type: 'text', literalText: 'Hi', fontSize: 12, fontFamily: 'Times New Roman', bold: true });
+    expect(out).toContain('REM TRIVO-TEXT {"font":"Times New Roman","bold":true,"italic":false,"sizeMm":4.23}');
+    // sizes 8 and 11 used to collapse to the same multiplier-1 print; now they differ
+    expect(make({ type: 'text', literalText: 'Hi', fontSize: 11 })).not.toEqual(make({ type: 'text', literalText: 'Hi', fontSize: 8 }));
+  });
+
+  it('falls back to Arial for a font outside the whitelist', () => {
+    expect(make({ type: 'text', literalText: 'Hi', fontFamily: 'Evil"Font' })).toContain('"font":"Arial"');
+  });
+
+  it('emits an image element as a REM TRIVO-IMG line in dots', () => {
+    const out = make({ type: 'image', xMm: 2, yMm: 3, widthMm: 10, heightMm: 5, imageData: PNG });
+    expect(out).toContain('REM TRIVO-IMG {"x":16,"y":24,"w":80,"h":40,"rot":0,"data":"iVBORw0KGgo="}');
+  });
+
+  it('rejects an image that is not a PNG/JPEG data URL', () => {
+    expect(() => make({ type: 'image', imageData: 'javascript:alert(1)' })).toThrow();
+    expect(() => make({ type: 'image' })).toThrow();
+  });
+});

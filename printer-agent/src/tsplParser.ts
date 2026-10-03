@@ -4,7 +4,8 @@
 export const DOTS_PER_MM = 8;
 
 export type DrawItem =
-  | { type: 'text'; x: number; y: number; rot: number; mult: number; text: string }
+  | { type: 'text'; x: number; y: number; rot: number; mult: number; text: string; font?: string; bold?: boolean; italic?: boolean; sizeMm?: number }
+  | { type: 'image'; x: number; y: number; w: number; h: number; rot: number; data: string }
   | { type: 'barcode'; x: number; y: number; rot: number; height: number; readable: boolean; narrow: number; text: string }
   | { type: 'qrcode'; x: number; y: number; rot: number; cell: number; text: string }
   | { type: 'box'; x1: number; y1: number; x2: number; y2: number; thick: number }
@@ -21,14 +22,25 @@ const num = (s: string) => Number(s.trim());
 
 export function parseTspl(tspl: string): ParsedLabel {
   const label: ParsedLabel = { widthMm: 0, heightMm: 0, copies: 1, items: [] };
+  // `REM TRIVO-TEXT {...}` carries font/size for the TEXT command that follows it (REM is a TSPL
+  // comment, so a raw printer ignores it).
+  let textExt: { font?: string; bold?: boolean; italic?: boolean; sizeMm?: number } | null = null;
   for (const raw of tspl.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line) continue;
     let m: RegExpMatchArray | null;
-    if ((m = line.match(/^SIZE\s+([\d.]+)\s*mm\s*,\s*([\d.]+)\s*mm/i))) {
+    if ((m = line.match(/^REM TRIVO-TEXT (\{.*\})$/))) {
+      try { textExt = JSON.parse(m[1]); } catch { textExt = null; }
+    } else if ((m = line.match(/^REM TRIVO-IMG (\{.*\})$/))) {
+      try {
+        const o = JSON.parse(m[1]);
+        label.items.push({ type: 'image', x: Number(o.x), y: Number(o.y), w: Number(o.w), h: Number(o.h), rot: Number(o.rot) || 0, data: String(o.data) });
+      } catch { /* a malformed image line is skipped, the rest of the label still prints */ }
+    } else if ((m = line.match(/^SIZE\s+([\d.]+)\s*mm\s*,\s*([\d.]+)\s*mm/i))) {
       label.widthMm = num(m[1]); label.heightMm = num(m[2]);
     } else if ((m = line.match(/^TEXT\s+(-?\d+),(-?\d+),"[^"]*",(\d+),(\d+),(\d+),"(.*)"$/i))) {
-      label.items.push({ type: 'text', x: num(m[1]), y: num(m[2]), rot: num(m[3]), mult: Math.max(1, num(m[4])), text: m[6] });
+      label.items.push({ type: 'text', x: num(m[1]), y: num(m[2]), rot: num(m[3]), mult: Math.max(1, num(m[4])), text: m[6], ...(textExt ?? {}) });
+      textExt = null;
     } else if ((m = line.match(/^BARCODE\s+(-?\d+),(-?\d+),"[^"]*",(\d+),(\d+),(\d+),(\d+),(\d+),"(.*)"$/i))) {
       label.items.push({ type: 'barcode', x: num(m[1]), y: num(m[2]), height: num(m[3]), readable: num(m[4]) === 1, rot: num(m[5]), narrow: Math.max(1, num(m[6])), text: m[8] });
     } else if ((m = line.match(/^QRCODE\s+(-?\d+),(-?\d+),\w+,(\d+),\w+,(\d+),"(.*)"$/i))) {

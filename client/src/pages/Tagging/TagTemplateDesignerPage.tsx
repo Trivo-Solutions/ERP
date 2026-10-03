@@ -53,7 +53,15 @@ const BOUND_FIELD_OPTIONS: { value: BoundField; label: string }[] = [
   { value: 'branchCode', label: 'Branch Code' },
 ];
 
-type ElementType = 'text' | 'barcode' | 'qrcode' | 'box' | 'line';
+type ElementType = 'text' | 'barcode' | 'qrcode' | 'box' | 'line' | 'image';
+
+// Must match TAG_FONT_FAMILIES in server/src/shared/tsplGenerator.ts (the server drops anything else).
+const FONT_FAMILIES = [
+  'Arial', 'Arial Narrow', 'Times New Roman', 'Courier New', 'Verdana', 'Tahoma',
+  'Georgia', 'Calibri', 'Segoe UI', 'Trebuchet MS', 'Impact', 'Consolas',
+];
+const PT_TO_MM = 25.4 / 72;
+const IMG_DOTS_PER_MM = 8; // 203 dpi head - an uploaded image is shrunk to this resolution, no bigger
 type Wing = 'front' | 'back';
 type FoldOrientation = 'none' | 'vertical' | 'horizontal';
 
@@ -74,6 +82,10 @@ interface TemplateElement {
   boundField?: BoundField;
   literalText?: string;
   fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  imageData?: string;
   rotation?: 0 | 90 | 180 | 270;
   humanReadable?: boolean;
 }
@@ -110,29 +122,29 @@ function elementLabel(el: TemplateElement) {
   return el.literalText || '(empty text)';
 }
 
-// TSPL's built-in font "3" is a fixed 16x24-dot cell at multiplier 1 — not an arbitrary point
-// size — so the preview has to derive from that real cell height (matching tsplGenerator.ts's
-// own mult calculation exactly), not an approximated CSS font-size. Getting this wrong is exactly
-// what let a template look fine on screen while printing ~3x larger for real (found the hard way
-// against a physical TSC TTP-244 Pro).
-const FONT3_CELL_HEIGHT_DOTS = 24;
-const DOTS_PER_MM = 8;
-
 function ElementPreview({ el, zoom }: { el: TemplateElement; zoom: number }) {
   const rotation = el.rotation ?? 0;
   const transform = rotation ? { transform: `rotate(${rotation}deg)`, transformOrigin: 'top left' } : {};
 
   if (el.type === 'text') {
-    const mult = Math.max(1, Math.round((el.fontSize ?? 8) / 8));
-    const lineHeightPx = (FONT3_CELL_HEIGHT_DOTS * mult / DOTS_PER_MM) * zoom;
+    // Font size is in points and maps straight to the printed em height (pt -> mm), the same
+    // conversion the server sends the print agent - so the size you see is the size that prints.
+    const emPx = Math.max(0.5, el.fontSize ?? 8) * PT_TO_MM * zoom;
     return (
       <Typography sx={{
-        fontSize: lineHeightPx * 0.8, lineHeight: `${lineHeightPx}px`,
-        fontFamily: 'monospace', whiteSpace: 'nowrap', ...transform,
+        fontSize: emPx, lineHeight: 1.15, fontFamily: `"${el.fontFamily ?? 'Arial'}", sans-serif`,
+        fontWeight: el.bold ? 700 : 400, fontStyle: el.italic ? 'italic' : 'normal',
+        whiteSpace: 'nowrap', ...transform,
       }}>
         {elementLabel(el)}
       </Typography>
     );
+  }
+  if (el.type === 'image') {
+    const w = (el.widthMm ?? 10) * zoom; const h = (el.heightMm ?? 10) * zoom;
+    return el.imageData
+      ? <Box component="img" src={el.imageData} draggable={false} sx={{ width: w, height: h, display: 'block', ...transform }} />
+      : <Box sx={{ width: w, height: h, border: '1px dashed #888', ...transform }} />;
   }
   if (el.type === 'barcode') {
     return (
@@ -221,13 +233,42 @@ export function TagTemplateDesignerPage() {
   function addElement(type: ElementType) {
     const id = `el_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     const base: TemplateElement = { id, wing: 'front', type, xMm: 5, yMm: 5 };
-    if (type === 'text') Object.assign(base, { literalText: 'Text', fontSize: 8 });
+    if (type === 'text') Object.assign(base, { literalText: 'Text', fontSize: 8, fontFamily: 'Arial' });
     if (type === 'barcode') Object.assign(base, { boundField: 'tagNumber' as BoundField, heightMm: 10, humanReadable: true });
     if (type === 'qrcode') Object.assign(base, { boundField: 'tagNumber' as BoundField });
     if (type === 'box') Object.assign(base, { widthMm: 10, heightMm: 10 });
     if (type === 'line') Object.assign(base, { widthMm: 10, heightMm: 0.3 });
     setForm((f) => ({ ...f, elements: [...f.elements, base] }));
     setSelectedElId(id);
+  }
+
+  // Shrinks the picked file to the printer's resolution (a 15 mm logo needs ~120 px, not a 4000 px
+  // photo), flattens transparency onto white, and stores it inside the template as a PNG data URL.
+  function addImageFromFile(file: File) {
+    if (!/^image\/(png|jpeg|gif|webp|bmp)$/.test(file.type)) { enqueueSnackbar('Choose a PNG or JPEG image', { variant: 'error' }); return; }
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const widthMm = Math.min(15, form.widthMm);
+      const heightMm = Math.round((widthMm * img.height / img.width) * 10) / 10;
+      const px = Math.max(8, Math.round(widthMm * IMG_DOTS_PER_MM * 2)); // 2x headroom for resizing later
+      const scale = Math.min(1, px / img.width);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(img.width * scale));
+      canvas.height = Math.max(1, Math.round(img.height * scale));
+      const ctx = canvas.getContext('2d');
+      if (!ctx) { enqueueSnackbar('Could not read the image', { variant: 'error' }); return; }
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      const imageData = canvas.toDataURL('image/png');
+      if (imageData.length > 400_000) { enqueueSnackbar('Image is too detailed - use a simpler or smaller one', { variant: 'error' }); return; }
+      const id = `el_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+      setForm((f) => ({ ...f, elements: [...f.elements, { id, wing: 'front', type: 'image', xMm: 2, yMm: 2, widthMm, heightMm, imageData }] }));
+      setSelectedElId(id);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); enqueueSnackbar('Could not read the image', { variant: 'error' }); };
+    img.src = url;
   }
 
   function removeSelected() {
@@ -339,6 +380,10 @@ export function TagTemplateDesignerPage() {
                 <Button size="small" variant="outlined" onClick={() => addElement('qrcode')}>+ QR Code</Button>
                 <Button size="small" variant="outlined" onClick={() => addElement('box')}>+ Box</Button>
                 <Button size="small" variant="outlined" onClick={() => addElement('line')}>+ Line</Button>
+                <Button size="small" variant="outlined" component="label">+ Image
+                  <input type="file" hidden accept="image/png,image/jpeg,image/gif,image/webp,image/bmp"
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) addImageFromFile(f); e.target.value = ''; }} />
+                </Button>
               </Stack>
             </Stack>
           </Card>
@@ -471,10 +516,21 @@ export function TagTemplateDesignerPage() {
                       onChange={(e) => updateElement(selectedEl.id, { literalText: e.target.value })} />
                   )}
                   {selectedEl.type === 'text' && (
-                    <NumberField label="Font Size" value={selectedEl.fontSize ?? 8}
-                      onChange={(e) => updateElement(selectedEl.id, { fontSize: Number(e.target.value) })} />
+                    <>
+                      <SelectField label="Font" value={selectedEl.fontFamily ?? 'Arial'}
+                        options={FONT_FAMILIES.map((f) => ({ value: f, label: f }))}
+                        onChange={(e) => updateElement(selectedEl.id, { fontFamily: e.target.value })} />
+                      <NumberField label="Font Size (pt)" value={selectedEl.fontSize ?? 8}
+                        onChange={(e) => updateElement(selectedEl.id, { fontSize: Number(e.target.value) })} />
+                      <Stack direction="row">
+                        <FormControlLabel label="Bold"
+                          control={<Checkbox checked={!!selectedEl.bold} onChange={(e) => updateElement(selectedEl.id, { bold: e.target.checked })} />} />
+                        <FormControlLabel label="Italic"
+                          control={<Checkbox checked={!!selectedEl.italic} onChange={(e) => updateElement(selectedEl.id, { italic: e.target.checked })} />} />
+                      </Stack>
+                    </>
                   )}
-                  {(selectedEl.type === 'text' || selectedEl.type === 'barcode' || selectedEl.type === 'qrcode') && (
+                  {(selectedEl.type === 'text' || selectedEl.type === 'barcode' || selectedEl.type === 'qrcode' || selectedEl.type === 'image') && (
                     <SelectField label="Rotation" value={String(selectedEl.rotation ?? 0)} options={ROTATION_OPTIONS}
                       onChange={(e) => updateElement(selectedEl.id, { rotation: Number(e.target.value) as 0 | 90 | 180 | 270 })} />
                   )}
@@ -488,7 +544,7 @@ export function TagTemplateDesignerPage() {
                         label="Human-readable text under barcode" />
                     </>
                   )}
-                  {(selectedEl.type === 'box' || selectedEl.type === 'line') && (
+                  {(selectedEl.type === 'box' || selectedEl.type === 'line' || selectedEl.type === 'image') && (
                     <Stack direction="row" spacing={1}>
                       <NumberField label="Width (mm)" value={selectedEl.widthMm ?? 10}
                         onChange={(e) => updateElement(selectedEl.id, { widthMm: Number(e.target.value) })} />

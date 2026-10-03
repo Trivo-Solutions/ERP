@@ -43,7 +43,14 @@ try {
                 'text' {
                     $g.TranslateTransform($it.x / $dpm, $it.y / $dpm)
                     $g.RotateTransform([single]$it.rot)
-                    $font = New-Object System.Drawing.Font('Arial', [single](2.9 * $it.mult), [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Millimeter)
+                    # font/sizeMm come from the template; a label without them (older server) keeps the
+                    # old Arial / 2.9mm-per-multiplier look.
+                    $face = if ($it.font) { [string]$it.font } else { 'Arial' }
+                    $em = if ($it.sizeMm) { [single]$it.sizeMm } else { [single](2.9 * $it.mult) }
+                    $style = [System.Drawing.FontStyle]::Regular
+                    if ($it.bold) { $style = $style -bor [System.Drawing.FontStyle]::Bold }
+                    if ($it.italic) { $style = $style -bor [System.Drawing.FontStyle]::Italic }
+                    $font = New-Object System.Drawing.Font($face, $em, $style, [System.Drawing.GraphicsUnit]::Millimeter)
                     $g.DrawString([string]$it.text, $font, $black, 0, 0, $fmt)
                     $font.Dispose()
                 }
@@ -75,6 +82,14 @@ try {
                     $img = [System.Drawing.Image]::FromStream($ms)
                     $bw = $img.Width * $it.cell / $dpm; $bh = $img.Height * $it.cell / $dpm
                     $g.DrawImage($img, [single]0, [single]0, [single]$bw, [single]$bh)
+                    $img.Dispose(); $ms.Dispose()
+                }
+                'image' {
+                    $g.TranslateTransform($it.x / $dpm, $it.y / $dpm)
+                    $g.RotateTransform([single]$it.rot)
+                    $ms = New-Object System.IO.MemoryStream (, [Convert]::FromBase64String($it.data))
+                    $img = [System.Drawing.Image]::FromStream($ms)
+                    $g.DrawImage($img, [single]0, [single]0, [single]($it.w / $dpm), [single]($it.h / $dpm))
                     $img.Dispose(); $ms.Dispose()
                 }
                 'box' {
