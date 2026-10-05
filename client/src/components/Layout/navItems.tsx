@@ -84,6 +84,7 @@ export const NAV_ITEMS: NavItem[] = [
     children: [
       { label: 'Tags & Inventory',  path: '/tagging/tags',      permission: 'tag:view' },
       { label: 'Stock Lookup',      path: '/tagging/lookup',    permission: 'tag:view' },
+      { label: 'Jewel Transaction History', path: '/tagging/transactions', permission: 'tag:view' },
       { label: 'Tag Label Designer', path: '/tagging/templates', permission: 'tagTemplate:view' },
       { label: 'Branch Stock Summary', path: '/tagging/branch-stock', permission: 'tag:view' },
       { label: 'Stock Audit',       path: '/tagging/audits',    permission: 'stock:view' },

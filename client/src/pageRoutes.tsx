@@ -53,6 +53,7 @@ import { NewBranchTransferPage } from './pages/Tagging/NewBranchTransferPage';
 import { BranchReceivesPage } from './pages/Tagging/BranchReceivesPage';
 import { BranchReceiveDetailPage } from './pages/Tagging/BranchReceiveDetailPage';
 import { StockLookupPage } from './pages/Tagging/StockLookupPage';
+import { JewelTransactionHistory } from './pages/Tagging/JewelTransactionHistory';
 import { BranchStockSummary } from './pages/Tagging/BranchStockSummary';
 import { StockAudit } from './pages/Tagging/StockAudit';
 import { TagTemplateDesignerPage } from './pages/Tagging/TagTemplateDesignerPage';
@@ -167,6 +168,7 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="tagging/tags/new"     element={<NewTagPage />} />
       <Route path="tagging/tags/:id/edit" element={<NewTagPage />} />
       <Route path="tagging/lookup"       element={<StockLookupPage />} />
+      <Route path="tagging/transactions" element={<JewelTransactionHistory />} />
       <Route path="tagging/templates"    element={<TagTemplateDesignerPage />} />
       <Route path="tagging/branch-stock" element={<BranchStockSummary />} />
       <Route path="tagging/audits"       element={<StockAudit />} />

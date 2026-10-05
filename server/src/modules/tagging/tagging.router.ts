@@ -6,6 +6,7 @@ import { AppError } from '../../middleware/error';
 import * as svc from './tagging.service';
 import * as lots from './purchaseLot.service';
 import * as history from './tagHistory.service';
+import * as tagTx from './tagTransactions.service';
 
 export const taggingRouter = Router();
 taggingRouter.use(authenticate, resolveTenantContext);
@@ -106,6 +107,11 @@ taggingRouter.get('/tags/search', requirePermission('tag:view'), async (req: Req
 
 taggingRouter.get('/tags/:id', requirePermission('tag:view'), async (req: Request, res: Response) => {
   res.json({ success: true, data: await svc.getTag(req.tenant!, req.params.id) });
+});
+
+// Jewel transaction history: every document this tag has been on (purchase, transfers, memos, sales, returns).
+taggingRouter.get('/tags/:id/transactions', requirePermission('tag:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await tagTx.getTagTransactions(req.tenant!, req.params.id) });
 });
 
 // Stage 2: generates the TSPL for one tag on demand; the client POSTs the returned string to the
