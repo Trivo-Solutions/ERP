@@ -14,7 +14,7 @@ import { postAutoJournalEntry } from '../finance/finance.service';
 import { LEDGER_ACCOUNT } from '../../shared/ledgerAccounts';
 import { bookRcmLiabilityIfApplicable } from '../finance/gst/gstr3bRcmBooking.service';
 import { assertGstr3bPeriodMutable } from '../finance/gst/gstr3bFilingProtection';
-import { generateTsplForTag, TagTemplateLayout } from '../../shared/tsplGenerator';
+import { generateTsplForTag, resolveAllBoundFields, TagTemplateLayout } from '../../shared/tsplGenerator';
 import { nextSimpleCode, nextTagNumber, nextDocumentNumber } from '../../shared/numberSequence';
 import { TenantContext, canAccessBranch, tenantTransaction, tenantBatch, tenantQuery } from '../../shared/tenantContext';
 import {
@@ -1029,6 +1029,29 @@ export async function getTagPrintTspl(ctx: TenantContext, tagId: string, templat
   );
 
   return { tspl, templateId: template.id, templateName: template.name };
+}
+
+// Designer preview: every bound field's resolved value for one tag. Read-only, tag:view, same
+// company + branch checks as the print path; no template needed (the designer renders its own,
+// possibly unsaved, layout with these values).
+export async function getTagPreviewValues(ctx: TenantContext, tagId: string) {
+  const tag = await tenantQuery(ctx.companyId, (_tx) => _tx.jewelryTag.findUnique({
+    where: { id: tagId },
+    include: {
+      branch: { select: { name: true, branchCode: true } },
+      category: { select: { name: true, code: true } },
+      subCategory: { select: { name: true, code: true } },
+      collection: { select: { name: true, code: true } },
+      stockType: { select: { name: true, code: true } },
+      size: { select: { name: true, code: true } },
+      manufacturer: { select: { name: true } },
+      materials: { select: { materialType: true, weight: true, pieces: true } },
+    },
+  }));
+  if (!tag || tag.companyId !== ctx.companyId || !canAccessBranch(ctx, tag.branchId)) {
+    throw new AppError('Tag not found', 404);
+  }
+  return { values: resolveAllBoundFields(tag) };
 }
 
 // ─── Tag Templates (Stage 3: the visual designer) ─────────────────────────────

@@ -100,6 +100,14 @@ export function canAccessBranch(ctx: TenantContext, branchId: string): boolean {
 // connection outside a transaction (where Prisma's internal pooling could hand that physical
 // connection to a different, unrelated request next).
 
+// The authenticated user making this request, handed to the database as app.actor_user_id so row triggers
+// (tag_history_capture) can record WHO changed a row. Only trusted when the request's tenant is the company
+// being queried; outside a request (scripts, tests) it is empty and the trigger records no actor.
+function actorFor(companyId: string): string {
+  const ctx = getTenantContext();
+  return ctx && ctx.companyId === companyId ? ctx.userId : '';
+}
+
 /** Form 2 — two or more independent operations, batch form. See the module doc above. */
 export async function tenantBatch<T extends readonly Prisma.PrismaPromise<unknown>[]>(
   companyId: string,
@@ -107,7 +115,7 @@ export async function tenantBatch<T extends readonly Prisma.PrismaPromise<unknow
 ): Promise<{ [K in keyof T]: T[K] extends Prisma.PrismaPromise<infer R> ? R : never }> {
   const ops = build(prisma);
   const results = await prisma.$transaction([
-    prisma.$executeRaw`SELECT set_config('app.tenant_company_id', ${companyId}, true)`,
+    prisma.$executeRaw`SELECT set_config('app.tenant_company_id', ${companyId}, true), set_config('app.actor_user_id', ${actorFor(companyId)}, true)`,
     ...ops,
   ]);
   return results.slice(1) as any;
@@ -128,7 +136,7 @@ export async function tenantTransaction<T>(
   fn: (tx: Prisma.TransactionClient) => Promise<T>
 ): Promise<T> {
   return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT set_config('app.tenant_company_id', ${companyId}, true)`;
+    await tx.$executeRaw`SELECT set_config('app.tenant_company_id', ${companyId}, true), set_config('app.actor_user_id', ${actorFor(companyId)}, true)`;
     return fn(tx);
   });
 }

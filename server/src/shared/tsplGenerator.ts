@@ -150,6 +150,14 @@ function resolveBoundField(tag: TagForPrint, field: string): string {
   }
 }
 
+// Every bound field resolved for one tag, for the designer's on-screen preview — the same strings
+// the printed label would carry, so the preview can't drift from what generateTsplForTag emits.
+export function resolveAllBoundFields(tag: TagForPrint): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const f of KNOWN_BOUND_FIELDS) out[f] = resolveBoundField(tag, f);
+  return out;
+}
+
 // TSPL has no escape sequence for a literal double-quote inside a quoted string — the safe move
 // is to drop it rather than let it terminate the command early and corrupt everything after it.
 function escapeTspl(text: string): string {

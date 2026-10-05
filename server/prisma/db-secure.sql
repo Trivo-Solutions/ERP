@@ -30,6 +30,8 @@ END $$;
 
 -- The audit trail is APPEND-ONLY for the application: it can write and read it, never rewrite history.
 REVOKE UPDATE, DELETE ON audit_logs FROM trivo_runtime;
+-- Tag (barcode) history is append-only for the same reason: written by a trigger, never rewritten.
+REVOKE UPDATE, DELETE ON tag_history FROM trivo_runtime;
 
 -- 3. Platform tables (owned by no company). Least privilege for the runtime role:
 GRANT SELECT ON companies, hsn_codes, state_master TO trivo_runtime;          -- read-only reference / company identity

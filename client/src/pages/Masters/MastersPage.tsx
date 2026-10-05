@@ -928,7 +928,7 @@ function PriceMasterTab() {
 // ─── Making Charges & Wastage ──────────────────────────────────────────────────
 
 function exportToCSV(rows: any[]) {
-  const headers = ['Karat', 'Category', 'Material Code', 'Name', 'Make Type', 'Making Wastage %', 'Sale Wastage %', 'Making Charge', 'Charge Type', 'Effective Date', 'Notes'];
+  const headers = ['Karat', 'Category', 'Material Code', 'Name', 'Make Type', 'VA / Wastage %', 'Making Charge', 'Charge Type', 'Effective Date', 'Notes'];
   const csvRows = [
     headers.join(','),
     ...rows.map((r) => [
@@ -937,7 +937,6 @@ function exportToCSV(rows: any[]) {
       r.materialCode?.code ?? '',
       r.materialCode?.name ?? '',
       r.makeType ?? '',
-      r.wastagePercent,
       r.saleWastagePercent,
       r.makingCharge,
       r.makingChargeType,
@@ -1104,7 +1103,7 @@ function MakingChargesTab() {
   const rows: any[] = (data as any)?.data ?? (data as any) ?? [];
 
   const defaultVals = {
-    materialCodeId: '', karat: '', categoryId: '', makeType: '', wastagePercent: '', saleWastagePercent: '',
+    materialCodeId: '', karat: '', categoryId: '', makeType: '', saleWastagePercent: '',
     makingCharge: '', makingChargeType: 'PER_GRAM', effectiveDate: new Date().toISOString().split('T')[0], notes: '',
   };
   const { control, handleSubmit, reset } = useForm({ defaultValues: defaultVals });
@@ -1117,7 +1116,6 @@ function MakingChargesTab() {
         karat: data.karat || null,
         categoryId: data.categoryId || null,
         makeType: data.makeType || null,
-        wastagePercent: Number(data.wastagePercent),
         saleWastagePercent: Number(data.saleWastagePercent),
         makingCharge: Number(data.makingCharge),
         notes: data.notes || null,
@@ -1145,7 +1143,7 @@ function MakingChargesTab() {
     setSelected(row);
     reset({
       materialCodeId: row.materialCodeId ?? '', karat: row.karat ?? '', categoryId: row.categoryId ?? '', makeType: row.makeType ?? '',
-      wastagePercent: row.wastagePercent ?? '', saleWastagePercent: row.saleWastagePercent ?? '',
+      saleWastagePercent: row.saleWastagePercent ?? '',
       makingCharge: row.makingCharge ?? '', makingChargeType: row.makingChargeType ?? 'PER_GRAM',
       effectiveDate: row.effectiveDate ? new Date(row.effectiveDate).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
       notes: row.notes ?? '',
@@ -1156,7 +1154,7 @@ function MakingChargesTab() {
     <Box>
       <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
         <Typography variant="body2" color="text.secondary">
-          Define making charges and wastage % per karat + category (e.g. 22K Necklace → 18% VA +
+          Define making charge and VA (wastage) % per karat + category (e.g. 22K Necklace → 18% VA +
           ₹450/gm, 18K Bangle → 22% VA). Leave Karat/Category/Make Type blank for "any" — the
           most specific matching row wins on a sale.
         </Typography>
@@ -1171,62 +1169,64 @@ function MakingChargesTab() {
       </Stack>
 
       <Grid container spacing={2}>
-        <Grid item xs={12} md={4}>
+        <Grid item xs={12} md={5} lg={4}>
           <FormPanel title={selected ? 'Edit Making Charge' : 'New Making Charge Entry'} isEdit={!!selected} saving={mutation.isPending}
             onAdd={handleSubmit((d) => mutation.mutate(d))} onUpdate={handleSubmit((d) => mutation.mutate(d))}
             onClear={() => { setSelected(null); reset(defaultVals); }} onDelete={selected ? deactivate : undefined}>
-            <Controller name="karat" control={control} render={({ field }) => (
-              <TextField {...field} select fullWidth size="small" label="Karat (optional)" SelectProps={{ native: true }}>
-                <option value="">— Any —</option>
-                {karats.map((k: any) => <option key={k.id} value={k.code}>{k.code}</option>)}
-              </TextField>
-            )} />
-            <Controller name="materialCodeId" control={control} render={({ field }) => (
-              <TextField {...field} select fullWidth size="small" label="Material Code (non-metal flat rate only)" SelectProps={{ native: true }}>
-                <option value="">— Any —</option>
-                {materialCodes.map((mc: any) => <option key={mc.id} value={mc.id}>{mc.code} — {mc.name}</option>)}
-              </TextField>
-            )} />
-            <Controller name="makeType" control={control} render={({ field }) => (
-              <TextField {...field} select fullWidth size="small" label="Make Type (optional)" SelectProps={{ native: true }}>
-                <option value="">— Any —</option>
-                {['GOLD', 'DIAMOND', 'SILVER', 'PLATINUM', 'OTHER'].map((t) => <option key={t} value={t}>{t}</option>)}
-              </TextField>
-            )} />
+            <Typography variant="overline" color="text.secondary" sx={{ lineHeight: 1.4, gridColumn: '1 / -1' }}>Applies to (blank = any)</Typography>
+            <Box sx={{ gridColumn: '1 / -1', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1.5 }}>
+              <Controller name="karat" control={control} render={({ field }) => (
+                <TextField {...field} select fullWidth size="small" label="Karat" InputLabelProps={{ shrink: true }} SelectProps={{ native: true }}>
+                  <option value="">Any</option>
+                  {karats.map((k: any) => <option key={k.id} value={k.code}>{k.code}</option>)}
+                </TextField>
+              )} />
+              <Controller name="makeType" control={control} render={({ field }) => (
+                <TextField {...field} select fullWidth size="small" label="Make Type" InputLabelProps={{ shrink: true }} SelectProps={{ native: true }}>
+                  <option value="">Any</option>
+                  {['GOLD', 'DIAMOND', 'SILVER', 'PLATINUM', 'OTHER'].map((t) => <option key={t} value={t}>{t}</option>)}
+                </TextField>
+              )} />
+            </Box>
             <Controller name="categoryId" control={control} render={({ field }) => (
-              <TextField {...field} select fullWidth size="small" label="Category (optional)" SelectProps={{ native: true }}>
-                <option value="">— Any —</option>
+              <TextField {...field} select fullWidth size="small" label="Category" sx={{ gridColumn: '1 / -1' }} InputLabelProps={{ shrink: true }} SelectProps={{ native: true }}>
+                <option value="">Any</option>
                 {categories.map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </TextField>
             )} />
-            <Divider><Typography variant="caption" color="text.secondary">Wastage % (of net weight)</Typography></Divider>
-            <Controller name="wastagePercent" control={control} rules={{ required: true }} render={({ field, fieldState }) => (
-              <TextField {...field} fullWidth size="small" label="Making Wastage % *" type="number"
-                inputProps={{ step: 0.01, min: 0, max: 100 }} helperText="Internal manufacturing loss" error={!!fieldState.error} />
-            )} />
-            <Controller name="saleWastagePercent" control={control} rules={{ required: true }} render={({ field, fieldState }) => (
-              <TextField {...field} fullWidth size="small" label="Sale Wastage % *" type="number"
-                inputProps={{ step: 0.01, min: 0, max: 100 }} helperText="Wastage charged to customer" error={!!fieldState.error} />
-            )} />
-            <Divider><Typography variant="caption" color="text.secondary">Making Charge</Typography></Divider>
-            <Controller name="makingCharge" control={control} rules={{ required: true }} render={({ field, fieldState }) => (
-              <TextField {...field} fullWidth size="small" label="Making Charge Value (₹) *" type="number"
-                inputProps={{ step: 0.01, min: 0 }} error={!!fieldState.error} />
-            )} />
-            <Controller name="makingChargeType" control={control} render={({ field }) => (
-              <TextField {...field} select fullWidth size="small" label="Charge Type" SelectProps={{ native: true }}>
-                <option value="PER_GRAM">Per Gram (₹/gm)</option>
-                <option value="PER_PIECE">Per Piece (₹/pc)</option>
-                <option value="PERCENTAGE">% of Metal Value</option>
+            <Controller name="materialCodeId" control={control} render={({ field }) => (
+              <TextField {...field} select fullWidth size="small" label="Material Code" sx={{ gridColumn: '1 / -1' }} InputLabelProps={{ shrink: true }} SelectProps={{ native: true }}
+                helperText="Only for flat-rate non-metal items (clasps, findings)">
+                <option value="">Any</option>
+                {materialCodes.map((mc: any) => <option key={mc.id} value={mc.id}>{mc.code} — {mc.name}</option>)}
               </TextField>
             )} />
-            <Controller name="effectiveDate" control={control} render={({ field }) => (
-              <TextField {...field} fullWidth size="small" label="Effective Date" type="date" InputLabelProps={{ shrink: true }} />
-            )} />
-            <Controller name="notes" control={control} render={({ field }) => <TextField {...field} fullWidth size="small" label="Notes" />} />
+            <Divider sx={{ gridColumn: '1 / -1' }} />
+            <Typography variant="overline" color="text.secondary" sx={{ lineHeight: 1.4, gridColumn: '1 / -1' }}>Charges</Typography>
+            <Box sx={{ gridColumn: '1 / -1', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1.5 }}>
+              <Controller name="saleWastagePercent" control={control} rules={{ required: true }} render={({ field, fieldState }) => (
+                <TextField {...field} fullWidth size="small" label="VA / Wastage % *" type="number"
+                  inputProps={{ step: 0.01, min: 0, max: 100 }} error={!!fieldState.error} />
+              )} />
+              <Controller name="makingCharge" control={control} rules={{ required: true }} render={({ field, fieldState }) => (
+                <TextField {...field} fullWidth size="small" label="Making Charge (₹) *" type="number"
+                  inputProps={{ step: 0.01, min: 0 }} error={!!fieldState.error} />
+              )} />
+              <Controller name="makingChargeType" control={control} render={({ field }) => (
+                <TextField {...field} select fullWidth size="small" label="Charge Type" InputLabelProps={{ shrink: true }} SelectProps={{ native: true }}>
+                  <option value="PER_GRAM">Per Gram (₹/gm)</option>
+                  <option value="PER_PIECE">Per Piece (₹/pc)</option>
+                  <option value="PERCENTAGE">% of Metal Value</option>
+                </TextField>
+              )} />
+              <Controller name="effectiveDate" control={control} render={({ field }) => (
+                <TextField {...field} fullWidth size="small" label="Effective Date" type="date" InputLabelProps={{ shrink: true }} />
+              )} />
+            </Box>
+            <Controller name="notes" control={control} render={({ field }) => <TextField {...field} fullWidth size="small" label="Notes" sx={{ gridColumn: '1 / -1' }} />} />
           </FormPanel>
         </Grid>
-        <Grid item xs={12} md={8}>
+        <Grid item xs={12} md={7} lg={8}>
           <FilterGrid
             tableId="masters-making-charges"
             columns={[
@@ -1236,12 +1236,7 @@ function MakingChargesTab() {
               { key: 'name', label: 'Name', filterValue: (r: any) => r.materialCode?.name ?? '', render: (r: any) => r.materialCode?.name ?? '—' },
               { key: 'makeType', label: 'Make Type', render: (r: any) => r.makeType && <Chip label={r.makeType} size="small" /> },
               {
-                key: 'wastagePercent', label: 'Making Wastage %', align: 'right',
-                filterValue: (r: any) => String(r.wastagePercent),
-                render: (r: any) => <Typography fontFamily="monospace" fontWeight={700} color="#E65100">{Number(r.wastagePercent).toFixed(2)}%</Typography>,
-              },
-              {
-                key: 'saleWastagePercent', label: 'Sale Wastage %', align: 'right',
+                key: 'saleWastagePercent', label: 'VA / Wastage %', align: 'right',
                 filterValue: (r: any) => String(r.saleWastagePercent),
                 render: (r: any) => <Typography fontFamily="monospace" fontWeight={700} color="#1B3280">{Number(r.saleWastagePercent).toFixed(2)}%</Typography>,
               },

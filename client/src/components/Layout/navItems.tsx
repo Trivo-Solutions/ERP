@@ -142,6 +142,7 @@ export const NAV_ITEMS: NavItem[] = [
       { label: 'Aging Receivables', path: '/reports/aging', permission: 'report:financial_view' },
       { label: 'Sales Register', path: '/reports/sales-register', permission: 'report:view' },
       { label: 'Stock Book', path: '/reports/stock-book', permission: 'report:view' },
+      { label: 'Barcode History', path: '/reports/barcode-history', permission: 'report:view' },
       { label: 'Stock on Hand', path: '/reports/stock-on-hand', permission: 'report:view' },
       { label: 'Dead Stock / Ageing', path: '/reports/dead-stock', permission: 'report:view' },
       { label: 'Day Book', path: '/reports/day-book', permission: 'report:financial_view' },

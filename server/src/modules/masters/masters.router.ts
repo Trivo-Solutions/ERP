@@ -582,7 +582,7 @@ mastersRouter.delete('/price-master/:id', requirePermission('masters:delete'), a
 // ─── Making Charges ───────────────────────────────────────────────────────────
 
 const MAKING_CHARGE_FIELDS = [
-  'materialCodeId', 'karat', 'categoryId', 'makeType', 'wastagePercent', 'saleWastagePercent',
+  'materialCodeId', 'karat', 'categoryId', 'makeType', 'saleWastagePercent',
   'makingCharge', 'makingChargeType', 'effectiveDate', 'notes', 'isActive',
 ] as const;
 const MAKING_CHARGE_INCLUDE = {
@@ -621,7 +621,6 @@ mastersRouter.post('/making-charges', requirePermission('masters:create'), async
         karat:             req.body.karat             ?? null,
         categoryId:        req.body.categoryId        ?? null,
         makeType:          req.body.makeType          ?? null,
-        wastagePercent:    req.body.wastagePercent    ?? 0,
         saleWastagePercent: req.body.saleWastagePercent ?? 0,
         makingCharge:      req.body.makingCharge      ?? 0,
         makingChargeType:  req.body.makingChargeType  ?? 'PER_GRAM',

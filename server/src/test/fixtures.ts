@@ -233,6 +233,7 @@ export async function cleanupTestTenant(t: TestTenant) {
   await prisma.user.deleteMany({ where: { id: t.user.id } });
   await prisma.numberSequence.deleteMany({ where: { companyId } });
   await prisma.account.deleteMany({ where: { companyId } });
+  await prisma.tagHistory.deleteMany({ where: { companyId } }); // written by a trigger on every tag change/delete above
   await prisma.company.deleteMany({ where: { id: companyId } });
 }
 
@@ -313,6 +314,9 @@ export async function purgeCompany(companyId: string): Promise<void> {
     if (stillPending.length === pending.length) break; // no progress
     pending = stillPending;
   }
+  // The tag_history trigger logs the deletion of every tag above, so it is cleared AFTER them (it is
+  // append-only for the app, but the test fixtures run as the owner/platform role).
+  await prisma.$executeRawUnsafe(`DELETE FROM tag_history WHERE "companyId" = $1`, companyId);
   await prisma.$executeRawUnsafe(`DELETE FROM platform_audit_logs WHERE "subjectId" = $1`, companyId);
   await prisma.$executeRawUnsafe(`DELETE FROM companies WHERE id = $1`, companyId);
 }

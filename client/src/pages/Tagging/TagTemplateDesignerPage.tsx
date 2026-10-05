@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Box, Card, Grid, Typography, Button, Stack, Divider, Alert,
-  Checkbox, FormControlLabel, TextField,
+  Checkbox, FormControlLabel, TextField, Dialog, DialogTitle, DialogContent, DialogActions,
 } from '@mui/material';
-import { ArrowBack, Print, Delete, Save, ZoomIn, ZoomOut, QrCode2 } from '@mui/icons-material';
+import JsBarcode from 'jsbarcode';
+import { ArrowBack, Print, Delete, Save, ZoomIn, ZoomOut, QrCode2, Visibility } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSnackbar } from 'notistack';
@@ -74,6 +75,7 @@ const FONT_FAMILIES = [
   'Georgia', 'Calibri', 'Segoe UI', 'Trebuchet MS', 'Impact', 'Consolas',
 ];
 const PT_TO_MM = 25.4 / 72;
+const PREVIEW_ZOOM = 12; // px per mm in the preview dialog (bigger than the editing canvas)
 const IMG_DOTS_PER_MM = 8; // 203 dpi head - an uploaded image is shrunk to this resolution, no bigger
 type Wing = 'front' | 'back';
 type FoldOrientation = 'none' | 'vertical' | 'horizontal';
@@ -183,6 +185,67 @@ function ElementPreview({ el, zoom }: { el: TemplateElement; zoom: number }) {
   }
   // line
   return <Box sx={{ width: (el.widthMm ?? 10) * zoom, height: Math.max(2, (el.heightMm ?? 0.3) * zoom), bgcolor: '#000' }} />;
+}
+
+// Real Code 128 bars at the printer's own module width (2 dots = 0.25 mm), so the preview's
+// barcode is as wide as the printed one.
+function PreviewBarcode({ value, heightMm, humanReadable, zoom, transform }: {
+  value: string; heightMm: number; humanReadable: boolean; zoom: number; transform: object;
+}) {
+  const ref = useRef<SVGSVGElement>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!ref.current || !value) return;
+    try {
+      JsBarcode(ref.current, value, {
+        format: 'CODE128', displayValue: false, margin: 0, width: 0.25 * zoom, height: heightMm * zoom,
+      });
+      setFailed(false);
+    } catch { setFailed(true); }
+  }, [value, heightMm, zoom]);
+  if (!value || failed) return <Box sx={{ width: 30 * zoom, height: heightMm * zoom, border: '1px dashed #888', ...transform }} />;
+  return (
+    <Box sx={{ ...transform }}>
+      <svg ref={ref} style={{ display: 'block' }} />
+      {humanReadable && (
+        <Typography sx={{ fontSize: 3 * zoom, lineHeight: 1.1, fontFamily: 'Arial, sans-serif', textAlign: 'center' }}>{value}</Typography>
+      )}
+    </Box>
+  );
+}
+
+// One element drawn with a real tag's values — what the printed label will look like.
+function PreviewElement({ el, zoom, values }: { el: TemplateElement; zoom: number; values: Record<string, string> }) {
+  const rotation = el.rotation ?? 0;
+  const transform = rotation ? { transform: `rotate(${rotation}deg)`, transformOrigin: 'top left' } : {};
+  const content = el.boundField ? (values[el.boundField] ?? '') : (el.literalText ?? '');
+
+  if (el.type === 'text') {
+    return (
+      <Typography sx={{
+        fontSize: Math.max(0.5, el.fontSize ?? 8) * PT_TO_MM * zoom, lineHeight: 1.15,
+        fontFamily: `"${el.fontFamily ?? 'Arial'}", sans-serif`,
+        fontWeight: el.bold ? 700 : 400, fontStyle: el.italic ? 'italic' : 'normal',
+        whiteSpace: 'nowrap', color: '#000', ...transform,
+      }}>
+        {content}
+      </Typography>
+    );
+  }
+  if (el.type === 'barcode') {
+    return <PreviewBarcode value={content || values.tagNumber || ''} heightMm={el.heightMm ?? 10}
+      humanReadable={el.humanReadable !== false} zoom={zoom} transform={transform} />;
+  }
+  if (el.type === 'qrcode') {
+    // No QR encoder on the client — a labelled placeholder at the printed size (module 4 dots).
+    const s = 15 * zoom;
+    return (
+      <Box sx={{ width: s, height: s, border: '1px solid #000', display: 'flex', alignItems: 'center', justifyContent: 'center', ...transform }}>
+        <QrCode2 sx={{ fontSize: s * 0.8, color: '#000' }} />
+      </Box>
+    );
+  }
+  return <ElementPreview el={el} zoom={zoom} />;
 }
 
 // Faint label showing which half of the folded tag a region becomes.
@@ -335,6 +398,14 @@ export function TagTemplateDesignerPage() {
     queryKey: ['tag-search-for-print', testTagQuery],
     queryFn: () => apiGet<any[]>('/tagging/tags/search', { q: testTagQuery, status: 'ALL' }),
     enabled: testTagQuery.length >= 2 && !testTagId,
+  });
+
+  // Preview uses the layout currently on the canvas (saved or not) with the picked tag's values.
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const previewQuery = useQuery({
+    queryKey: ['tag-preview-values', testTagId],
+    queryFn: () => apiGet<{ values: Record<string, string> }>(`/tagging/tags/${testTagId}/preview-values`),
+    enabled: previewOpen && !!testTagId,
   });
 
   const testPrintMutation = useMutation({
@@ -591,6 +662,10 @@ export function TagTemplateDesignerPage() {
                   ))}
                 </Box>
               )}
+              <Button variant="outlined" startIcon={<Visibility />} disabled={!testTagId}
+                onClick={() => setPreviewOpen(true)}>
+                Preview Label
+              </Button>
               <Button variant="contained" color="secondary" startIcon={<Print />}
                 disabled={!form.id || !testTagId || testPrintMutation.isPending}
                 onClick={() => testPrintMutation.mutate()}>
@@ -600,6 +675,33 @@ export function TagTemplateDesignerPage() {
           </Card>
         </Grid>
       </Grid>
+
+      <Dialog open={previewOpen} onClose={() => setPreviewOpen(false)} maxWidth="lg" fullWidth>
+        <DialogTitle>Label Preview — {testTagQuery}</DialogTitle>
+        <DialogContent>
+          {previewQuery.isLoading && <Typography>Loading…</Typography>}
+          {previewQuery.isError && <Alert severity="error">Could not load the tag's values.</Alert>}
+          {previewQuery.data && (
+            <Box sx={{ overflow: 'auto', p: 2, bgcolor: 'action.hover', borderRadius: 1 }}>
+              <Box sx={{
+                position: 'relative', width: form.widthMm * PREVIEW_ZOOM, height: form.heightMm * PREVIEW_ZOOM,
+                bgcolor: '#fff', border: '1px solid #999', boxShadow: 1, mx: 'auto', overflow: 'hidden',
+              }}>
+                {form.elements.map((el) => (
+                  <Box key={el.id} sx={{ position: 'absolute', left: el.xMm * PREVIEW_ZOOM, top: el.yMm * PREVIEW_ZOOM }}>
+                    <PreviewElement el={el} zoom={PREVIEW_ZOOM} values={previewQuery.data.values} />
+                  </Box>
+                ))}
+              </Box>
+            </Box>
+          )}
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+            Shows the layout currently on the canvas (saved or not) filled with this tag's real values. Fonts follow
+            your PC's installed fonts and the QR code is a placeholder — the printer output may differ slightly.
+          </Typography>
+        </DialogContent>
+        <DialogActions><Button onClick={() => setPreviewOpen(false)}>Close</Button></DialogActions>
+      </Dialog>
     </>
   );
 }

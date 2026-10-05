@@ -91,6 +91,7 @@ import { SalesRegister } from './pages/Reports/SalesRegister';
 import { StockOnHand } from './pages/Reports/StockOnHand';
 import { DeadStock } from './pages/Reports/DeadStock';
 import { StockBook } from './pages/Reports/StockBook';
+import { BarcodeHistory } from './pages/Reports/BarcodeHistory';
 import { DayBook } from './pages/Reports/DayBook';
 import { GstSummary } from './pages/Reports/GstSummary';
 import { PurchaseGstSummary } from './pages/Reports/PurchaseGstSummary';
@@ -212,6 +213,7 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="reports/aging" element={<RequirePermission permission="report:financial_view"><AgingReceivables /></RequirePermission>} />
       <Route path="reports/sales-register" element={<SalesRegister />} />
       <Route path="reports/stock-book" element={<StockBook />} />
+      <Route path="reports/barcode-history" element={<BarcodeHistory />} />
       <Route path="reports/stock-on-hand" element={<StockOnHand />} />
       <Route path="reports/dead-stock" element={<DeadStock />} />
       <Route path="reports/day-book" element={<RequirePermission permission="report:financial_view"><DayBook /></RequirePermission>} />

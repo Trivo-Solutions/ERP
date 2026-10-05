@@ -84,6 +84,7 @@ model Company {
   journalLines              JournalLine[]
   costCenters               CostCenter[]
   auditLogs                 AuditLog[]
+  tagHistory                TagHistory[]
   purchaseReturns           PurchaseReturn[]
   supplierPayments          SupplierPayment[]
   purchaseLots              PurchaseLot[]
@@ -3544,7 +3545,6 @@ model MakingCharge {
   categoryId         String?
   category           ProductCategory? @relation(fields: [categoryId, companyId], references: [id, companyId], onDelete: Restrict)
   makeType           String?
-  wastagePercent     Decimal          @default(0) @db.Decimal(5, 2)
   saleWastagePercent Decimal          @default(0) @db.Decimal(5, 2)
   makingCharge       Decimal          @default(0) @db.Decimal(12, 4)
   makingChargeType   String           @default("PER_GRAM")
@@ -4411,4 +4411,29 @@ model EInvoiceRecord {
   @@index([companyId])
   @@index([invoiceId])
   @@map("einvoice_records")
+}
+
+// Append-only history of every change to a JewelryTag (barcode). Written ONLY by the database trigger
+// tag_history_capture (migration 20261004120000) — never by application code — so nothing that changes a
+// tag can skip it. `snapshot` is the whole tag row after the change; `changes` is { field: {from,to} }.
+// No FK on tagId on purpose: the history outlives a deleted tag. Read-only for the app (UPDATE/DELETE revoked).
+model TagHistory {
+  id            String   @id @default(cuid())
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id])
+  tagId         String
+  tagNumber     String
+  event         String   // CREATED | BASELINE | STATUS_CHANGE | BRANCH_CHANGE | EDITED | DELETED
+  branchId      String?
+  status        String?
+  changedFields String[] @default([])
+  changes       Json?
+  snapshot      Json
+  actorUserId   String?
+  createdAt     DateTime @default(now())
+
+  @@index([companyId, createdAt])
+  @@index([companyId, tagId, createdAt])
+  @@index([companyId, tagNumber])
+  @@map("tag_history")
 }

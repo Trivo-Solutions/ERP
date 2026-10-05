@@ -5,6 +5,7 @@ import { resolveTenantContext } from '../../middleware/tenant';
 import { AppError } from '../../middleware/error';
 import * as svc from './tagging.service';
 import * as lots from './purchaseLot.service';
+import * as history from './tagHistory.service';
 
 export const taggingRouter = Router();
 taggingRouter.use(authenticate, resolveTenantContext);
@@ -40,6 +41,23 @@ taggingRouter.get('/reports/stock-book', requirePermission('report:view'), async
   };
   const data = await svc.getStockBook(req.tenant!, {
     branchId: str(req.query.branchId), status: str(req.query.status), categoryId: str(req.query.categoryId),
+    dateFrom: date(req.query.dateFrom), dateTo: date(req.query.dateTo),
+  });
+  res.json({ success: true, data });
+});
+
+// Barcode history: every recorded change to every tag (see tagHistory.service.ts). Branch-scoped like the Stock Book.
+taggingRouter.get('/reports/tag-history', requirePermission('report:view'), async (req: Request, res: Response) => {
+  const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
+  const date = (v: unknown) => {
+    const s = str(v); if (!s) return undefined;
+    const d = new Date(s);
+    if (Number.isNaN(d.getTime())) throw new AppError('Invalid date', 400);
+    return d;
+  };
+  const data = await history.getTagHistory(req.tenant!, {
+    tagNumber: str(req.query.tagNumber), tagId: str(req.query.tagId), branchId: str(req.query.branchId),
+    event: str(req.query.event), userId: str(req.query.userId), status: str(req.query.status),
     dateFrom: date(req.query.dateFrom), dateTo: date(req.query.dateTo),
   });
   res.json({ success: true, data });
@@ -95,6 +113,11 @@ taggingRouter.get('/tags/:id', requirePermission('tag:view'), async (req: Reques
 taggingRouter.get('/tags/:id/print', requirePermission('tag:view'), async (req: Request, res: Response) => {
   const data = await svc.getTagPrintTspl(req.tenant!, req.params.id, req.query.templateId as string | undefined);
   res.json({ success: true, data });
+});
+
+// Designer preview: resolved bound-field values for one tag (the client draws the layout itself).
+taggingRouter.get('/tags/:id/preview-values', requirePermission('tag:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await svc.getTagPreviewValues(req.tenant!, req.params.id) });
 });
 
 taggingRouter.post('/tags', requirePermission('tag:create'), async (req: Request, res: Response) => {

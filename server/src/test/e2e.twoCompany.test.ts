@@ -142,6 +142,7 @@ describe('Phase 4 Part M: two-company end-to-end acceptance', () => {
       await prisma.numberSequence.deleteMany({ where: { companyId: c.company.id } });
       await prisma.account.deleteMany({ where: { companyId: c.company.id } });
       await deleteCompanyMasters(c.company.id);
+      await prisma.tagHistory.deleteMany({ where: { companyId: c.company.id } }); // trigger-written, per tag change
       await prisma.company.deleteMany({ where: { id: c.company.id } });
     }
     await prisma.$disconnect();
