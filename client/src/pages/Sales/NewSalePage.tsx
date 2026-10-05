@@ -16,7 +16,10 @@ import { ClientKycDialog } from '../../components/common/ClientKycDialog';
 import { SelectField } from '../../components/fields/SelectField';
 import { printInvoice } from '../../utils/printInvoice';
 import { findMakingCharge } from '../../utils/estimateCalc';
-import { EstimateBreakdown, EstimateBreakdownDialog, estimateTotals, newRowKey } from './EstimateBreakdown';
+import { EstimateBreakdown, estimateTotals, newRowKey } from './EstimateBreakdown';
+import { CustomerMismatchDialog } from './CustomerMismatchDialog';
+import { isEstimateCustomerMismatch } from '../../utils/estimateCustomer';
+import { MaterialPricingDialog, MaterialPricingEntry } from './MaterialPricingDialog';
 import { SaleSummary, SaleFigures } from './SaleSummary';
 import { useAuthStore } from '../../store/auth.store';
 import { usePageShortcuts, focusFirstField } from '../../hooks/usePageShortcuts';
@@ -48,6 +51,7 @@ interface LineItem {
   stoneValue: number;
   categoryId?: string;
   categoryName?: string;
+  salesPersonId?: string; // the employee credited with this line (blank = the bill's own sales employee)
   hsnCode?: string;   // billed under this HSN (its GST rate comes from the HSN master); blank = the default
   // A line loaded from an estimate keeps its material rows + MC/VA so they can be edited; its price is derived
   // from them, and it goes to the server as a flat (FIXED) amount. `quotedTotal` is what the estimate said.
@@ -83,14 +87,24 @@ function estimateInvoiceLine(l: LineItem) {
     grossWeight: Number(l.grossWeight) || 0,
     netGoldWeight: t.metalWeight || Number(l.netGoldWeight) || 0,
     stoneWeight: Number(l.stoneWeight) || 0,
+    ...(l.invoiceItemId && { id: l.invoiceItemId }),
     rateType: 'FIXED',
-    goldRate: round2(t.total),          // FIXED: this IS the decided price
+    goldRate: round2(t.total),          // FIXED: this IS the decided price (the server recomputes it from the breakdown)
     makingCharge: round2(t.making),     // informational on a FIXED line
     wastagePercent: 0,
     stoneValue: round2(t.otherMaterials),
+    // The bill's own copy of the material rows + MC/VA — stored on the invoice line, never written back to the tag.
+    materialBreakdown: {
+      rows: l.estimate!.rows.map(({ code, materialType, name, weight, unit, rate }) => ({
+        code, materialType, name, weight: Number(weight) || 0, unit, rate: Number(rate) || 0,
+      })),
+      mcRate: Number(l.estimate!.mcRate) || 0,
+      vaPercent: Number(l.estimate!.vaPercent) || 0,
+    },
     tagId: l.tagId,
     categoryId: l.categoryId || undefined,
     hsnCode: l.hsnCode || undefined,
+    salesPersonId: l.salesPersonId || undefined,
   };
 }
 
@@ -202,8 +216,10 @@ export function NewSalePage() {
   // who the sales person is), and can then be re-priced through the breakdown editor.
   const [estimateSearch, setEstimateSearch] = useState('');
   const [pendingEstimate, setPendingEstimate] = useState<any>(null);
+  const [mismatchOpen, setMismatchOpen] = useState(false);
   const [pendingStaffId, setPendingStaffId] = useState('');
-  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [matSession, setMatSession] = useState<{ entries: MaterialPricingEntry[]; startKey: string } | null>(null);
+  const [matLoading, setMatLoading] = useState(false);
   const [kycOpen, setKycOpen] = useState(false);
   // Bill adjustments the biller can edit: discount as a flat amount or a % of the gross, and the round-off — automatic
   // to the nearest rupee, or keyed by hand.
@@ -350,6 +366,15 @@ export function NewSalePage() {
       stoneWeight: Number(it.stoneWeight), goldRate: Number(it.goldRate), makingCharge: Number(it.makingCharge),
       wastagePercent: Number(it.wastagePercent), stoneValue: Number(it.stoneValue),
       categoryId: it.categoryId ?? undefined, categoryName: it.category?.name ?? undefined, hsnCode: it.hsnCode?.code ?? undefined,
+      salesPersonId: it.salesPersonId ?? undefined,
+      // A line billed from edited material rows reopens with them.
+      ...(it.materialBreakdown && {
+        estimate: {
+          rows: (it.materialBreakdown.rows ?? []).map((r: any) => ({ ...r, key: newRowKey() })),
+          mcRate: Number(it.materialBreakdown.mcRate) || 0, vaPercent: Number(it.materialBreakdown.vaPercent) || 0,
+        } as EstimateBreakdown,
+        quotedTotal: Number(it.totalPrice),
+      }),
     })));
     // Keep the round-off as it was: automatic if that is what the bill had (nearest rupee), else the figure that was keyed.
     const stored = Number(inv.roundOff);
@@ -402,7 +427,7 @@ export function NewSalePage() {
     setTagSearch('');
   };
 
-  const addEstimateLine = (est: any) => {
+  const addEstimateLine = (est: any, salesPersonId?: string) => {
     const tag = est.tag;
     const breakdown: EstimateBreakdown = {
       rows: (est.items ?? []).map((i: any) => ({
@@ -421,9 +446,64 @@ export function NewSalePage() {
       goldRate: 0, makingCharge: 0, wastagePercent: 0, stoneValue: 0,
       categoryId: tag.category?.id ?? undefined, categoryName: tag.category?.name ?? undefined,
       estimateId: est.id, estimateNumber: est.estimateNumber, quotedTotal: Number(est.totalSaleAmount),
-      estimate: breakdown,
+      estimate: breakdown, salesPersonId,
     }]);
     setEstimateSearch('');
+  };
+
+  // Material Pricing (shortcut F4 / the row buttons): one session over every eligible tagged line — tagged, not locked by
+  // a return. Each piece opens with its saved breakdown (from an estimate or an earlier edit) or one built from the tag's
+  // own material rows. The session only edits drafts; "Apply to bill" copies the changed ones onto their lines, and the
+  // server re-prices each from what is stored. The tag, its rows and its cost are never written.
+  const isMaterialLine = (l: LineItem) => !!l.tagId && !isLocked(l);
+
+  const buildTagBreakdown = async (l: LineItem): Promise<EstimateBreakdown> => {
+    const tag = await apiGet<any>(`/tagging/tags/${l.tagId}`);
+    const todaysRate = (l.karat && latestRateByKarat[l.karat]) || Number(l.goldRate) || 0;
+    let rows: EstimateBreakdown['rows'] = (tag.materials ?? []).map((m: any) => ({
+      key: newRowKey(), code: m.code, materialType: m.materialType, name: m.code,
+      weight: Number(m.weight), unit: m.unit,
+      rate: m.saleRate != null ? Number(m.saleRate) : m.materialType === 'METAL' ? todaysRate : 0,
+    }));
+    if (rows.length === 0) {
+      rows = [{ key: newRowKey(), code: l.karat ?? 'METAL', materialType: 'METAL', name: l.karat ?? 'Metal', weight: Number(l.netGoldWeight) || 0, unit: 'GM', rate: todaysRate }];
+    }
+    const net = Number(l.netGoldWeight) || 0;
+    return {
+      rows,
+      mcRate: tag.saleMcRate != null ? Number(tag.saleMcRate) : net > 0 ? round2(Number(l.makingCharge) / net) : 0,
+      vaPercent: tag.saleVaPercent != null ? Number(tag.saleVaPercent) : Number(l.wastagePercent) || 0,
+    };
+  };
+
+  const openMaterials = async (startKey: string) => {
+    if (matLoading || matSession) return;
+    const eligible = lines.filter(isMaterialLine);
+    if (!eligible.some((x) => x.key === startKey)) return;
+    if (currency !== 'INR') { enqueueSnackbar('Material pricing is in INR — set the invoice currency to INR first', { variant: 'warning' }); return; }
+    setMatLoading(true);
+    try {
+      const entries: MaterialPricingEntry[] = await Promise.all(eligible.map(async (l) => ({
+        key: l.key, tagNumber: l.tagNumber ?? l.productCode, description: l.description,
+        initial: l.estimate ?? await buildTagBreakdown(l),
+        currentLineTotal: round2(lineTotal(l)),
+      })));
+      setMatSession({ entries, startKey });
+    } catch {
+      enqueueSnackbar('Could not load the materials of the tagged pieces', { variant: 'error' });
+    } finally {
+      setMatLoading(false);
+    }
+  };
+
+  const applyMaterials = (changed: Array<{ key: string; breakdown: EstimateBreakdown; quotedTotal: number }>) => {
+    const byKey = new Map(changed.map((c) => [c.key, c]));
+    setLines((p) => p.map((x) => {
+      const c = byKey.get(x.key);
+      // An estimate line keeps what the estimate quoted; any other line is compared with what the grid showed before.
+      return c ? { ...x, estimate: c.breakdown, quotedTotal: x.estimateId ? x.quotedTotal : c.quotedTotal } : x;
+    }));
+    setMatSession(null);
   };
 
   // Loading an estimate is the conversion: ask who the sales person is, then add the line.
@@ -470,11 +550,26 @@ export function NewSalePage() {
     }
   };
 
+  // Warn first if the bill already has a customer and the estimate is for someone else (by mobile number).
+  const requestConfirmEstimate = () => {
+    if (!pendingEstimate || !pendingStaffId) return;
+    const billClientId = watch('clientId');
+    const billClient = billClientId ? clientList.find((c: any) => c.id === billClientId) : undefined;
+    if (isEstimateCustomerMismatch(billClient?.phone, pendingEstimate.customerPhone, !!billClientId)) {
+      setMismatchOpen(true);
+      return;
+    }
+    void confirmEstimate();
+  };
+
   const confirmEstimate = async () => {
     if (!pendingEstimate || !pendingStaffId) return;
+    setMismatchOpen(false);
     const est = pendingEstimate;
-    setValue('salesPersonId', pendingStaffId);
-    addEstimateLine(est);
+    // The employee picked for THIS estimate is credited on its line. The bill's own sales employee is only set when it
+    // has none yet — adding a second estimate (another employee's sale) must not overwrite it.
+    if (!getValues('salesPersonId')) setValue('salesPersonId', pendingStaffId);
+    addEstimateLine(est, pendingStaffId);
     setPendingEstimate(null);
     await adoptEstimateCustomer(est);
     if (activeTab === 0 && getValues('clientId') && getValues('branchId')) setActiveTab(1); // straight on to the items
@@ -724,6 +819,7 @@ export function NewSalePage() {
         tagId: l.tagId,
         categoryId: l.categoryId || undefined,
         hsnCode: l.hsnCode || undefined,
+        salesPersonId: l.salesPersonId || undefined,
       })),
     };
   }
@@ -804,6 +900,14 @@ export function NewSalePage() {
     'alt+arrowright': () => { if (!createdInvoice && activeTab < 2) tryTab(activeTab + 1); },
     'alt+arrowleft': () => { if (!createdInvoice && activeTab > 0) goTab(activeTab - 1); },
     'alt+d': () => { if (!createdInvoice && tab2Ready) setAdjustOpen(true); },
+    // F4: Material Pricing, starting at the focused line (else the last eligible tagged line).
+    'f4': () => {
+      if (createdInvoice || activeTab !== 1) return;
+      const focusedKey = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('[data-line-key]')?.dataset.lineKey;
+      const eligible = lines.filter(isMaterialLine);
+      const target = eligible.find((x) => x.key === focusedKey)?.key ?? eligible[eligible.length - 1]?.key;
+      if (target) void openMaterials(target);
+    },
     'alt+p': () => { if (createdInvoice) printInvoice(createdInvoice); },
   });
 
@@ -1003,7 +1107,7 @@ export function NewSalePage() {
                               </TableHead>
                               <TableBody>
                                 {lines.map((l) => (
-                                  <TableRow key={l.key} sx={isLocked(l) ? { opacity: 0.6 } : undefined}>
+                                  <TableRow key={l.key} data-line-key={l.key} sx={isLocked(l) ? { opacity: 0.6 } : undefined}>
                                     <TableCell>
                                       {l.tagId ? (
                                         <Box>
@@ -1018,6 +1122,9 @@ export function NewSalePage() {
                                             )}
                                           </Stack>
                                           <Typography variant="body2" color="text.secondary" noWrap title={l.description}>{l.description}</Typography>
+                                          {!l.estimate && !isLocked(l) && (
+                                            <Button size="small" sx={{ p: 0, minWidth: 0, fontSize: 11 }} disabled={matLoading} onClick={() => void openMaterials(l.key)}>Materials (F4)</Button>
+                                          )}
                                         </Box>
                                       ) : (
                                         <TextField size="small" fullWidth placeholder="Description" value={l.description} disabled={isLocked(l)}
@@ -1053,13 +1160,13 @@ export function NewSalePage() {
                                         <Stack direction="row" spacing={1.5} justifyContent="space-between" alignItems="center"
                                           sx={{ bgcolor: 'action.hover', borderRadius: 1.5, px: 1.5, py: 0.75 }}>
                                           <Box sx={{ minWidth: 0 }}>
-                                            <Typography variant="caption" fontWeight={700} display="block">Priced from estimate</Typography>
+                                            <Typography variant="caption" fontWeight={700} display="block">{l.estimateNumber ? 'Priced from estimate' : 'Priced from material rows'}</Typography>
                                             <Typography variant="caption" color="text.secondary" display="block">
                                               {l.estimate.rows.length} row{l.estimate.rows.length === 1 ? '' : 's'} · MC ₹{l.estimate.mcRate}/g · VA {l.estimate.vaPercent}%
                                               {Math.abs(lineTotal(l) - (l.quotedTotal ?? 0)) > 0.005 ? ` · quoted ₹${Number(l.quotedTotal).toLocaleString('en-IN')}` : ''}
                                             </Typography>
                                           </Box>
-                                          <Button size="small" variant="outlined" sx={{ whiteSpace: 'nowrap', flexShrink: 0 }} onClick={() => setEditingKey(l.key)}>Edit rates / rows</Button>
+                                          <Button size="small" variant="outlined" sx={{ whiteSpace: 'nowrap', flexShrink: 0 }} disabled={isLocked(l) || matLoading} onClick={() => void openMaterials(l.key)}>Edit rates / rows (F4)</Button>
                                         </Stack>
                                       </TableCell>
                                     ) : (<>
@@ -1584,23 +1691,21 @@ export function NewSalePage() {
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
           <Button onClick={() => setPendingEstimate(null)}>Cancel</Button>
-          <Button variant="contained" disabled={!pendingStaffId} onClick={confirmEstimate}>Add to bill</Button>
+          <Button variant="contained" disabled={!pendingStaffId} onClick={requestConfirmEstimate}>Add to bill</Button>
         </DialogActions>
       </Dialog>
 
-      {editingKey && (() => {
-        const l = lines.find((x) => x.key === editingKey);
-        if (!l?.estimate) return null;
-        return (
-          <EstimateBreakdownDialog
-            title={`${l.estimateNumber} — ${l.description}`}
-            quotedTotal={l.quotedTotal ?? 0}
-            value={l.estimate}
-            onClose={() => setEditingKey(null)}
-            onSave={(b) => { setLines((p) => p.map((x) => (x.key === l.key ? { ...x, estimate: b } : x))); setEditingKey(null); }}
-          />
-        );
-      })()}
+      <CustomerMismatchDialog open={mismatchOpen && !!pendingEstimate} onCancel={() => setMismatchOpen(false)} onConfirm={() => void confirmEstimate()} />
+
+      {matSession && (
+        <MaterialPricingDialog
+          entries={matSession.entries}
+          startKey={matSession.startKey}
+          otherLinesTotal={lines.filter((l) => !matSession.entries.some((e) => e.key === l.key)).reduce((t, l) => t + lineTotal(l), 0)}
+          onClose={() => setMatSession(null)}
+          onApply={applyMaterials}
+        />
+      )}
 
       <ClientKycDialog client={kycOpen ? selectedClient ?? null : null} onClose={() => setKycOpen(false)} />
 

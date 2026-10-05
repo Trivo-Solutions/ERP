@@ -467,7 +467,7 @@ function CategoriesTab() {
             </Card>
           )}
           <FormPanel title={selectedSub ? `Edit — ${selectedSub.code}` : 'New Sub-category'}
-            isEdit={!!selectedSub} saving={subMutation.isPending} disabled={!selectedCat}
+            isEdit={!!selectedSub} saving={subMutation.isPending} disabled={!selectedCat && !selectedSub}
             onAdd={handleSubSubmit((d) => onAddSub(d))}
             onUpdate={handleSubSubmit((d) => subMutation.mutate(d))}
             onClear={() => { setSelectedSub(null); resetSub(subDefaults); }}
@@ -476,9 +476,9 @@ function CategoriesTab() {
               setSelectedSub(null); resetSub(subDefaults);
             }) : undefined}>
             <Controller name="code" control={subControl} rules={{ required: true }}
-              render={({ field, fieldState }) => <TextField {...field} fullWidth size="small" label="Sub-category Code *" disabled={!selectedCat} error={!!fieldState.error} />} />
+              render={({ field, fieldState }) => <TextField {...field} fullWidth size="small" label="Sub-category Code *" disabled={!selectedCat && !selectedSub} error={!!fieldState.error} />} />
             <Controller name="name" control={subControl} rules={{ required: true }}
-              render={({ field, fieldState }) => <TextField {...field} fullWidth size="small" label="Sub-category Name *" disabled={!selectedCat} error={!!fieldState.error} />} />
+              render={({ field, fieldState }) => <TextField {...field} fullWidth size="small" label="Sub-category Name *" disabled={!selectedCat && !selectedSub} error={!!fieldState.error} />} />
             {selectedSub && (
               <Typography variant="caption" color="warning.main" sx={{ gridColumn: '1 / -1' }}>
                 Shared master — renaming it changes it everywhere it is used

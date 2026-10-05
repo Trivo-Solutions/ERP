@@ -6,6 +6,9 @@
 // The template controls PRESENTATION ONLY: which of these already-computed values show, in what
 // order, under what label — never the values themselves (G1 Part G's statutory/presentation split).
 
+import { isDesignerLayout } from '../types/taxInvoiceTemplate';
+import { printTaxInvoiceTemplate } from './printTaxInvoiceTemplate';
+
 const INR = (v: unknown) =>
   Number(v ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const DATE = (v: unknown) =>
@@ -114,6 +117,13 @@ function itemColumnValue(col: string, item: any, idx: number): string {
 const RIGHT_ALIGNED = new Set(['quantity', 'uom', 'grossWeight', 'stoneWeight', 'netWeight', 'rate', 'makingCharge', 'lineDiscountAmount', 'taxableValue', 'cgstAmount', 'sgstAmount', 'igstAmount', 'lineTotalTax', 'totalPrice']);
 
 export function printInvoice(invoice: any) {
+  // A template built in the free-form designer (layout.elements) prints through its own renderer;
+  // the older checklist-style template (layout.sections) and the built-in fallback keep the
+  // hardcoded layout below, so nothing already saved changes how it prints.
+  if (isDesignerLayout(invoice.printTemplate)) {
+    void printTaxInvoiceTemplate(invoice, invoice.printTemplate);
+    return;
+  }
   const items: any[] = invoice.items ?? [];
   const tax = invoice.taxDetails;
   const layout = invoice.printTemplate?.sections;

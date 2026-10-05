@@ -717,6 +717,7 @@ model User {
   tagTemplatesCreated          TagTemplate[]
   tagEstimatesCreated          TagEstimate[]          @relation("EstimateCreatedBy")
   tagEstimatesAttended         TagEstimate[]          @relation("EstimateSalesPerson")
+  invoiceItemsSold             InvoiceItem[]          @relation("InvoiceItemSalesPerson")
   estimateTemplatesCreated     EstimateTemplate[]
   taxInvoiceTemplatesCreated   TaxInvoiceTemplate[]
   invitationsSent              CompanyInvitation[]    @relation("InvitationInviter")
@@ -3695,6 +3696,15 @@ model InvoiceItem {
   tagId String?
   tag   JewelryTag? @relation(fields: [tagId, companyId], references: [id, companyId], onDelete: Restrict)
 
+  // This bill's own copy of the piece's material rows + MC/VA rates, as charged ({ rows, mcRate, vaPercent } —
+  // shared/materialBreakdown.ts). Edited per sale; never written back to the JewelryTag. Null for a plain line.
+  materialBreakdown Json?
+
+  // The employee credited with THIS line (a User id; membership of the invoice's company is checked in code — User is a
+  // global identity, so this FK cannot be composite). Null = the line inherits SalesInvoice.salesPersonId for reporting.
+  salesPersonId String?
+  salesPerson   User?   @relation("InvoiceItemSalesPerson", fields: [salesPersonId], references: [id], onDelete: Restrict)
+
   // Category snapshot for the per-invoice category summary. Reuses the same ProductCategory
   // master JewelryTag already carries — tagged lines inherit the tag's category; free-text lines
   // may set one explicitly. Snapshotted like hsnCodeId so a later tag/category edit doesn't
@@ -3710,6 +3720,7 @@ model InvoiceItem {
   @@unique([id, companyId])
   @@index([tagId])
   @@index([companyId])
+  @@index([companyId, salesPersonId])
   @@map("invoice_items")
 }
 

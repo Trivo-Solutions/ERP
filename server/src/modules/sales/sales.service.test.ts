@@ -254,6 +254,142 @@ describe('createInvoice (tag-aware direct invoicing)', () => {
   // A2: rateType existed on both the input and the schema but createInvoice ignored it, always
   // treating goldRate as ₹/gram. That made FIXED-rate rows (e.g. convertMemoToInvoice's flat
   // sellingPrice) mislabeled data. This proves createInvoice now honors rateType.
+  // A sale line can carry its own edited copy of the piece's material rows + MC/VA. The server prices the line from it,
+  // stores it, and never touches the tag.
+  describe('materialBreakdown (per-bill material rates)', () => {
+    const breakdown = {
+      rows: [
+        { code: '22K', materialType: 'METAL', name: '22K', weight: 10, unit: 'GM', rate: 6000 },
+        { code: 'CZ', materialType: 'STONE', name: 'CZ', weight: 2, unit: 'CT', rate: 500 },
+      ],
+      mcRate: 100, vaPercent: 10,
+    };
+    // materials 60000 + 1000; MC 10g x 100 = 1000; VA 10% of 60000 = 6000  =>  68000
+
+    it('prices the line from the rows (ignoring the client\'s own price), stores them, and leaves the tag untouched', async () => {
+      const tag = await makeTag('Breakdown ring');
+      const invoice = await createInvoice(
+        {
+          clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
+          items: [baseItem({ tagId: tag.id, rateType: 'PER_GRAM', goldRate: 1, materialBreakdown: breakdown })],
+        },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+
+      const line = invoice.items[0];
+      expect(line.rateType).toBe('FIXED');
+      expect(Number(line.unitPrice)).toBe(68000);
+      expect(Number(invoice.subtotal)).toBe(68000);
+      expect((line.materialBreakdown as any).rows).toHaveLength(2);
+      expect((line.materialBreakdown as any).vaPercent).toBe(10);
+
+      const after = await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } });
+      expect(Number(after.costPrice)).toBe(40000);
+      expect(Number(after.sellingPrice)).toBe(48000);
+      expect(await prisma.jewelryTagMaterial.count({ where: { tagId: tag.id } })).toBe(0);
+    });
+
+    it('rejects a negative rate, an unknown material type and a VA over 100', async () => {
+      const bad = (b: any) => createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ materialBreakdown: b })] }, userId);
+      await expect(bad({ ...breakdown, rows: [{ ...breakdown.rows[0], rate: -1 }] })).rejects.toThrow(/rate/);
+      await expect(bad({ ...breakdown, rows: [{ ...breakdown.rows[0], materialType: 'WOOD' }] })).rejects.toThrow(/unknown type/);
+      await expect(bad({ ...breakdown, vaPercent: 150 })).rejects.toThrow(/VA/);
+    });
+
+    const bdWith = (metalRate: number, mcRate: number, vaPercent: number) => ({
+      rows: [{ code: '22K', materialType: 'METAL', name: '22K', weight: 10, unit: 'GM', rate: metalRate }],
+      mcRate, vaPercent,
+    });
+    const snapshotTag = async (id: string) => {
+      const t = await prisma.jewelryTag.findUniqueOrThrow({ where: { id } });
+      const mats = await prisma.jewelryTagMaterial.findMany({ where: { tagId: id }, orderBy: { id: 'asc' } });
+      return JSON.stringify({ t, mats });
+    };
+
+    it('multi-tag save: edited lines each keep their own breakdown, the untouched one stays plain, tags are not written', async () => {
+      const tags = [await makeTag('Multi 1'), await makeTag('Multi 2'), await makeTag('Multi 3')];
+      // Give the first tag real material rows so "tag material rows unchanged" is meaningful.
+      await prisma.jewelryTagMaterial.create({
+        data: { companyId: tenant.company.id, tagId: tags[0].id, code: '22K', materialType: 'METAL', weight: 10, unit: 'GM', saleRate: 5000, saleAmount: 50000 },
+      });
+      const before = await Promise.all(tags.map((t) => snapshotTag(t.id)));
+
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: tags.map((t) => baseItem({ tagId: t.id, rateType: 'FIXED', goldRate: 50000 })) },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+      expect(invoice.items.every((i) => i.materialBreakdown === null)).toBe(true);
+
+      // The counter edits tag 1 and tag 3 (different rates) and leaves tag 2 alone, then applies.
+      const byTag = (id: string) => invoice.items.find((i) => i.tagId === id)!;
+      const keep = (i: any, over: Record<string, unknown> = {}) => ({
+        id: i.id, productCode: i.productCode, description: i.description, quantity: i.quantity,
+        grossWeight: Number(i.grossWeight), netGoldWeight: Number(i.netGoldWeight), rateType: i.rateType,
+        goldRate: Number(i.goldRate), makingCharge: Number(i.makingCharge), wastagePercent: Number(i.wastagePercent),
+        stoneValue: Number(i.stoneValue), tagId: i.tagId, ...over,
+      });
+      const amended = await amendInvoice(invoice.id, {
+        items: [
+          keep(byTag(tags[0].id), { materialBreakdown: bdWith(6000, 100, 10) }),   // 60000 + 1000 + 6000 = 67000
+          keep(byTag(tags[1].id)),                                                // unchanged: 50000 flat
+          keep(byTag(tags[2].id), { materialBreakdown: bdWith(7000, 0, 0), goldRate: 1 }), // 70000 (client price ignored)
+        ],
+      }, tenant.ctx, userId);
+
+      const after = await prisma.invoiceItem.findMany({ where: { invoiceId: invoice.id } });
+      const line = (id: string) => after.find((i) => i.tagId === id)!;
+      expect(Number(line(tags[0].id).unitPrice)).toBe(67000);
+      expect(Number(line(tags[1].id).unitPrice)).toBe(50000);
+      expect(Number(line(tags[2].id).unitPrice)).toBe(70000);
+      expect((line(tags[0].id).materialBreakdown as any).rows[0].rate).toBe(6000);
+      expect((line(tags[2].id).materialBreakdown as any).rows[0].rate).toBe(7000);
+      expect((line(tags[0].id).materialBreakdown as any).vaPercent).toBe(10);
+      expect((line(tags[2].id).materialBreakdown as any).vaPercent).toBe(0);
+      expect(line(tags[1].id).materialBreakdown).toBeNull();
+      expect(Number(amended.subtotal)).toBe(67000 + 50000 + 70000);
+
+      // Neither the tags nor their material rows changed (status aside: they were sold on the first save).
+      for (let i = 0; i < tags.length; i++) {
+        const now = JSON.parse(await snapshotTag(tags[i].id));
+        const was = JSON.parse(before[i]);
+        const strip = (x: any) => { const { status: _s, updatedAt: _u, ...rest } = x.t; return { t: rest, mats: x.mats }; };
+        expect(strip(now)).toEqual(strip(was));
+      }
+    });
+
+    it('re-saving a line without a breakdown clears the stored one', async () => {
+      const tag = await makeTag('Clear me');
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ tagId: tag.id, materialBreakdown: bdWith(6000, 0, 0) })] },
+        userId
+      );
+      invoiceIds.push(invoice.id);
+      const l = invoice.items[0];
+      expect(l.materialBreakdown).not.toBeNull();
+
+      await amendInvoice(invoice.id, {
+        items: [{
+          id: l.id, productCode: l.productCode, description: l.description, quantity: l.quantity, grossWeight: Number(l.grossWeight),
+          netGoldWeight: Number(l.netGoldWeight), rateType: 'FIXED', goldRate: 55000, makingCharge: 0, wastagePercent: 0,
+          stoneValue: 0, tagId: tag.id,
+        }],
+      }, tenant.ctx, userId);
+      const row = await prisma.invoiceItem.findUniqueOrThrow({ where: { id: l.id } });
+      expect(row.materialBreakdown).toBeNull();
+      expect(Number(row.unitPrice)).toBe(55000);
+    });
+
+    it('a line without a breakdown stores none', async () => {
+      const invoice = await createInvoice(
+        { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem()] }, userId);
+      invoiceIds.push(invoice.id);
+      expect(invoice.items[0].materialBreakdown).toBeNull();
+    });
+  });
+
   describe('rateType-driven pricing (A2 price-mode fix)', () => {
     it('prices a FIXED-rate line at goldRate directly, ignoring netGoldWeight', async () => {
       const invoice = await createInvoice(

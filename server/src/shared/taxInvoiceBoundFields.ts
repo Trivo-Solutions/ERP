@@ -11,28 +11,51 @@ import { AppError } from '../middleware/error';
 // snapshot sales.service.ts already computed and stored at invoice-creation time. There is no
 // bound field, whitelisted or not, that can change what GSTIN or tax amount gets printed.
 export const TAX_INVOICE_BOUND_FIELDS = [
-  'seller.legalName', 'seller.tradeName', 'seller.gstin', 'seller.stateCode', 'seller.address',
-  'seller.city', 'seller.district', 'seller.pincode', 'seller.country',
-  'branch.name', 'branch.address', 'branch.city', 'branch.phone', 'branch.email',
-  'buyer.name', 'buyer.gstin', 'buyer.pan', 'buyer.address', 'buyer.city', 'buyer.state',
-  'buyer.stateCode', 'buyer.pincode', 'buyer.phone', 'buyer.email',
-  'invoice.number', 'invoice.date', 'invoice.financialYear', 'invoice.type', 'invoice.placeOfSupply',
-  'invoice.reverseCharge', 'invoice.terms', 'invoice.salesPerson',
-  'totals.subtotal', 'totals.taxableValue', 'totals.cgst', 'totals.sgst', 'totals.igst',
+  'seller.legalName', 'seller.tradeName', 'seller.gstin', 'seller.pan', 'seller.stateCode', 'seller.address',
+  'seller.city', 'seller.district', 'seller.pincode', 'seller.country', 'seller.fullAddress',
+  'branch.name', 'branch.code', 'branch.address', 'branch.city', 'branch.state', 'branch.phone', 'branch.email',
+  'buyer.name', 'buyer.code', 'buyer.gstin', 'buyer.pan', 'buyer.registrationType', 'buyer.address', 'buyer.city',
+  'buyer.district', 'buyer.state', 'buyer.stateCode', 'buyer.pincode', 'buyer.country', 'buyer.phone', 'buyer.email',
+  'buyer.fullAddress',
+  'invoice.number', 'invoice.date', 'invoice.dueDate', 'invoice.financialYear', 'invoice.type', 'invoice.status',
+  'invoice.currency', 'invoice.placeOfSupply', 'invoice.supplyType', 'invoice.reverseCharge', 'invoice.terms',
+  'invoice.notes', 'invoice.salesPerson', 'invoice.copyLabel',
+  'totals.subtotal', 'totals.taxableValue', 'totals.cgst', 'totals.sgst', 'totals.igst', 'totals.cess',
+  'totals.totalTax', 'totals.cgstRate', 'totals.sgstRate', 'totals.igstRate',
   'totals.otherCharges', 'totals.discount', 'totals.roundOff', 'totals.grandTotal',
-  'payment.paidAmount', 'payment.balanceDue',
+  'totals.grandTotalInWords', 'totals.totalTaxInWords', 'totals.makingCharge', 'totals.stoneValue', 'totals.metalValue',
+  'totals.lineCount', 'totals.totalQuantity', 'totals.totalGrossWeight', 'totals.totalNetWeight', 'totals.totalStoneWeight',
+  'payment.paidAmount', 'payment.balanceDue', 'payment.status', 'payment.modes', 'payment.details',
   'einvoice.irn', 'einvoice.ackNumber', 'einvoice.ackDate', 'einvoice.qrCodeData',
+  'ewb.number', 'ewb.validUntil',
+  'page.number', 'page.total', 'page.label', 'print.date', 'print.dateTime',
 ] as const;
 export type TaxInvoiceBoundField = typeof TAX_INVOICE_BOUND_FIELDS[number];
 
 // Item-table column whitelist (Part F "item table" section) — same enforcement, separate list
 // since a column is picked from a fixed per-line vocabulary, not the header/footer bound fields above.
 export const TAX_INVOICE_ITEM_COLUMNS = [
-  'srNo', 'description', 'productCode', 'hsnCode', 'quantity', 'uom', 'grossWeight', 'stoneWeight',
-  'netWeight', 'rate', 'makingCharge', 'lineDiscountAmount', 'taxableValue', 'cgstAmount',
-  'sgstAmount', 'igstAmount', 'lineTotalTax', 'totalPrice',
+  'srNo', 'description', 'descriptionDetail', 'productCode', 'huid', 'karat', 'category', 'hsnCode', 'quantity',
+  'uom', 'grossWeight', 'stoneWeight', 'netWeight', 'rate', 'wastagePercent', 'makingCharge', 'stoneValue',
+  'unitPrice', 'lineDiscountAmount', 'taxableValue', 'taxRate', 'cgstRate', 'cgstAmount', 'sgstRate', 'sgstAmount',
+  'igstRate', 'igstAmount', 'lineTotalTax', 'totalPrice', 'lineTotalWithTax',
+  'vaAmount', 'makingWithVa', 'makingRate', 'metalValue', 'discountPercent', 'metalType', 'tagName', 'subCategory',
+  'collection', 'itemSize', 'settingType', 'stoneDetails', 'stoneWeights', 'stonePieces', 'stoneRates', 'stoneAmounts',
+  'materialDetails', 'materialWeights', 'materialPieces', 'materialRates', 'materialAmounts',
 ] as const;
 export type TaxInvoiceItemColumn = typeof TAX_INVOICE_ITEM_COLUMNS[number];
+
+// Free-form designer layout (layout.elements): the repeating tables a template may place, and the
+// columns each kind may show. Mirrors client/src/types/taxInvoiceTemplate.ts — keep identical.
+export const TAX_INVOICE_TABLE_COLUMNS = {
+  items: TAX_INVOICE_ITEM_COLUMNS as readonly string[],
+  hsnSummary: ['hsnCode', 'quantity', 'netWeight', 'taxableValue', 'taxRate', 'cgstAmount', 'sgstAmount', 'igstAmount', 'totalTax'],
+  categorySummary: ['category', 'pieces', 'grossWeight', 'netWeight', 'amount'],
+  payments: ['paymentDate', 'mode', 'referenceNo', 'amount'],
+} as const satisfies Record<string, readonly string[]>;
+export type TaxInvoiceTableKind = keyof typeof TAX_INVOICE_TABLE_COLUMNS;
+
+export const TAX_INVOICE_ELEMENT_TYPES = ['text', 'box', 'line', 'image', 'barcode', 'qrcode', 'table'] as const;
 
 const INR = (v: unknown) => Number(v ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const DATE = (v: unknown) => (v ? new Date(v as string).toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' }) : '');

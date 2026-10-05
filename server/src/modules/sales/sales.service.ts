@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../config/database';
 import { AppError } from '../../middleware/error';
+import { priceMaterialBreakdown } from '../../shared/materialBreakdown';
 import { createAuditEntry } from '../../middleware/audit';
 import { emit } from '../../shared/websocket';
 import { DEFAULT_HSN_CODE, CREDIT_SETTLEMENT_MODES, PAYMENT_MODE_OLD_GOLD, PAYMENT_MODE_STORE_CREDIT } from '../../shared/constants';
@@ -170,6 +171,21 @@ function assertClientActive(client: { name: string; isActive: boolean }) {
   }
 }
 
+// Every sales employee a request names (invoice header and/or lines) must be an active member of the caller's own
+// company — User is a global identity, so a bare FK would accept anyone's id. `alreadyOnInvoice` lets an amend keep an
+// employee who has since been deactivated on a line that already carried them.
+async function assertSalesPeopleInCompany(
+  ctx: TenantContext, ids: Array<string | null | undefined>, alreadyOnInvoice: Set<string> = new Set(),
+) {
+  const wanted = Array.from(new Set(ids.filter((x): x is string => typeof x === 'string' && x.length > 0 && !alreadyOnInvoice.has(x))));
+  if (wanted.length === 0) return;
+  const found = await tenantQuery(ctx.companyId, (tx) => tx.companyUser.findMany({
+    where: { companyId: ctx.companyId, userId: { in: wanted }, isActive: true, user: { isActive: true } },
+    select: { userId: true },
+  }));
+  if (found.length !== wanted.length) throw new AppError('Sales employee not found', 404);
+}
+
 function checkCreditLimit(
   client: { name: string; creditLimit: unknown; currentBalance: unknown },
   additionalAmount: number,
@@ -235,6 +251,11 @@ type InvoiceItemInput = { productCode: string; description: string; huid?: strin
   /* karat (above, near goldRate) doubles as the MakingCharge master's other match key —
     tagged lines default it to the tag's own metalKarat when omitted, same as categoryId. */
   tagId?: string; /* optional link to real inventory — see JewelryTag */
+  materialBreakdown?: unknown; /* this bill's own material rows + MC/VA rates (shared/materialBreakdown.ts). When present
+    the server recomputes the line as a flat price from it (rateType/goldRate/makingCharge/stoneValue from the client are
+    ignored) and stores it on the InvoiceItem. Never touches the JewelryTag. */
+  salesPersonId?: string | null; /* the employee credited with this line (a User id of this company). Omit/null = the
+    line reports under the invoice's own salesPersonId. */
   id?: string; /* amendInvoice only: the existing InvoiceItem this line replaces. Ignored by createInvoice. */ };
 
 export async function createInvoice(data: {
@@ -259,6 +280,7 @@ export async function createInvoice(data: {
   // Layer 2: branch ownership + access — see createTag()'s identical reasoning. Checked first,
   // before any pricing/tag work, so a request for an unauthorized branch fails fast.
   await assertBranchAccessible(data.branchId, ctx);
+  await assertSalesPeopleInCompany(ctx, [data.salesPersonId, ...data.items.map((i) => i.salesPersonId)]);
 
   const { currency, tagIds, items, subtotal, discount, otherCharges, taxableAmount, taxAmount, roundOffExact, totalAmount, discountScale } =
     await priceInvoice(data, ctx);
@@ -628,8 +650,13 @@ async function priceInvoice(
     return eligible.find((m) => specificity(m) === bestScore);
   }
 
-  const items = data.items.map((i) => {
-    const { hsnCode, categoryId, uqc: uqcInput, id: _lineId, ...rest } = i; // id never reaches the row data
+  const items = data.items.map((line) => {
+    // A line carrying a material breakdown is priced from it, as a flat amount, whatever else the client sent.
+    const bd = line.materialBreakdown != null ? priceMaterialBreakdown(line.materialBreakdown) : null;
+    const i: InvoiceItemInput = bd
+      ? { ...line, rateType: 'FIXED', goldRate: bd.total, makingCharge: bd.making, wastagePercent: 0, stoneValue: bd.otherMaterials }
+      : line;
+    const { hsnCode, categoryId, uqc: uqcInput, id: _lineId, materialBreakdown: _bd, ...rest } = i; // id never reaches the row data
     // rateType 'FIXED': goldRate IS the decided flat unit price (e.g. a tag's own JewelryTag.sellingPrice)
     // — used as-is, no metal-value math. Anything else ('PER_GRAM', the default): goldRate is ₹/gram,
     // either explicit or resolved above from today's MetalRate (C2).
@@ -688,6 +715,8 @@ async function priceInvoice(
     }
     return {
       ...rest, tagId: i.tagId ?? null, goldRate, makingCharge, wastagePercent,
+      // Stored as the bill's own record; an amended line that no longer carries one clears the old copy.
+      materialBreakdown: bd ? (bd.normalized as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
       stoneWeight: i.stoneWeight ?? 0, stoneValue: i.stoneValue ?? 0, unitPrice, totalPrice,
       hsnCodeId: hsn.id, taxRate: Number(hsn.gstRate), uqc,
       categoryId: resolvedCategoryId,
@@ -830,6 +859,11 @@ export async function amendInvoice(invoiceId: string, data: {
     const member = await tenantQuery(ctx.companyId, (tx) => tx.companyUser.count({ where: { companyId: ctx.companyId, userId: data.salesPersonId! } }));
     if (member === 0) throw new AppError('Sales executive not found', 404);
   }
+  // Line attribution: an employee already credited on this invoice's stored lines may stay (even if since deactivated).
+  const storedLineSales = await tenantQuery(ctx.companyId, (tx) => tx.invoiceItem.findMany({
+    where: { invoiceId, companyId: ctx.companyId, salesPersonId: { not: null } }, select: { salesPersonId: true },
+  }));
+  await assertSalesPeopleInCompany(ctx, data.items.map((i) => i.salesPersonId), new Set(storedLineSales.map((r) => r.salesPersonId!)));
   const lineIdsIn = data.items.map((i) => i.id).filter(Boolean) as string[];
   if (new Set(lineIdsIn).size !== lineIdsIn.length) throw new AppError('The same invoice line appears twice', 400);
 

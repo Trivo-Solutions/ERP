@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
   Alert, Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Grid, IconButton, Stack,
   Table, TableBody, TableCell, TableHead, TableRow, TextField, Typography,
@@ -56,15 +56,31 @@ function fmt(n: number) {
 let rowSeq = 0;
 export const newRowKey = () => `r${++rowSeq}`;
 
-export function EstimateBreakdownDialog({ title, quotedTotal, value, onClose, onSave }: {
+export function EstimateBreakdownDialog({
+  title, quotedTotal, value, onClose, onSave, onChange, heading, leftActions, summaryExtra, applyLabel,
+}: {
   title: string;
   quotedTotal: number;
   value: EstimateBreakdown | null;
   onClose: () => void;
   onSave: (b: EstimateBreakdown) => void;
+  // Controlled mode (used by the multi-tag Material Pricing dialog): when `onChange` is given, `value` IS the draft and
+  // every edit is reported through `onChange`; the dialog keeps no draft of its own, so a parent can swap `value` between
+  // pieces and keep each piece's edits.
+  onChange?: (b: EstimateBreakdown) => void;
+  heading?: ReactNode;        // replaces the plain title + hint
+  leftActions?: ReactNode;    // left side of the footer (e.g. Previous / Next)
+  summaryExtra?: ReactNode;   // under the line total (e.g. the bill total)
+  applyLabel?: string;
 }) {
-  const [draft, setDraft] = useState<EstimateBreakdown | null>(value);
-  useEffect(() => { setDraft(value); }, [value]);
+  const controlled = !!onChange;
+  const [ownDraft, setOwnDraft] = useState<EstimateBreakdown | null>(value);
+  useEffect(() => { if (!controlled) setOwnDraft(value); }, [value, controlled]);
+  const draft = controlled ? value : ownDraft;
+  const setDraft = (next: EstimateBreakdown | null | ((d: EstimateBreakdown | null) => EstimateBreakdown | null)) => {
+    const resolved = typeof next === 'function' ? next(draft) : next;
+    if (controlled) { if (resolved) onChange!(resolved); } else setOwnDraft(resolved);
+  };
 
   if (!draft) return null;
   const totals = estimateTotals(draft);
@@ -74,10 +90,12 @@ export function EstimateBreakdownDialog({ title, quotedTotal, value, onClose, on
   return (
     <Dialog open onClose={onClose} maxWidth="md" fullWidth>
       <DialogTitle fontWeight={700}>
-        {title}
-        <Typography variant="caption" display="block" color="text.secondary">
-          Change a rate, delete a row or add one — the line price follows. The saved estimate itself is not changed.
-        </Typography>
+        {heading ?? (<>
+          {title}
+          <Typography variant="caption" display="block" color="text.secondary">
+            Change a rate, delete a row or add one — the line price follows. Only this bill changes — the tag and any saved estimate are left as they are.
+          </Typography>
+        </>)}
       </DialogTitle>
       <DialogContent>
         <Box sx={{ overflowX: 'auto' }}>
@@ -172,6 +190,7 @@ export function EstimateBreakdownDialog({ title, quotedTotal, value, onClose, on
                   Quoted {fmt(quotedTotal)} · {totals.total > quotedTotal ? '+' : '−'}{fmt(Math.abs(totals.total - quotedTotal))}
                 </Typography>
               )}
+              {summaryExtra}
             </Stack>
           </Grid>
         </Grid>
@@ -180,8 +199,9 @@ export function EstimateBreakdownDialog({ title, quotedTotal, value, onClose, on
         )}
       </DialogContent>
       <DialogActions sx={{ p: 2.5 }}>
+        {leftActions && <Box sx={{ mr: 'auto' }}>{leftActions}</Box>}
         <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" onClick={() => onSave(draft)}>Apply to bill</Button>
+        <Button variant="contained" onClick={() => onSave(draft)}>{applyLabel ?? 'Apply to bill'}</Button>
       </DialogActions>
     </Dialog>
   );

@@ -142,6 +142,7 @@ export const NAV_ITEMS: NavItem[] = [
       // J4-D1: same sensitivity class as Dealer Aging above — requires report:financial_view.
       { label: 'Aging Receivables', path: '/reports/aging', permission: 'report:financial_view' },
       { label: 'Sales Register', path: '/reports/sales-register', permission: 'report:view' },
+      { label: 'Sales Report', path: '/reports/sales-report', permission: 'report:view' },
       { label: 'Stock Book', path: '/reports/stock-book', permission: 'report:view' },
       { label: 'Barcode History', path: '/reports/barcode-history', permission: 'report:view' },
       { label: 'Stock on Hand', path: '/reports/stock-on-hand', permission: 'report:view' },

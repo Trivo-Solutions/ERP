@@ -2,7 +2,9 @@ import { Prisma } from '@prisma/client';
 import { AppError } from '../../middleware/error';
 import { assertOwnedIfPresent } from '../../middleware/tenant';
 import { tenantTransaction, tenantQuery } from '../../shared/tenantContext';
-import { TAX_INVOICE_BOUND_FIELDS, TAX_INVOICE_ITEM_COLUMNS } from '../../shared/taxInvoiceBoundFields';
+import {
+  TAX_INVOICE_BOUND_FIELDS, TAX_INVOICE_ITEM_COLUMNS, TAX_INVOICE_TABLE_COLUMNS, TAX_INVOICE_ELEMENT_TYPES,
+} from '../../shared/taxInvoiceBoundFields';
 
 // G1 Part F/L — CRUD for the Tax Invoice print template. Structurally mirrors
 // EstimateTemplate/TagTemplate (one Json `layout` column, no separate element table, "only one
@@ -32,9 +34,105 @@ export interface TaxInvoiceLayout {
   };
 }
 
-function validateLayout(layout: unknown): TaxInvoiceLayout {
+// Free-form designer layout (the same canvas idea as EstimateTemplate/TagTemplate): every element is
+// positioned in mm and may bind to a whitelisted field. A layout is EITHER this shape (has `elements`)
+// OR the older checklist shape above (has `sections`) — both stay valid, and both print.
+export interface TaxInvoiceDesignerLayout {
+  page: { widthMm: number; heightMm: number };
+  copies?: string[];
+  elements: Record<string, unknown>[];
+}
+
+const KNOWN_FIELDS = new Set<string>(TAX_INVOICE_BOUND_FIELDS as readonly string[]);
+const PLACEHOLDER = /\{\{\s*([^{}]*?)\s*\}\}/g;
+const MAX_ELEMENTS = 400;
+const MAX_IMAGE_DATA_URL = 1_200_000; // chars — an ~800 KB image, base64-encoded
+
+function assertKnownField(f: unknown, what: string) {
+  if (typeof f !== 'string' || !KNOWN_FIELDS.has(f)) {
+    throw new AppError(`Unknown tax invoice template ${what}: ${String(f)}`, 400);
+  }
+}
+function assertFinite(v: unknown, what: string, min: number, max: number) {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < min || v > max) {
+    throw new AppError(`Tax invoice template ${what} must be a number between ${min} and ${max}`, 400);
+  }
+}
+
+function validateDesignerLayout(layout: any): TaxInvoiceDesignerLayout {
+  const page = layout.page;
+  if (!page || typeof page !== 'object') throw new AppError('Template layout needs a "page" with widthMm and heightMm', 400);
+  assertFinite(page.widthMm, 'page width (mm)', 40, 700);
+  assertFinite(page.heightMm, 'page height (mm)', 40, 1500);
+  if (layout.copies !== undefined) {
+    if (!Array.isArray(layout.copies) || layout.copies.length > 6 || layout.copies.some((c: unknown) => typeof c !== 'string' || c.length > 60)) {
+      throw new AppError('Template copies must be up to 6 labels of at most 60 characters', 400);
+    }
+  }
+  if (!Array.isArray(layout.elements)) throw new AppError('Template layout "elements" must be an array', 400);
+  if (layout.elements.length > MAX_ELEMENTS) throw new AppError(`A template may have at most ${MAX_ELEMENTS} elements`, 400);
+
+  const ids = new Set<string>();
+  for (const el of layout.elements) {
+    if (!el || typeof el !== 'object') throw new AppError('Every template element must be an object', 400);
+    if (typeof el.id !== 'string' || !el.id || ids.has(el.id)) throw new AppError('Every template element needs a unique id', 400);
+    ids.add(el.id);
+    if (!(TAX_INVOICE_ELEMENT_TYPES as readonly string[]).includes(el.type)) {
+      throw new AppError(`Unknown tax invoice template element type: ${String(el.type)}`, 400);
+    }
+    assertFinite(el.xMm, 'element x (mm)', -50, 2000);
+    assertFinite(el.yMm, 'element y (mm)', -50, 3000);
+    for (const dim of ['widthMm', 'heightMm'] as const) {
+      if (el[dim] !== undefined) assertFinite(el[dim], `element ${dim === 'widthMm' ? 'width' : 'height'} (mm)`, 0, 3000);
+    }
+    if (el.fontSize !== undefined) assertFinite(el.fontSize, 'font size (pt)', 3, 120);
+    for (const c of ['color', 'fillColor'] as const) {
+      if (el[c] !== undefined && !(typeof el[c] === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(el[c]))) {
+        throw new AppError(`Tax invoice template ${c} must be a #hex colour`, 400);
+      }
+    }
+    if (el.type === 'text') {
+      if (el.boundField !== undefined) assertKnownField(el.boundField, 'bound field');
+      if (el.literalText !== undefined) {
+        if (typeof el.literalText !== 'string' || el.literalText.length > 2000) throw new AppError('Template text must be a string of at most 2000 characters', 400);
+        for (const m of el.literalText.matchAll(PLACEHOLDER)) assertKnownField(m[1], 'bound field');
+      }
+    }
+    if (el.type === 'barcode' && el.boundField !== undefined) assertKnownField(el.boundField, 'bound field');
+    if (el.type === 'image' && el.imageDataUrl !== undefined) {
+      if (typeof el.imageDataUrl !== 'string' || !/^data:image\/(png|jpeg|webp|svg\+xml);base64,/.test(el.imageDataUrl)) {
+        throw new AppError('Template image must be an embedded png, jpeg, webp or svg image', 400);
+      }
+      if (el.imageDataUrl.length > MAX_IMAGE_DATA_URL) throw new AppError('Template image is too large (max about 800 KB)', 400);
+    }
+    if (el.type === 'table') {
+      const allowed = (TAX_INVOICE_TABLE_COLUMNS as Record<string, readonly string[]>)[el.tableKind];
+      if (!allowed) throw new AppError(`Unknown tax invoice template table kind: ${String(el.tableKind)}`, 400);
+      if (!Array.isArray(el.columns) || el.columns.length === 0 || el.columns.length > 60) {
+        throw new AppError('A template table needs between 1 and 60 columns', 400);
+      }
+      const seen = new Set<string>();
+      for (const col of el.columns) {
+        if (!col || typeof col.field !== 'string' || !allowed.includes(col.field)) {
+          throw new AppError(`Unknown tax invoice template ${el.tableKind} column: ${String(col?.field)}`, 400);
+        }
+        if (seen.has(col.field)) throw new AppError(`Duplicate tax invoice template column: ${col.field}`, 400);
+        seen.add(col.field);
+        if (typeof col.label !== 'string' || col.label.length > 80) throw new AppError('A column label must be a string of at most 80 characters', 400);
+        assertFinite(col.widthMm, 'column width (mm)', 2, 700);
+        if (col.align !== undefined && !['left', 'center', 'right'].includes(col.align)) throw new AppError('A column align must be left, center or right', 400);
+      }
+    }
+  }
+  return layout as TaxInvoiceDesignerLayout;
+}
+
+function validateLayout(layout: unknown): TaxInvoiceLayout | TaxInvoiceDesignerLayout {
+  if (layout && typeof layout === 'object' && Array.isArray((layout as any).elements)) {
+    return validateDesignerLayout(layout);
+  }
   if (!layout || typeof layout !== 'object' || !(layout as any).sections) {
-    throw new AppError('Template layout must be an object with a "sections" key', 400);
+    throw new AppError('Template layout must be an object with a "sections" key (checklist format) or an "elements" list (designer format)', 400);
   }
   const s = (layout as any).sections;
   const boundFieldArrays: unknown[][] = [s.seller?.fields, s.buyer?.fields, s.invoiceMeta?.fields, s.totals?.fields, s.payment?.fields].filter(Boolean);
@@ -155,16 +253,16 @@ export async function duplicateTaxInvoiceTemplate(companyId: string, id: string,
 
 // G1 Part H — print-time resolution: explicit branch override, else the company default, else the
 // safe built-in fallback (never fails invoice generation merely for lacking a saved template).
-export async function resolveTaxInvoiceTemplate(companyId: string, branchId: string): Promise<TaxInvoiceLayout> {
+export async function resolveTaxInvoiceTemplate(companyId: string, branchId: string): Promise<TaxInvoiceLayout | TaxInvoiceDesignerLayout> {
   const branchTemplate = await tenantQuery(companyId, (tx) => tx.taxInvoiceTemplate.findFirst({
     where: { companyId, branchId, isActive: true },
   }));
-  if (branchTemplate) return branchTemplate.layout as unknown as TaxInvoiceLayout;
+  if (branchTemplate) return branchTemplate.layout as unknown as TaxInvoiceLayout | TaxInvoiceDesignerLayout;
 
   const companyDefault = await tenantQuery(companyId, (tx) => tx.taxInvoiceTemplate.findFirst({
     where: { companyId, isDefault: true, isActive: true },
   }));
-  if (companyDefault) return companyDefault.layout as unknown as TaxInvoiceLayout;
+  if (companyDefault) return companyDefault.layout as unknown as TaxInvoiceLayout | TaxInvoiceDesignerLayout;
 
   return buildDefaultLayout();
 }

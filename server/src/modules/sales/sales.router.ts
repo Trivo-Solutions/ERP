@@ -5,6 +5,7 @@ import { resolveTenantContext, assertBranchAccessible } from '../../middleware/t
 import { AppError } from '../../middleware/error';
 import { parseDate, parseOptionalDate } from '../../shared/parseDate';
 import * as svc from './sales.service';
+import * as salesReportSvc from './salesReport.service';
 import * as creditNoteSvc from './creditNote.service';
 import * as salesDebitNoteSvc from './salesDebitNote.service';
 import * as taxInvoiceTemplateSvc from './taxInvoiceTemplate.service';
@@ -69,8 +70,24 @@ salesRouter.get('/reports/register', requirePermission('report:view'), async (re
   res.json({ success: true, data });
 });
 
+// Sales Report — Summary (one row per invoice) and Detailed (per employee, per line). Same permission as the register.
+const salesReportFilters = (req: Request) => {
+  const str = (k: string) => (typeof req.query[k] === 'string' && (req.query[k] as string).trim() ? (req.query[k] as string).trim() : undefined);
+  return {
+    from: parseOptionalDate(str('from'), 'From date'), to: parseOptionalDate(str('to'), 'To date'),
+    branchId: str('branchId'), invoiceNo: str('invoiceNo'), customer: str('customer'),
+    salesPersonId: str('salesPersonId'), paymentStatus: str('paymentStatus'), status: str('status'),
+  };
+};
+salesRouter.get('/reports/sales-summary', requirePermission('report:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await salesReportSvc.getSalesSummary(req.tenant!, salesReportFilters(req)) });
+});
+salesRouter.get('/reports/sales-detailed', requirePermission('report:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await salesReportSvc.getSalesDetailed(req.tenant!, salesReportFilters(req)) });
+});
+
 // Invoices
-salesRouter.get('/invoices', requirePermission('sales:view'), async (req: Request, res: Response) => {
+salesRouter.get('/invoices',requirePermission('sales:view'), async (req: Request, res: Response) => {
   // Optional invoice-date range, both ends inclusive (`to` is a calendar day, so it runs to the end of that day).
   // Without a range only the latest 50 come back; with one, everything in it (capped) — that is how older
   // invoices are reached.
@@ -117,8 +134,23 @@ salesRouter.get('/invoices/:id', requirePermission('sales:view'), async (req: Re
   const invoice = await tenantQuery(req.tenant!.companyId, (_tx) => _tx.salesInvoice.findUnique({
     where: { id: req.params.id },
     include: {
-      client: true, items: { include: { hsnCode: true, category: true } }, taxDetails: true,
+      client: true, taxDetails: true,
+      items: {
+        include: {
+          hsnCode: true, category: true,
+          // The piece's own particulars + material rows (stones, metal) for the template's jewellery-detail columns.
+          tag: {
+            select: {
+              name: true, metalType: true, settingType: true,
+              subCategory: { select: { name: true } }, collection: { select: { name: true } }, size: { select: { name: true } },
+              materials: { select: { code: true, materialType: true, size: true, pieces: true, weight: true, unit: true, saleRate: true, saleAmount: true } },
+            },
+          },
+        },
+      },
       payments: true, exportDocs: true, salesPerson: { select: { id: true, name: true } },
+      // For the tax-invoice template's Branch fields (name/code/address/phone/email).
+      branch: { select: { name: true, branchCode: true, address: true, city: true, state: true, phone: true, email: true } },
     },
   }));
   if (!invoice || invoice.companyId !== req.tenant!.companyId ||

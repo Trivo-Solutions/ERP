@@ -70,6 +70,7 @@ import { OldGoldExchange } from './pages/Sales/OldGoldExchange';
 import { GstRegistrationsPage } from './pages/Sales/GstRegistrationsPage';
 import { GstCompliancePage } from './pages/Compliance/GstCompliancePage';
 import { TaxInvoiceTemplatesPage } from './pages/Sales/TaxInvoiceTemplatesPage';
+import { TaxInvoiceTemplateDesignerPage } from './pages/Sales/TaxInvoiceTemplateDesignerPage';
 import { CreditNotesPage } from './pages/Sales/CreditNotesPage';
 import { CreditNoteTemplatesPage } from './pages/Sales/CreditNoteTemplatesPage';
 
@@ -92,6 +93,7 @@ import { SalesRegister } from './pages/Reports/SalesRegister';
 import { StockOnHand } from './pages/Reports/StockOnHand';
 import { DeadStock } from './pages/Reports/DeadStock';
 import { StockBook } from './pages/Reports/StockBook';
+import { SalesReport } from './pages/Reports/SalesReport';
 import { BarcodeHistory } from './pages/Reports/BarcodeHistory';
 import { DayBook } from './pages/Reports/DayBook';
 import { GstSummary } from './pages/Reports/GstSummary';
@@ -192,6 +194,7 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="sales/gst-compliance" element={<RequirePermission permission="gst:registration_view"><GstCompliancePage /></RequirePermission>} />
       <Route path="compliance/gst" element={<RequirePermission permission="gst:registration_view"><GstCompliancePage /></RequirePermission>} />
       <Route path="sales/tax-invoice-templates" element={<RequirePermission permission="taxInvoiceTemplate:view"><TaxInvoiceTemplatesPage /></RequirePermission>} />
+      <Route path="sales/tax-invoice-templates/designer" element={<RequirePermission permission="taxInvoiceTemplate:view"><TaxInvoiceTemplateDesignerPage /></RequirePermission>} />
       <Route path="sales/credit-notes" element={<RequirePermission permission="creditNote:view"><CreditNotesPage /></RequirePermission>} />
       <Route path="sales/credit-note-templates" element={<RequirePermission permission="creditNoteTemplate:view"><CreditNoteTemplatesPage /></RequirePermission>} />
 
@@ -214,6 +217,7 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="reports/karigar" element={<KarigarBalances />} />
       <Route path="reports/aging" element={<RequirePermission permission="report:financial_view"><AgingReceivables /></RequirePermission>} />
       <Route path="reports/sales-register" element={<SalesRegister />} />
+      <Route path="reports/sales-report" element={<SalesReport />} />
       <Route path="reports/stock-book" element={<StockBook />} />
       <Route path="reports/barcode-history" element={<BarcodeHistory />} />
       <Route path="reports/stock-on-hand" element={<StockOnHand />} />
