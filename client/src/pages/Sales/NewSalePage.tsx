@@ -19,6 +19,7 @@ import { findMakingCharge } from '../../utils/estimateCalc';
 import { EstimateBreakdown, EstimateBreakdownDialog, estimateTotals, newRowKey } from './EstimateBreakdown';
 import { SaleSummary, SaleFigures } from './SaleSummary';
 import { useAuthStore } from '../../store/auth.store';
+import { usePageShortcuts, focusFirstField } from '../../hooks/usePageShortcuts';
 
 // Statutory limits the server enforces (shared/compliance.ts) — mirrored here only to warn before submitting.
 const PAN_REQUIRED_ABOVE = 200000;   // Rule 114B: PAN / Form 60 on a sale above this
@@ -192,6 +193,7 @@ export function NewSalePage() {
   const [collectPayment, setCollectPayment] = useState(false);
   const [paymentSplits, setPaymentSplits] = useState<PaymentSplit[]>([]);
   const keySeq = useRef(0);
+  const formRef = useRef<HTMLFormElement>(null);
   const nextKey = () => String(++keySeq.current);
   const paySeq = useRef(0);
   const nextPayKey = () => String(++paySeq.current);
@@ -774,6 +776,37 @@ export function NewSalePage() {
   const tab1Ready = !!selectedClientId && !!branchId;
   const tab2Ready = tab1Ready && lines.length > 0;
 
+  // Keyboard: Ctrl+Enter = next tab (create on the last), Alt+←/→ = previous/next tab (a locked tab is skipped
+  // with a hint), Alt+D = discount/charges/tax, Ctrl+S = jump to the last ready tab, or create when already on it.
+  // The invoice is only ever created through the real submit button, so every on-screen guard still applies.
+  const goTab = (n: number) => { setActiveTab(n); focusFirstField(formRef.current); };
+  const tryTab = (n: number) => {
+    if (n === 1 && !tab1Ready) enqueueSnackbar('Pick a customer and branch first', { variant: 'warning' });
+    else if (n === 2 && !tab2Ready) enqueueSnackbar('Add at least one item first', { variant: 'warning' });
+    else goTab(n);
+  };
+  const submitFromKeyboard = () => {
+    const btn = formRef.current?.querySelector<HTMLButtonElement>('button[type="submit"]');
+    if (btn && !btn.disabled) btn.click();
+    else enqueueSnackbar('Cannot save yet — check the warnings on this tab', { variant: 'warning' });
+  };
+  usePageShortcuts({
+    'ctrl+enter': () => {
+      if (createdInvoice) { if (!isEdit) handleSaveAndNew(); }
+      else if (activeTab < 2) tryTab(activeTab + 1);
+      else submitFromKeyboard();
+    },
+    'ctrl+s': () => {
+      if (createdInvoice) return;
+      if (activeTab === 2) submitFromKeyboard();
+      else tryTab(tab2Ready ? 2 : tab1Ready ? 1 : 0);
+    },
+    'alt+arrowright': () => { if (!createdInvoice && activeTab < 2) tryTab(activeTab + 1); },
+    'alt+arrowleft': () => { if (!createdInvoice && activeTab > 0) goTab(activeTab - 1); },
+    'alt+d': () => { if (!createdInvoice && tab2Ready) setAdjustOpen(true); },
+    'alt+p': () => { if (createdInvoice) printInvoice(createdInvoice); },
+  });
+
   return (
     <Box>
       <PageHeader title={isEdit ? `Edit Invoice ${editInvoice?.invoiceNumber ?? ''}`.trim() : 'New Sale'} />
@@ -802,7 +835,7 @@ export function NewSalePage() {
                 </Stack>
               </Box>
             ) : (
-              <form onSubmit={handleSubmit((d) => mutation.mutate(d))}>
+              <form ref={formRef} onSubmit={handleSubmit((d) => mutation.mutate(d))}>
                 {/* The way back sits on the tab row — it used to cost a header line of its own. */}
                 <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 2, borderBottom: 1, borderColor: 'divider', px: 2 }}>
                   <Tabs value={activeTab} onChange={(_, v) => setActiveTab(v)}>

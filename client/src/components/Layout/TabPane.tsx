@@ -36,6 +36,7 @@ export const TabPane = memo(function TabPane({ id, tabKey, active }: Props) {
   return (
     <Box
       aria-hidden={!active}
+      data-tab-pane={active ? 'active' : 'hidden'}
       sx={{
         position: 'absolute', inset: 0, overflowY: 'auto', p: 3, bgcolor: 'background.default',
         visibility: active ? 'visible' : 'hidden',

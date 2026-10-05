@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { usePageShortcuts, focusFirstField } from '../../hooks/usePageShortcuts';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Box, Card, Grid, TextField, Typography, Button, Stack,
@@ -170,6 +171,7 @@ export function NewTagPage() {
   // waits for `createdTag` to actually render into the print portal before printing.
   const [directPrint, setDirectPrint] = useState(false);
   const autoContinueRef = useRef(false);
+  const formRef = useRef<HTMLFormElement>(null);
   // Local-only for now (see TagImageUpload) — no server field/endpoint exists to persist this yet.
   const [tagImage, setTagImage] = useState<File | null>(null);
 
@@ -874,6 +876,25 @@ export function NewTagPage() {
     setTimeout(() => setFocus('branchId'), 100);
   };
 
+  // Keyboard: Ctrl+S saves from any tab, Ctrl+Enter = next tab (save on the last), Alt+←/→ = previous/next tab.
+  // After saving, Ctrl+Enter = Save & New and Alt+P = print the thermal label.
+  const saveFromKeyboard = () => {
+    if (tagLocked || mutation.isPending) return;
+    formRef.current?.requestSubmit();   // runs the form's own validation, which jumps to the offending tab
+  };
+  const goTab = (n: number) => { setActiveTab(n); focusFirstField(formRef.current); };
+  usePageShortcuts({
+    'ctrl+s': () => { if (!createdTag) saveFromKeyboard(); },
+    'ctrl+enter': () => {
+      if (createdTag) handleSaveAndNew();
+      else if (activeTab < 2) goTab(activeTab + 1);
+      else saveFromKeyboard();
+    },
+    'alt+arrowright': () => { if (!createdTag && activeTab < 2) goTab(activeTab + 1); },
+    'alt+arrowleft': () => { if (!createdTag && activeTab > 0) goTab(activeTab - 1); },
+    'alt+p': () => { if (createdTag && !printLabelMutation.isPending) printLabelMutation.mutate(); },
+  });
+
   // "Print & continue" checkbox: once `createdTag` actually renders (the print portal above
   // reads it), fire the print dialog, then reset back to a blank Identity tab as soon as the
   // dialog closes. Listening for `afterprint` (rather than just chaining after window.print())
@@ -960,7 +981,7 @@ export function NewTagPage() {
                   </Stack>
                 </Box>
               ) : (
-                <form onSubmit={handleSubmit((d) => mutation.mutate(d), (formErrors) => {
+                <form ref={formRef} onSubmit={handleSubmit((d) => mutation.mutate(d), (formErrors) => {
                   if (formErrors.branchId) { setActiveTab(0); enqueueSnackbar('Branch is required', { variant: 'warning' }); }
                   else if (formErrors.stockTypeId) { setActiveTab(0); enqueueSnackbar('Stock Type is required', { variant: 'warning' }); }
                   else if (formErrors.categoryId) { setActiveTab(0); enqueueSnackbar('Category is required', { variant: 'warning' }); }

@@ -1,18 +1,20 @@
 import React from 'react';
-import { Box, AppBar, Toolbar, IconButton, Typography, Badge, Tooltip, Chip } from '@mui/material';
-import { Notifications, Scale, WifiOff, DarkMode, LightMode } from '@mui/icons-material';
-import { useLocation } from 'react-router-dom';
+import { Box, AppBar, Toolbar, IconButton, Typography, Badge, Tooltip, Chip, TextField, InputAdornment } from '@mui/material';
+import { Notifications, Scale, WifiOff, DarkMode, LightMode, Search, KeyboardOutlined } from '@mui/icons-material';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { TabBar } from './TabBar';
 import { SidebarToggleIcon } from './SidebarToggleIcon';
 import { titleOf } from './tabPaths';
 import { TabPane } from './TabPane';
+import { KeyboardShortcuts, OPEN_SHORTCUT_HELP_EVENT, JEWEL_SEARCH_INPUT_ID } from './KeyboardShortcuts';
 import { useTabsStore } from '../../store/tabs.store';
 import { useAuthStore } from '../../store/auth.store';
 import { useUiStore } from '../../store/ui.store';
 import { useSocket } from '../../hooks/useSocket';
 import { useState, useEffect, useRef, useCallback } from 'react';
 
+const JEWEL_HISTORY_PATH = '/tagging/transactions';
 const SIDEBAR_WIDTH = 260;
 const EDGE_WIDTH = 6;         // px of the left screen edge that reveals the hidden sidebar
 const REVEAL_DELAY_MS = 120;  // linger at the edge this long, so reaching for the first tab doesn't open it
@@ -61,6 +63,29 @@ export function AppShell() {
     if (identity) useTabsStore.getState().syncLocation(locationKey);
   }, [identity, locationKey]);
 
+  // Top-bar jewel search. Reuses an open history tab (pointing it at the new tag) instead of letting the tab you
+  // are on follow the navigation, or opens one; either way the page reads the tag from `?q=`.
+  const navigate = useNavigate();
+  const canViewTags = useAuthStore((s) => s.hasPermission('tag:view'));
+  const [jewelQuery, setJewelQuery] = useState('');
+  const openJewelHistory = () => {
+    const q = jewelQuery.trim();
+    if (!q) return;
+    const key = `${JEWEL_HISTORY_PATH}?q=${encodeURIComponent(q)}`;
+    const store = useTabsStore.getState();
+    const existing = store.tabs.find((t) => t.key.split('?')[0] === JEWEL_HISTORY_PATH);
+    let go: string | null;
+    if (existing) {
+      store.setTabKey(existing.id, key);
+      go = store.focusTab(existing.id, locationKey);
+    } else {
+      store.openTab(key, locationKey);
+      go = key === locationKey ? null : key;
+    }
+    if (go) navigate(go);
+    setJewelQuery('');
+  };
+
   useEffect(() => {
     if (!socket) return;
     const onConnect = () => setWsConnected(true);
@@ -73,6 +98,7 @@ export function AppShell() {
 
   return (
     <Box sx={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
+      <KeyboardShortcuts />
       {/* Sidebar — pinned: beside the page. Auto-hide: hidden, revealed from the left edge. */}
       {!sidebarPinned && (
         <Box
@@ -130,6 +156,20 @@ export function AppShell() {
               {pageTitleKey === locationKey ? pageTitle : titleOf(location.pathname)}
             </Typography>
 
+            {/* Jewel history quick search: type / scan a tag number, Enter opens its transaction history. */}
+            {canViewTags && (
+              <TextField
+                size="small"
+                value={jewelQuery}
+                onChange={(e) => setJewelQuery(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); openJewelHistory(); } }}
+                placeholder="Jewel history — tag no. ↵"
+                inputProps={{ id: JEWEL_SEARCH_INPUT_ID, 'aria-label': 'Jewel transaction history search', style: { padding: '3px 6px', fontSize: 12.5 } }}
+                InputProps={{ startAdornment: <InputAdornment position="start" sx={{ mr: 0.25 }}><Search sx={{ fontSize: 16 }} /></InputAdornment> }}
+                sx={{ width: 210, '& .MuiOutlinedInput-root': { pl: 0.75 } }}
+              />
+            )}
+
             {/* WS Status */}
             <Tooltip title={wsConnected ? 'Real-time connected' : 'Real-time disconnected'}>
               <Chip
@@ -140,6 +180,12 @@ export function AppShell() {
                 variant="outlined"
                 sx={{ fontSize: 9.5, height: 20, '& .MuiChip-label': { px: 0.75 } }}
               />
+            </Tooltip>
+
+            <Tooltip title="Keyboard shortcuts (Ctrl+/) · Command palette (Ctrl+K)">
+              <IconButton size="small" onClick={() => window.dispatchEvent(new Event(OPEN_SHORTCUT_HELP_EVENT))} sx={{ p: 0.5 }} aria-label="Keyboard shortcuts">
+                <KeyboardOutlined sx={{ fontSize: 18 }} />
+              </IconButton>
             </Tooltip>
 
             <Tooltip title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}>
