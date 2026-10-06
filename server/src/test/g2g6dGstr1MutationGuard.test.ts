@@ -209,6 +209,7 @@ describe('GSTR-1 post-filing mutation controls (G2g-6d)', () => {
     }
     await tenantQuery(tenant.company.id, (tx) => tx.creditNote.deleteMany({ where: { companyId: tenant.company.id } }));
     await tenantQuery(tenant.company.id, (tx) => tx.salesDebitNote.deleteMany({ where: { companyId: tenant.company.id } }));
+    await prisma.repairCase.deleteMany({ where: { salesReturnItem: { return: { invoiceId: { in: invoiceIds } } } } }); // returned-jewellery register rows reference the return lines
     await prisma.salesReturn.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.invoicePayment.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
@@ -377,7 +378,7 @@ describe('GSTR-1 post-filing mutation controls (G2g-6d)', () => {
       expect(ret.invoiceId).toBe(invoice.id);
 
       const freshTag = await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } });
-      expect(freshTag.status).toBe('IN_STOCK');
+      expect(freshTag.status).toBe('RETURNED_PENDING_INSPECTION');
       const after = await prisma.salesInvoice.findUniqueOrThrow({ where: { id: invoice.id } });
       expect(after.totalAmount.toString()).toBe(before.totalAmount.toString());
       expect(after.status).toBe(before.status);

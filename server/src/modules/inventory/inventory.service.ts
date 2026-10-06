@@ -5,6 +5,7 @@ import { createAuditEntry } from '../../middleware/audit';
 import { nextSimpleCode } from '../../shared/numberSequence';
 import {TenantContext, tenantTransaction, tenantQuery } from '../../shared/tenantContext';
 import { assertOwnedByCompany } from '../../middleware/tenant';
+import { insertMetalMovement, METAL_MOVEMENT, MetalMovementType } from '../../shared/metalMovement';
 
 export async function getMetalStock(companyId: string, filters: {
   karat?: string; location?: string; minWeight?: number;
@@ -30,10 +31,13 @@ export async function addMetalStock(data: {
   materialName: string; karat: string; purity: number;
   grossWeight: number; netWeight: number; location?: string;
   sourceType: string; sourceRef?: string; avgCostPerGram: number;
-}, companyId: string, userId: string, tx?: Prisma.TransactionClient): Promise<Awaited<ReturnType<Prisma.TransactionClient['metalStock']['create']>>> {
+}, companyId: string, userId: string, tx?: Prisma.TransactionClient,
+// What brought this metal in — recorded as the lot's opening MetalStockMovement. Defaults to a manual add.
+movement?: { movementType: MetalMovementType; referenceType: string; referenceId: string; branchId?: string | null },
+): Promise<Awaited<ReturnType<Prisma.TransactionClient['metalStock']['create']>>> {
   // No surrounding transaction: open a tenant-scoped one (never fall back to the bare client — with row-level
   // security enforced that writes nothing / is refused).
-  if (!tx) return tenantTransaction(companyId, (t) => addMetalStock(data, companyId, userId, t));
+  if (!tx) return tenantTransaction(companyId, (t) => addMetalStock(data, companyId, userId, t, movement));
   const client = tx;
   const stockCode = await nextSimpleCode(companyId, 'METALSTOCK', 'MS', 6, client);
   const stock = await client.metalStock.create({
@@ -43,6 +47,12 @@ export async function addMetalStock(data: {
       ...data,
       availableWt: data.netWeight,
     },
+  });
+  await insertMetalMovement(client, companyId, stock, Number(stock.availableWt), 0, Number(stock.availableWt), {
+    movementType: movement?.movementType ?? METAL_MOVEMENT.MANUAL_ADD,
+    referenceType: movement?.referenceType ?? 'MetalStock',
+    referenceId: movement?.referenceId ?? stock.id,
+    branchId: movement?.branchId, userId,
   });
   await createAuditEntry('metal_stocks', stock.id, userId, 'CREATE', undefined, undefined, companyId);
   return stock;

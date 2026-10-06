@@ -126,6 +126,7 @@ describe('G2a: CreditNote/DebitNote/CreditNoteTemplate/DebitNoteTemplate foundat
     // Everything that references OUR client (invoiceItem/salesReturn/salesInvoice) must go first;
     // cleanupTestTenant would remove them too, but only later, after it already tried the company.
     await prisma.invoiceItem.deleteMany({ where: { id: { in: [fA.invoiceItem.id, fB.invoiceItem.id] } } });
+    await prisma.repairCase.deleteMany({ where: { salesReturnItem: { return: { id: { in: [fA.salesReturn.id, fB.salesReturn.id] } } } } }); // returned-jewellery register rows reference the return lines
     await prisma.salesReturn.deleteMany({ where: { id: { in: [fA.salesReturn.id, fB.salesReturn.id] } } });
     await prisma.salesInvoice.deleteMany({ where: { id: { in: [fA.invoice.id, fB.invoice.id] } } });
     await prisma.client.deleteMany({ where: { id: { in: [fA.client.id, fB.client.id] } } });

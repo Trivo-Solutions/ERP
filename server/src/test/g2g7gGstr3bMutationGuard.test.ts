@@ -194,6 +194,7 @@ describe('G2g-7g: GSTR-3B filing mutation protection', () => {
     await prisma.jewelryTag.updateMany({ where: { companyId: tenant.company.id, purchaseLotId: { not: null } }, data: { purchaseLotId: null } });
     await prisma.purchaseLot.deleteMany({ where: { grnItem: { grn: { poId: { in: poIds } } } } });
     await cleanupJournalEntries([...invoiceIds, ...tagIds, ...returnIds]);
+    await prisma.repairCase.deleteMany({ where: { salesReturnItem: { return: { invoiceId: { in: invoiceIds } } } } }); // returned-jewellery register rows reference the return lines
     await prisma.salesReturn.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.invoicePayment.deleteMany({ where: { invoiceId: { in: invoiceIds } } });

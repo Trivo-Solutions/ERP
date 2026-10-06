@@ -95,6 +95,9 @@ import { DeadStock } from './pages/Reports/DeadStock';
 import { StockBook } from './pages/Reports/StockBook';
 import { SalesReport } from './pages/Reports/SalesReport';
 import { BarcodeHistory } from './pages/Reports/BarcodeHistory';
+import { SalesReturnRegister } from './pages/Reports/SalesReturnRegister';
+import { RepairRegister } from './pages/Tagging/RepairRegister';
+import { RepairTransfers } from './pages/Tagging/RepairTransfers';
 import { DayBook } from './pages/Reports/DayBook';
 import { GstSummary } from './pages/Reports/GstSummary';
 import { PurchaseGstSummary } from './pages/Reports/PurchaseGstSummary';
@@ -178,6 +181,8 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="tagging/transfers"    element={<BranchTransfersPage />} />
       <Route path="tagging/transfers/new" element={<NewBranchTransferPage />} />
       <Route path="tagging/receives"     element={<BranchReceivesPage />} />
+      <Route path="tagging/repairs"      element={<RequirePermission permission="repair:view"><RepairRegister /></RequirePermission>} />
+      <Route path="tagging/repair-transfers" element={<RequirePermission permission="repair:view"><RepairTransfers /></RequirePermission>} />
       <Route path="tagging/receives/:id" element={<BranchReceiveDetailPage />} />
 
       {/* Estimation (standalone) */}
@@ -220,6 +225,9 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="reports/sales-report" element={<SalesReport />} />
       <Route path="reports/stock-book" element={<StockBook />} />
       <Route path="reports/barcode-history" element={<BarcodeHistory />} />
+      <Route path="reports/repair-register" element={<RequirePermission permission="repair:view"><RepairRegister /></RequirePermission>} />
+      <Route path="reports/repair-transfers" element={<RequirePermission permission="repair:view"><RepairTransfers /></RequirePermission>} />
+      <Route path="reports/sales-returns" element={<RequirePermission permission="sales:view"><SalesReturnRegister /></RequirePermission>} />
       <Route path="reports/stock-on-hand" element={<StockOnHand />} />
       <Route path="reports/dead-stock" element={<DeadStock />} />
       <Route path="reports/day-book" element={<RequirePermission permission="report:financial_view"><DayBook /></RequirePermission>} />

@@ -13,8 +13,8 @@ import { StatusChip } from '../../components/common/StatusChip';
 import { DataTable } from '../../components/common/DataTable';
 
 // Mirrors the server (tagging.service.ts: LOCKED_TAG_STATUSES) — the server is what actually enforces it.
-const TAG_LOCKED = ['SOLD', 'RETIRED'];
-const TAG_STATUSES = ['IN_STOCK', 'ON_APPROVAL', 'TRANSFERRED', 'SOLD', 'RETURNED', 'RETIRED'];
+const TAG_LOCKED = ['SOLD', 'RETIRED', 'RETAGGED'];
+const TAG_STATUSES = ['IN_STOCK', 'ON_APPROVAL', 'TRANSFERRED', 'SOLD', 'RETURNED', 'RETIRED', 'RETURNED_PENDING_INSPECTION', 'IN_TRANSIT_TO_HO', 'HO_RECEIVED', 'REPAIR_REQUIRED', 'IN_REPAIR', 'REPAIR_COMPLETED', 'MELT_PENDING', 'RETAGGED'];
 
 function todayStr() {
   return new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD, matches <input type="date">

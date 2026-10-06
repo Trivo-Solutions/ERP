@@ -205,6 +205,8 @@ describe('GSTR-1 Table 13 reporting adapter integration (G2g-3g-2)', () => {
       await prisma.branchTransfer.deleteMany({ where: { id: { in: branchTransferIds } } });
     }
 
+    await prisma.repairCase.deleteMany({ where: { salesReturnItem: { return: { invoiceId: { in: invoiceIds } } } } }); // returned-jewellery register rows reference the return lines
+
     await prisma.salesReturn.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.invoicePayment.deleteMany({ where: { invoiceId: { in: invoiceIds } } });

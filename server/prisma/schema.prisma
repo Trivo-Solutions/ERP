@@ -79,6 +79,10 @@ model Company {
   tagTemplates              TagTemplate[]
   invoicePayments           InvoicePayment[]
   salesReturns              SalesReturn[]
+  repairCases               RepairCase[]
+  repairTransfers           RepairTransfer[]
+  repairTransferItems       RepairTransferItem[]
+  tagRetags                 TagRetag[]
   accounts                  Account[]
   journalEntries            JournalEntry[]
   journalLines              JournalLine[]
@@ -111,6 +115,7 @@ model Company {
   costEstimates             CostEstimate[]
   suppliers                 Supplier[]
   metalStocks               MetalStock[]
+  metalStockMovements       MetalStockMovement[]
   stoneLots                 StoneLot[]
   stoneLotSplits            StoneLotSplit[]
   consumables               Consumable[]
@@ -2086,12 +2091,53 @@ model MetalStock {
 
   reservations    MaterialReservation[]
   oldGoldExchange OldGoldExchange?
+  movements       MetalStockMovement[]
 
   @@unique([companyId, stockCode])
+  // composite-FK target: lets the database refuse a movement pointing at another company's vault lot
+  @@unique([id, companyId])
   @@index([companyId])
   @@index([karat])
   @@index([location])
   @@map("metal_stocks")
+}
+
+// Append-only ledger of every change to a Metal Vault lot's availableWt that the sell/buy-back flows make — one row per
+// lot touched, so a sale that drains two lots writes two rows. `quantity` is signed (negative = out of the vault) and
+// before/after are the lot's availableWt around the change. (referenceType, referenceId) says WHAT caused it — an
+// InvoiceItem for a material sale, a SalesReturnItem for its return, an OldGoldExchange for a customer purchase — and the
+// unique key below is the idempotency guard: the same cause can never move the same lot, in the same way, twice.
+// `reversesMovementId` ties a return/reversal back to the exact movement it undoes, so it can restore the SAME lot at
+// the SAME cost. `unitCostPerGram` snapshots the lot's avgCostPerGram at the time (for the COGS/inventory entries).
+model MetalStockMovement {
+  id                 String     @id @default(cuid())
+  companyId          String
+  company            Company    @relation(fields: [companyId], references: [id])
+  branchId           String?
+  branch             Branch?    @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  metalStockId       String
+  metalStock         MetalStock @relation(fields: [metalStockId, companyId], references: [id, companyId], onDelete: Restrict)
+  // MATERIAL_SALE | MATERIAL_SALE_RETURN | CUSTOMER_PURCHASE | CUSTOMER_PURCHASE_REVERSAL | OLD_GOLD_EXCHANGE |
+  // OLD_GOLD_EXCHANGE_REVERSAL | MANUAL_ADD (shared/metalMovement.ts)
+  movementType       String
+  referenceType      String
+  referenceId        String
+  reversesMovementId String?
+  materialName       String
+  karat              String
+  purity             Decimal    @db.Decimal(6, 4)
+  quantity           Decimal    @db.Decimal(12, 4)
+  beforeAvailableWt  Decimal    @db.Decimal(12, 4)
+  afterAvailableWt   Decimal    @db.Decimal(12, 4)
+  unitCostPerGram    Decimal    @db.Decimal(12, 4)
+  userId             String?
+  createdAt          DateTime   @default(now())
+
+  @@unique([companyId, movementType, referenceType, referenceId, metalStockId])
+  @@index([companyId, createdAt])
+  @@index([companyId, metalStockId])
+  @@index([companyId, referenceType, referenceId])
+  @@map("metal_stock_movements")
 }
 
 // A customer's old/used gold piece taken in and valued (D4) — credits the customer's own balance
@@ -2121,6 +2167,13 @@ model OldGoldExchange {
   valuedAmount     Decimal     @db.Decimal(12, 2)
   metalStockId     String?     @unique
   metalStock       MetalStock? @relation(fields: [metalStockId], references: [id])
+  // Where the metal was taken in (null on rows from before this column).
+  branchId         String?
+  branch           Branch?     @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  // Set when the customer handed over a TAGGED piece (a previously sold JewelryTag): the tag is RETIRED by this
+  // exchange (never deleted, never re-sold) and its metal is what enters the vault.
+  tagId            String?
+  tag              JewelryTag? @relation(fields: [tagId, companyId], references: [id, companyId], onDelete: Restrict)
   notes            String?
   createdAt        DateTime    @default(now())
   // J3 Decision 2: reversing an OLD_GOLD-settled InvoicePayment must reverse this exchange too, in
@@ -2134,6 +2187,7 @@ model OldGoldExchange {
 
   @@unique([companyId, exchangeNumber])
   @@index([companyId])
+  @@index([tagId])
   @@map("old_gold_exchanges")
 }
 
@@ -2808,10 +2862,16 @@ model Branch {
   hardwareDevices     HardwareDevice[]
   salesInvoices       SalesInvoice[]
   memoOuts            MemoOut[]
+  oldGoldExchanges    OldGoldExchange[]
+  metalStockMovements MetalStockMovement[]
   taxInvoiceTemplates TaxInvoiceTemplate[]
   creditNoteTemplates CreditNoteTemplate[]
   debitNoteTemplates  DebitNoteTemplate[]
   salesDebitNotes     SalesDebitNote[]
+  repairCasesOrigin   RepairCase[]
+  repairTransfersFrom RepairTransfer[] @relation("RepairTransferFrom")
+  repairTransfersTo   RepairTransfer[] @relation("RepairTransferTo")
+  tagRetags           TagRetag[]
 
   @@unique([companyId, branchCode])
   @@unique([id, companyId]) // composite-FK target for UserBranchAccess
@@ -2953,9 +3013,13 @@ model JewelryTag {
   // flips it back to IN_STOCK, then it can be sold again on a later invoice. No longer 1:1.
   invoiceItems        InvoiceItem[]
   salesReturnItems    SalesReturnItem[]
+  oldGoldExchanges    OldGoldExchange[]
   purchaseReturnItems PurchaseReturnItem[]
   stockAuditItems     StockAuditItem[]
   repairJobs          RepairJob[]
+  repairCases         RepairCase[]
+  retaggedFrom        TagRetag?        @relation("RetagOld")
+  retaggedTo          TagRetag?        @relation("RetagNew")
   hallmarkingItems    HallmarkingItem[]
   estimates           TagEstimate[]
 
@@ -3696,6 +3760,10 @@ model InvoiceItem {
   tagId String?
   tag   JewelryTag? @relation(fields: [tagId, companyId], references: [id, companyId], onDelete: Restrict)
 
+  // A loose-metal line sold out of the Metal Vault (no tag): netGoldWeight x quantity grams of `karat` leave the vault
+  // when the bill is issued (MetalStockMovement MATERIAL_SALE) and come back on a return/void. Never set with tagId.
+  materialSale Boolean @default(false)
+
   // This bill's own copy of the piece's material rows + MC/VA rates, as charged ({ rows, mcRate, vaPercent } —
   // shared/materialBreakdown.ts). Edited per sale; never written back to the JewelryTag. Null for a plain line.
   materialBreakdown Json?
@@ -3795,11 +3863,19 @@ model SalesReturnItem {
   returnId      String
   invoiceItem   InvoiceItem @relation(fields: [invoiceItemId, companyId], references: [id, companyId])
   invoiceItemId String
-  tag           JewelryTag  @relation(fields: [tagId, companyId], references: [id, companyId])
-  tagId         String
+  // Set for a tagged line; null for a material (vault) line, which carries returnedWeight instead.
+  tag           JewelryTag? @relation(fields: [tagId, companyId], references: [id, companyId], onDelete: Restrict)
+  tagId         String?
+  // Grams of a material line given back (null on a tagged line). Summed per invoice line it can never exceed what was sold.
+  returnedWeight Decimal?   @db.Decimal(12, 4)
   amount        Decimal     @db.Decimal(12, 2)
 
+  repairCase    RepairCase?
+
+  // composite-FK target for RepairCase
+  @@unique([id, companyId])
   @@index([companyId])
+  @@index([invoiceItemId])
   @@map("sales_return_items")
 }
 
@@ -4447,4 +4523,147 @@ model TagHistory {
   @@index([companyId, tagId, createdAt])
   @@index([companyId, tagNumber])
   @@map("tag_history")
+}
+
+// ═══════════════════════════════════════════════════
+// RETURNED-JEWELLERY INSPECTION / REPAIR / RETAGGING
+// ═══════════════════════════════════════════════════
+// A sold piece the customer brings back is NOT saleable again until Head Office has inspected (and if need be
+// repaired) it. SalesReturn stays the *financial* record; RepairCase is the operational one — the Repair Register
+// row that follows the same JewelryTag (same row, same tag number) from the return until it is back IN_STOCK,
+// held for melting, or replaced by a retag. `status` mirrors JewelryTag.status while the piece is in this
+// pipeline (the tag's status is what controls saleability); `currentLocation` is the separate physical-custody
+// fact (BRANCH | IN_TRANSIT | HEAD_OFFICE). Weights/karat/description are snapshots at the moment of return.
+model RepairCase {
+  id                 String           @id @default(cuid())
+  companyId          String
+  company            Company          @relation(fields: [companyId], references: [id])
+  repairNumber       String
+  tagId              String
+  tag                JewelryTag       @relation(fields: [tagId, companyId], references: [id, companyId], onDelete: Restrict)
+  // One case per returned line; null for a future customer-repair case that did not come from a sale return.
+  salesReturnItemId  String?
+  salesReturnItem    SalesReturnItem? @relation(fields: [salesReturnItemId, companyId], references: [id, companyId], onDelete: Restrict)
+  originBranchId     String
+  originBranch       Branch           @relation(fields: [originBranchId, companyId], references: [id, companyId], onDelete: Restrict)
+  // RETURNED_PENDING_TRANSFER | IN_TRANSIT_TO_HO | HO_RECEIVED | REPAIR_REQUIRED | IN_REPAIR | REPAIR_COMPLETED
+  // | INSPECTION_PASSED | MELT_PENDING | RETAGGED   (shared/constants.ts: REPAIR_CASE_STATUS)
+  status             String           @default("RETURNED_PENDING_TRANSFER")
+  currentLocation    String           @default("BRANCH")
+  returnReason       String?
+  description        String
+  karat              String?
+  grossWeight        Decimal          @db.Decimal(10, 4)
+  stoneWeight        Decimal          @db.Decimal(10, 4)
+  netWeight          Decimal          @db.Decimal(10, 4)
+  hoReceivedById     String?
+  hoReceivedAt       DateTime?
+  inspectionResult   String?          // PASS | REPAIR_REQUIRED | MELT
+  inspectedById      String?
+  inspectedAt        DateTime?
+  repairReason       String?
+  assignedToId       String?
+  repairEmployeeId   String?
+  repairStartedAt    DateTime?
+  repairCompletedAt  DateTime?
+  repairDetails      String?
+  repairCost         Decimal?         @db.Decimal(12, 2)
+  finalInspectedById String?
+  finalInspectedAt   DateTime?
+  remarks            String?
+  createdById        String
+  updatedById        String?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  transferItems RepairTransferItem[]
+  retag         TagRetag?
+
+  @@unique([companyId, repairNumber])
+  @@unique([salesReturnItemId, companyId])
+  @@unique([id, companyId])
+  @@index([companyId, status])
+  @@index([companyId, tagId])
+  @@map("repair_cases")
+}
+
+// Branch -> Head Office custody document for returned pieces. Deliberately not a BranchTransfer: that moves
+// saleable IN_STOCK pieces between branches, this moves non-saleable ones to be inspected. Statuses:
+// DRAFT -> IN_TRANSIT (send) -> RECEIVED (HO has received every piece) | CANCELLED (draft only).
+model RepairTransfer {
+  id             String    @id @default(cuid())
+  companyId      String
+  company        Company   @relation(fields: [companyId], references: [id])
+  transferNumber String
+  fromBranchId   String
+  fromBranch     Branch    @relation("RepairTransferFrom", fields: [fromBranchId, companyId], references: [id, companyId], onDelete: Restrict)
+  toBranchId     String
+  toBranch       Branch    @relation("RepairTransferTo", fields: [toBranchId, companyId], references: [id, companyId], onDelete: Restrict)
+  status         String    @default("DRAFT")
+  reason         String?
+  remarks        String?
+  createdById    String
+  sentById       String?
+  sentAt         DateTime?
+  receivedById   String?
+  receivedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  items RepairTransferItem[]
+
+  @@unique([companyId, transferNumber])
+  @@unique([id, companyId])
+  @@index([companyId, status])
+  @@map("repair_transfers")
+}
+
+model RepairTransferItem {
+  id           String         @id @default(cuid())
+  companyId    String
+  company      Company        @relation(fields: [companyId], references: [id])
+  transferId   String
+  transfer     RepairTransfer @relation(fields: [transferId, companyId], references: [id, companyId], onDelete: Restrict)
+  repairCaseId String
+  repairCase   RepairCase     @relation(fields: [repairCaseId, companyId], references: [id, companyId], onDelete: Restrict)
+  // Set when Head Office physically took this piece in — an item with no receivedAt is still in transit.
+  receivedAt   DateTime?
+  receivedById String?
+
+  @@unique([transferId, repairCaseId])
+  @@index([companyId])
+  @@index([repairCaseId])
+  @@map("repair_transfer_items")
+}
+
+// True retagging: the piece's specification changed, so it gets a NEW tag number and the OLD tag becomes RETAGGED
+// (it never disappears). A tag can be retagged once (unique old) and can be the product of one retag (unique new).
+model TagRetag {
+  id           String      @id @default(cuid())
+  companyId    String
+  company      Company     @relation(fields: [companyId], references: [id])
+  retagNumber  String
+  oldTagId     String
+  oldTag       JewelryTag  @relation("RetagOld", fields: [oldTagId, companyId], references: [id, companyId], onDelete: Restrict)
+  newTagId     String
+  newTag       JewelryTag  @relation("RetagNew", fields: [newTagId, companyId], references: [id, companyId], onDelete: Restrict)
+  repairCaseId String?
+  repairCase   RepairCase? @relation(fields: [repairCaseId, companyId], references: [id, companyId], onDelete: Restrict)
+  branchId     String
+  branch       Branch      @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  reason       String
+  oldDetails   Json
+  newDetails   Json
+  retaggedById String
+  approvedById String
+  approvedAt   DateTime    @default(now())
+  remarks      String?
+  createdAt    DateTime    @default(now())
+
+  @@unique([companyId, retagNumber])
+  @@unique([oldTagId, companyId])
+  @@unique([newTagId, companyId])
+  @@unique([repairCaseId, companyId])
+  @@index([companyId])
+  @@map("tag_retags")
 }

@@ -32,6 +32,8 @@ const ACTION_LABELS: Record<string, string> = {
   period_view: 'View', snapshot_create: 'Create Snapshot', snapshot_export: 'Export Snapshot', filing_record: 'Record Filing',
   // G8a: GST Integration Foundation (config for a future e-invoice/IRP/E-Way Bill provider) —
   // same underscore-action shape as registration_*/period_view above.
+  // Returned-jewellery pipeline: a branch sends a returned piece to HO; HO receives, inspects/repairs, retags.
+  send: 'Send to HO', receive: 'Receive at HO', work: 'Repair Work', reprint: 'Reprint Tag',
   integration_view: 'View', integration_manage: 'Manage (Configure/Credentials)', integration_test: 'Test Connection',
 };
 
@@ -114,6 +116,12 @@ export const PERMISSION_CATALOG: PermissionCatalogGroup[] = [
       {
         key: 'tagTemplate', label: 'Tag Label Designer',
         capabilities: [cap('tagTemplate:view'), cap('tagTemplate:create'), cap('tagTemplate:edit')],
+      },
+      // Sold-then-returned pieces: the branch sends them to Head Office (repair:send); only HO-authorised users receive,
+      // inspect, repair and retag them. Viewing the Repair Register reuses repair:view.
+      {
+        key: 'returnRepair', label: 'Returned Jewellery (Repair Register)',
+        capabilities: [cap('repair:send'), cap('repair:receive'), cap('repair:inspect'), cap('repair:work'), cap('retag:create'), cap('retag:reprint')],
       },
       { key: 'branch', label: 'Branches', capabilities: [cap('branch:create'), cap('branch:edit')] },
       // A distinct feature from Branches (the master record) — moving stock between branches, and

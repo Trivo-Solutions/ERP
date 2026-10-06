@@ -196,6 +196,7 @@ describe('getClientLedger (F4)', () => {
 
   afterAll(async () => {
     await prisma.oldGoldExchange.deleteMany({ where: { clientId } });
+    await prisma.repairCase.deleteMany({ where: { salesReturnItem: { return: { clientId } } } }); // returned-jewellery register rows reference the return lines
     await prisma.salesReturn.deleteMany({ where: { clientId } });
     await prisma.invoicePayment.deleteMany({ where: { clientId } });
     await prisma.salesInvoice.deleteMany({ where: { id: invoiceId } });
@@ -328,6 +329,7 @@ describe('getDayBook (H4)', () => {
 
   afterAll(async () => {
     await prisma.oldGoldExchange.deleteMany({ where: { id: { in: otherIds.oldGoldExchange } } });
+    await prisma.repairCase.deleteMany({ where: { salesReturnItem: { return: { id: { in: otherIds.salesReturn } } } } }); // returned-jewellery register rows reference the return lines
     await prisma.salesReturn.deleteMany({ where: { id: { in: otherIds.salesReturn } } });
     await prisma.invoicePayment.deleteMany({ where: { id: { in: otherIds.invoicePayment } } });
     await prisma.salesInvoice.deleteMany({ where: { id: { in: otherIds.salesInvoice } } });
@@ -437,6 +439,7 @@ describe('Credit Note reporting (G2c follow-up: getClientLedger / getDayBook)', 
     await tenantQuery(tenant.company.id, (tx) => tx.creditNote.deleteMany({ where: { companyId: tenant.company.id } }));
 
     await cleanupJournalEntries([...invoiceIds, ...salesReturnIds, ...creditNoteIds]);
+    await prisma.repairCase.deleteMany({ where: { salesReturnItem: { return: { invoiceId: { in: invoiceIds } } } } }); // returned-jewellery register rows reference the return lines
     await prisma.salesReturn.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.invoicePayment.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
@@ -636,6 +639,7 @@ describe('getGstSummary (H5)', () => {
     // creditNote.service.test.ts) — a bare deleteMany silently matches zero rows here.
     await tenantQuery(tenant.company.id, (tx) => tx.creditNote.deleteMany({ where: { companyId: tenant.company.id } }));
     await cleanupJournalEntries([...invoiceIds, ...salesReturnIds, ...creditNoteIds]);
+    await prisma.repairCase.deleteMany({ where: { salesReturnItem: { return: { invoiceId: { in: invoiceIds } } } } }); // returned-jewellery register rows reference the return lines
     await prisma.salesReturn.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.salesInvoice.deleteMany({ where: { id: { in: invoiceIds } } });
@@ -1092,6 +1096,7 @@ describe('getGstSummary — G2g-2 registration + branch filtering', () => {
   afterAll(async () => {
     await tenantQuery(tenant.company.id, (tx) => tx.creditNote.deleteMany({ where: { companyId: tenant.company.id } }));
     await cleanupJournalEntries(invoiceIds);
+    await prisma.repairCase.deleteMany({ where: { salesReturnItem: { return: { invoiceId: { in: invoiceIds } } } } }); // returned-jewellery register rows reference the return lines
     await prisma.salesReturn.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.salesInvoice.deleteMany({ where: { id: { in: invoiceIds } } });

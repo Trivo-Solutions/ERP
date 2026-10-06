@@ -34,6 +34,7 @@ const blankIfZero = (f: (n: number) => string) => (n: number) => (n ? f(n) : '')
 
 const STATUS_LABEL: Record<string, string> = {
   IN_STOCK: 'In Stock', ON_APPROVAL: 'On Memo', TRANSFERRED: 'In Transit', SOLD: 'Sold', RETIRED: 'Retired',
+  RETURNED_PENDING_INSPECTION: 'Returned — pending inspection', IN_TRANSIT_TO_HO: 'In transit to HO', HO_RECEIVED: 'At HO — pending inspection', REPAIR_REQUIRED: 'Repair required', IN_REPAIR: 'In repair', REPAIR_COMPLETED: 'Repair done', MELT_PENDING: 'Melt pending', RETAGGED: 'Retagged',
 };
 const STATUS_OPTIONS = [
   { value: 'IN_STOCK', label: 'On Hand (In Stock)' },
@@ -42,6 +43,14 @@ const STATUS_OPTIONS = [
   { value: 'TRANSFERRED', label: 'In Transit' },
   { value: 'SOLD', label: 'Sold' },
   { value: 'RETIRED', label: 'Retired' },
+  { value: 'RETURNED_PENDING_INSPECTION', label: 'Returned — pending inspection' },
+  { value: 'IN_TRANSIT_TO_HO', label: 'In transit to HO' },
+  { value: 'HO_RECEIVED', label: 'At HO — pending inspection' },
+  { value: 'REPAIR_REQUIRED', label: 'Repair required' },
+  { value: 'IN_REPAIR', label: 'In repair' },
+  { value: 'REPAIR_COMPLETED', label: 'Repair done' },
+  { value: 'MELT_PENDING', label: 'Melt pending' },
+  { value: 'RETAGGED', label: 'Retagged' },
   { value: 'ALL', label: 'Every status' },
 ];
 

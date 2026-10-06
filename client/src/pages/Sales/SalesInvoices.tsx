@@ -86,15 +86,23 @@ function RecordPaymentForm({ invoiceId, balanceDue }: { invoiceId: string; balan
 // D1: return one or more tagged lines from this invoice. Only tagged lines are selectable (a
 // free-text line has no physical piece to take back — the server rejects it too, this just keeps
 // the clerk from picking one). Already-returned lines are excluded from selection entirely.
-function ReturnItemsForm({ invoiceId, items, alreadyReturnedIds }: {
-  invoiceId: string; items: any[]; alreadyReturnedIds: Set<string>;
+function ReturnItemsForm({ invoiceId, items, alreadyReturnedIds, returns }: {
+  invoiceId: string; items: any[]; alreadyReturnedIds: Set<string>; returns: any[];
 }) {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
   const [selected, setSelected] = useState<string[]>([]);
   const [reason, setReason] = useState('');
 
-  const returnable = items.filter((i) => i.tagId && !alreadyReturnedIds.has(i.id));
+  // A material (Metal Vault) line is returned by weight and may come back in parts, so it stays returnable until every
+  // gram sold has been returned; a tagged line is all-or-nothing.
+  const returnedWt = new Map<string, number>();
+  for (const r of returns) for (const ri of r.items ?? []) {
+    if (ri.returnedWeight != null) returnedWt.set(ri.invoiceItemId, (returnedWt.get(ri.invoiceItemId) ?? 0) + Number(ri.returnedWeight));
+  }
+  const outstandingWt = (i: any) => Math.round((Number(i.netGoldWeight) * Number(i.quantity) - (returnedWt.get(i.id) ?? 0)) * 10000) / 10000;
+  const returnable = items.filter((i) => (i.materialSale ? outstandingWt(i) > 0 : i.tagId && !alreadyReturnedIds.has(i.id)));
+  const [weights, setWeights] = useState<Record<string, string>>({});
 
   const toggle = (id: string) => {
     setSelected((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
@@ -106,7 +114,12 @@ function ReturnItemsForm({ invoiceId, items, alreadyReturnedIds }: {
   const mutation = useMutation({
     mutationFn: () => apiPost('/sales/returns', {
       invoiceId,
-      items: selected.map((invoiceItemId) => ({ invoiceItemId })),
+      items: selected.map((invoiceItemId) => {
+        const line = items.find((x) => x.id === invoiceItemId);
+        return line?.materialSale
+          ? { invoiceItemId, weight: Number(weights[invoiceItemId] ?? outstandingWt(line)) }
+          : { invoiceItemId };
+      }),
       reason: reason || undefined,
       issueCreditNote: canIssueCreditNote && issueCreditNote,
     }),
@@ -117,10 +130,11 @@ function ReturnItemsForm({ invoiceId, items, alreadyReturnedIds }: {
       qc.invalidateQueries({ queryKey: ['invoice-credit-notes', invoiceId] });
       qc.invalidateQueries({ queryKey: ['sales-credit-notes'] });
       setSelected([]);
+      setWeights({});
       setReason('');
       const hasCn = !!(res?.data?.creditNote || res?.creditNote);
       enqueueSnackbar(
-        hasCn ? 'Return recorded and formal GST Credit Note issued' : 'Return recorded — tag(s) back in stock',
+        hasCn ? 'Return recorded and formal GST Credit Note issued' : 'Return recorded — stock restored',
         { variant: 'success' },
       );
     },
@@ -137,6 +151,12 @@ function ReturnItemsForm({ invoiceId, items, alreadyReturnedIds }: {
             <Checkbox size="small" checked={selected.includes(item.id)} onChange={() => toggle(item.id)} />
             <Typography variant="body2" sx={{ fontFamily: 'monospace', flex: 1 }}>{item.productCode}</Typography>
             <Typography variant="body2" color="text.secondary">{item.description}</Typography>
+            {item.materialSale && selected.includes(item.id) && (
+              <TextField size="small" type="number" label="Weight (g)" sx={{ width: 120 }}
+                value={weights[item.id] ?? String(outstandingWt(item))}
+                onChange={(e) => setWeights((p) => ({ ...p, [item.id]: e.target.value }))}
+                inputProps={{ min: 0, max: outstandingWt(item), step: 0.001 }} />
+            )}
             <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{fmt(Number(item.totalPrice))}</Typography>
           </Stack>
         ))}
@@ -296,7 +316,7 @@ function InvoiceDrawer({ invoiceId, onClose, onEdit }: { invoiceId: string; onCl
             </Table>
 
             <PermissionGate permission="return:create">
-              <ReturnItemsForm invoiceId={invoice.id} items={invoice.items ?? []} alreadyReturnedIds={returnedItemIds} />
+              <ReturnItemsForm invoiceId={invoice.id} items={invoice.items ?? []} alreadyReturnedIds={returnedItemIds} returns={returns} />
             </PermissionGate>
 
             {returns.length > 0 && (

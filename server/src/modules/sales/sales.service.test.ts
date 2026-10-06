@@ -79,6 +79,7 @@ describe('createInvoice (tag-aware direct invoicing)', () => {
 
     // Must precede the salesInvoice/jewelryTag deletes below — sales_return_items has a RESTRICT
     // FK to both invoice_items (via salesInvoice's cascade) and jewelry_tags.
+    await prisma.repairCase.deleteMany({ where: { salesReturnItem: { return: { invoiceId: { in: invoiceIds } } } } }); // returned-jewellery register rows reference the return lines
     await prisma.salesReturn.deleteMany({ where: { invoiceId: { in: invoiceIds } } }); // cascades sales_return_items
     await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.invoicePayment.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
@@ -1580,7 +1581,7 @@ describe('createInvoice (tag-aware direct invoicing)', () => {
 
   // D1: reversing a completed sale — the customer brings a piece back.
   describe('createSalesReturn (D1)', () => {
-    it('flips the tag back to IN_STOCK and creates the SalesReturn/SalesReturnItem rows', async () => {
+    it('parks the tag as RETURNED_PENDING_INSPECTION (not saleable) and creates the SalesReturn/SalesReturnItem rows', async () => {
       const tag = await makeTag('Ring D1-a');
       const invoice = await createInvoice(
         { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ tagId: tag.id })] },
@@ -1601,7 +1602,7 @@ describe('createInvoice (tag-aware direct invoicing)', () => {
       expect(salesReturn.items[0].tagId).toBe(tag.id);
 
       const updatedTag = await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } });
-      expect(updatedTag.status).toBe('IN_STOCK');
+      expect(updatedTag.status).toBe('RETURNED_PENDING_INSPECTION'); // saleable again only after a Head Office inspection PASS
     });
 
     it('rejects a return for a tag that is not currently SOLD', async () => {
@@ -1660,6 +1661,8 @@ describe('createInvoice (tag-aware direct invoicing)', () => {
       invoiceIds.push(invoice1.id);
 
       await createSalesReturn({ invoiceId: invoice1.id, items: [{ invoiceItemId: invoice1.items[0].id }] }, tenant.ctx, userId);
+      // Head Office inspection is covered in returnRepair.service.test.ts; here the piece is simply cleared for sale again.
+      await prisma.jewelryTag.update({ where: { id: tag.id }, data: { status: 'IN_STOCK' } });
 
       const invoice2 = await createInvoice(
         { clientId, invoiceDate: new Date(), invoiceType: 'RETAIL', items: [baseItem({ tagId: tag.id, goldRate: 50000 })] },
@@ -1730,6 +1733,7 @@ describe('convertMemoToInvoice (A1 guard, A3 tag-link regression)', () => {
     await cleanupJournalEntries([...invoiceIds, ...returnIds]);
     // Must precede the salesInvoice/jewelryTag deletes below — same RESTRICT-FK ordering as the
     // createInvoice describe block's afterAll.
+    await prisma.repairCase.deleteMany({ where: { salesReturnItem: { return: { invoiceId: { in: invoiceIds } } } } }); // returned-jewellery register rows reference the return lines
     await prisma.salesReturn.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.salesInvoice.deleteMany({ where: { id: { in: invoiceIds } } });
@@ -1807,7 +1811,7 @@ describe('convertMemoToInvoice (A1 guard, A3 tag-link regression)', () => {
     expect(salesReturn.items[0].tagId).toBe(tag.id);
 
     const returnedTag = await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } });
-    expect(returnedTag.status).toBe('IN_STOCK');
+    expect(returnedTag.status).toBe('RETURNED_PENDING_INSPECTION');
 
     const afterReturn = await prisma.client.findUniqueOrThrow({ where: { id: clientId } });
     expect(Number(afterReturn.currentBalance)).toBeCloseTo(Number(before.currentBalance));
@@ -1849,6 +1853,7 @@ describe('createOldGoldExchange (D4)', () => {
   afterAll(async () => {
     await cleanupJournalEntries(exchangeIds);
     await prisma.oldGoldExchange.deleteMany({ where: { id: { in: exchangeIds } } });
+    await prisma.metalStockMovement.deleteMany({ where: { metalStockId: { in: metalStockIds } } });
     await prisma.metalStock.deleteMany({ where: { id: { in: metalStockIds } } });
     await prisma.metalRate.deleteMany({ where: { id: { in: rateIds } } });
     await prisma.client.deleteMany({ where: { id: clientId } });
@@ -1988,10 +1993,12 @@ describe('createInvoice — old gold & store credit as payment modes', () => {
     const payIds = (await prisma.invoicePayment.findMany({ where: { clientId: { in: clientIds } }, select: { id: true } })).map((p) => p.id);
     const exchanges = await prisma.oldGoldExchange.findMany({ where: { clientId: { in: clientIds } }, select: { id: true, metalStockId: true } });
     await cleanupJournalEntries([...invoiceIds, ...returnIds, ...payIds, ...exchanges.map((e) => e.id)]);
+    await prisma.repairCase.deleteMany({ where: { salesReturnItem: { return: { clientId: { in: clientIds } } } } }); // returned-jewellery register rows reference the return lines
     await prisma.salesReturn.deleteMany({ where: { clientId: { in: clientIds } } });
     await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.invoicePayment.deleteMany({ where: { clientId: { in: clientIds } } });
     await prisma.oldGoldExchange.deleteMany({ where: { clientId: { in: clientIds } } });
+    await prisma.metalStockMovement.deleteMany({ where: { metalStockId: { in: exchanges.map((e) => e.metalStockId).filter(Boolean) as string[] } } });
     await prisma.metalStock.deleteMany({ where: { id: { in: exchanges.map((e) => e.metalStockId).filter(Boolean) as string[] } } });
     await prisma.salesInvoice.deleteMany({ where: { id: { in: invoiceIds } } });
     await prisma.jewelryTag.deleteMany({ where: { id: { in: tagIds } } });
@@ -2281,6 +2288,7 @@ describe('amendInvoice (edit an issued invoice)', () => {
     const returnIds = (await prisma.salesReturn.findMany({ where: { clientId: { in: clientIds } }, select: { id: true } })).map((r) => r.id);
     const payIds = (await prisma.invoicePayment.findMany({ where: { clientId: { in: clientIds } }, select: { id: true } })).map((p) => p.id);
     await cleanupJournalEntries([...invoiceIds, ...returnIds, ...payIds]);
+    await prisma.repairCase.deleteMany({ where: { salesReturnItem: { return: { clientId: { in: clientIds } } } } }); // returned-jewellery register rows reference the return lines
     await prisma.salesReturn.deleteMany({ where: { clientId: { in: clientIds } } });
     await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.invoicePayment.deleteMany({ where: { clientId: { in: clientIds } } });
@@ -2407,7 +2415,7 @@ describe('amendInvoice (edit an issued invoice)', () => {
 
       const ok = await amend(inv.id, { items: [keep(lineA), keep(lineB, { goldRate: 6000 })] });
       expect(ok.items).toHaveLength(2);
-      expect(await statusOf(a.id)).toBe('IN_STOCK'); // still back in stock from the return — not flipped again
+      expect(await statusOf(a.id)).toBe('RETURNED_PENDING_INSPECTION'); // still awaiting inspection from the return — not flipped again
       expect(await statusOf(b.id)).toBe('SOLD');
     });
 
@@ -2754,6 +2762,7 @@ describe('voidInvoice (J3.3)', () => {
     const returnIds = (await prisma.salesReturn.findMany({ where: { clientId: { in: clientIds } }, select: { id: true } })).map((r) => r.id);
     const payIds = (await prisma.invoicePayment.findMany({ where: { clientId: { in: clientIds } }, select: { id: true } })).map((p) => p.id);
     await cleanupJournalEntries([...invoiceIds, ...returnIds, ...payIds]);
+    await prisma.repairCase.deleteMany({ where: { salesReturnItem: { return: { clientId: { in: clientIds } } } } }); // returned-jewellery register rows reference the return lines
     await prisma.salesReturn.deleteMany({ where: { clientId: { in: clientIds } } });
     await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.invoicePayment.deleteMany({ where: { clientId: { in: clientIds } } });
@@ -2960,12 +2969,14 @@ describe('reverseInvoicePayment (J3.2)', () => {
     const payIds = (await prisma.invoicePayment.findMany({ where: { clientId: { in: clientIds } }, select: { id: true } })).map((p) => p.id);
     const exchanges = await prisma.oldGoldExchange.findMany({ where: { clientId: { in: clientIds } }, select: { id: true, metalStockId: true } });
     await cleanupJournalEntries([...invoiceIds, ...returnIds, ...payIds, ...exchanges.map((e) => e.id)]);
+    await prisma.repairCase.deleteMany({ where: { salesReturnItem: { return: { clientId: { in: clientIds } } } } }); // returned-jewellery register rows reference the return lines
     await prisma.salesReturn.deleteMany({ where: { clientId: { in: clientIds } } });
     await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.invoicePayment.deleteMany({ where: { clientId: { in: clientIds } } });
     await prisma.oldGoldExchange.deleteMany({ where: { clientId: { in: clientIds } } });
     await prisma.salesInvoice.deleteMany({ where: { id: { in: invoiceIds } } });
     await prisma.jewelryTag.deleteMany({ where: { id: { in: tagIds } } });
+    await prisma.metalStockMovement.deleteMany({ where: { companyId: tenant.company.id } });
     await prisma.metalStock.deleteMany({ where: { companyId: tenant.company.id } });
     await prisma.metalRate.deleteMany({ where: { id: { in: rateIds } } });
     await prisma.client.deleteMany({ where: { id: { in: clientIds } } });

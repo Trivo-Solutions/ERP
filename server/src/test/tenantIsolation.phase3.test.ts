@@ -64,6 +64,7 @@ describe('Phase 3: design/manufacturing/inventory/outsourcing/orders tenant isol
     await prisma.consumable.deleteMany({ where: { companyId: { in: [companyA.company.id, companyB.company.id] } } });
     await prisma.stoneLotSplit.deleteMany({ where: { companyId: { in: [companyA.company.id, companyB.company.id] } } });
     await prisma.stoneLot.deleteMany({ where: { companyId: { in: [companyA.company.id, companyB.company.id] } } });
+    await prisma.metalStockMovement.deleteMany({ where: { companyId: { in: [companyA.company.id, companyB.company.id] } } });
     await prisma.metalStock.deleteMany({ where: { companyId: { in: [companyA.company.id, companyB.company.id] } } });
     await prisma.costEstimate.deleteMany({ where: { companyId: { in: [companyA.company.id, companyB.company.id] } } });
     await prisma.bomItem.deleteMany({ where: { companyId: { in: [companyA.company.id, companyB.company.id] } } });

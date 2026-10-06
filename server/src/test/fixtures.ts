@@ -116,12 +116,17 @@ export async function cleanupTestTenant(t: TestTenant) {
   await prisma.poItemComponent.deleteMany({ where: { companyId } });
   await prisma.vendorComponentRate.deleteMany({ where: { companyId } });
 
+  // Returned-jewellery pipeline: leaf-first (retags/transfer items -> transfers -> cases), all before the return lines and tags they point at.
+  await prisma.tagRetag.deleteMany({ where: { companyId } });
+  await prisma.repairTransferItem.deleteMany({ where: { companyId } });
+  await prisma.repairTransfer.deleteMany({ where: { companyId } });
+  await prisma.repairCase.deleteMany({ where: { companyId } });
+  await prisma.salesReturnItem.deleteMany({ where: { companyId } }); // before invoiceItem (RESTRICT) — not in the parallel batch below
   // Wave 1 — deepest leaves (detail/child rows with no further children of their own).
   await Promise.all([
     prisma.stockAuditItem.deleteMany({ where: { companyId } }),
     prisma.branchTransferItem.deleteMany({ where: { companyId } }),
     prisma.jewelryTagMaterial.deleteMany({ where: { companyId } }),
-    prisma.salesReturnItem.deleteMany({ where: { companyId } }),
     prisma.exportDocument.deleteMany({ where: { companyId } }),
     prisma.taxInvoice.deleteMany({ where: { companyId } }),
     prisma.supplierPayment.deleteMany({ where: { companyId } }),
@@ -155,6 +160,7 @@ export async function cleanupTestTenant(t: TestTenant) {
   await prisma.hallmarkingBatch.deleteMany({ where: { companyId } }); // after hallmarkingItem
   await prisma.tagEstimate.deleteMany({ where: { companyId } }); // after tagEstimateItem
   await prisma.jobProcess.deleteMany({ where: { companyId } }); // after wipTracking/qcCheckpoint
+  await prisma.oldGoldExchange.deleteMany({ where: { companyId } }); // a tagged buy-back references its tag
   await prisma.jewelryTag.deleteMany({ where: { companyId } }); // after jewelryTagMaterial/memoItem/etc — a test's own createdTagIds cleanup normally beats us to this
   await prisma.costEstimate.deleteMany({ where: { companyId } });
 
@@ -187,6 +193,7 @@ export async function cleanupTestTenant(t: TestTenant) {
 
   // Wave 5 — company's own master/reference/inventory data (no more transactional rows point at
   // these).
+  await prisma.metalStockMovement.deleteMany({ where: { companyId } });
   await Promise.all([
     prisma.metalStock.deleteMany({ where: { companyId } }),
     prisma.stoneLot.deleteMany({ where: { companyId } }),
@@ -234,6 +241,7 @@ export async function cleanupTestTenant(t: TestTenant) {
   await prisma.numberSequence.deleteMany({ where: { companyId } });
   await prisma.account.deleteMany({ where: { companyId } });
   await prisma.tagHistory.deleteMany({ where: { companyId } }); // written by a trigger on every tag change/delete above
+  await prisma.client.deleteMany({ where: { companyId } }); // after every invoice/payment/return/exchange that references a client
   await prisma.company.deleteMany({ where: { id: companyId } });
 }
 

@@ -1,10 +1,14 @@
 import { Prisma } from '@prisma/client';
+import { randomUUID } from 'crypto';
 import { prisma } from '../../config/database';
 import { AppError } from '../../middleware/error';
 import { priceMaterialBreakdown } from '../../shared/materialBreakdown';
 import { createAuditEntry } from '../../middleware/audit';
 import { emit } from '../../shared/websocket';
-import { DEFAULT_HSN_CODE, CREDIT_SETTLEMENT_MODES, PAYMENT_MODE_OLD_GOLD, PAYMENT_MODE_STORE_CREDIT } from '../../shared/constants';
+import {
+  DEFAULT_HSN_CODE, CREDIT_SETTLEMENT_MODES, PAYMENT_MODE_OLD_GOLD, PAYMENT_MODE_STORE_CREDIT,
+  TAG_STATUS_RETURNED_PENDING_INSPECTION, REPAIR_STATUS, REPAIR_LOCATION,
+} from '../../shared/constants';
 import { assertPanIfRequired, assertCashLimit } from '../../shared/compliance';
 import { resolveStateCode } from '../../shared/stateMaster';
 import { splitGst } from '../../shared/gstSplit';
@@ -13,6 +17,7 @@ import { createCreditNoteForReturn } from './creditNote.service';
 import { resolveMetalRate } from '../../shared/metalRate';
 import { isValidKarat } from '../../shared/karatMaster';
 import { addMetalStock } from '../inventory/inventory.service';
+import { METAL_MOVEMENT, MetalMovementType, consumeVaultMetal, restoreVaultMetal, insertMetalMovement } from '../../shared/metalMovement';
 import { postAutoJournalEntry } from '../finance/finance.service';
 import { LEDGER_ACCOUNT, cashOrBankAccount } from '../../shared/ledgerAccounts';
 import { nextDocumentNumber, gstFinancialYear } from '../../shared/numberSequence';
@@ -251,6 +256,8 @@ type InvoiceItemInput = { productCode: string; description: string; huid?: strin
   /* karat (above, near goldRate) doubles as the MakingCharge master's other match key —
     tagged lines default it to the tag's own metalKarat when omitted, same as categoryId. */
   tagId?: string; /* optional link to real inventory — see JewelryTag */
+  materialSale?: boolean; /* a loose-metal line sold out of the Metal Vault (no tagId): `karat` + netGoldWeight x quantity grams
+    leave the vault with the bill (rejected if the vault is short) and come back on a return/void. */
   materialBreakdown?: unknown; /* this bill's own material rows + MC/VA rates (shared/materialBreakdown.ts). When present
     the server recomputes the line as a flat price from it (rateType/goldRate/makingCharge/stoneValue from the client are
     ignored) and stores it on the InvoiceItem. Never touches the JewelryTag. */
@@ -373,6 +380,21 @@ export async function createInvoice(data: {
       cogsAmount = tags.reduce((s, t) => s + Number(t.costPrice), 0);
     }
 
+    // Material (loose-metal) lines: the weight leaves the Metal Vault in this same transaction — a short vault rejects
+    // the whole bill (tag flips above included roll back with it). Each line gets its id up front so its vault
+    // movements can name it as their cause (the idempotency key a later return/void restores against).
+    const materialLineIds = new Map<number, string>();
+    for (const [idx, it] of items.entries()) {
+      if (!it.materialSale) continue;
+      const lineId = randomUUID();
+      materialLineIds.set(idx, lineId);
+      const { cost } = await consumeVaultMetal(tx, ctx.companyId, {
+        karat: it.karat!, weight: it.netGoldWeight * it.quantity,
+        meta: { referenceType: 'InvoiceItem', referenceId: lineId, userId, branchId: data.branchId },
+      });
+      cogsAmount += cost;
+    }
+
     // GST record prep — resolved BEFORE the invoice/items are written, so each line's own
     // cgst/sgst/igst can be embedded directly in the createMany below (G1 Part D) instead of a
     // second write pass. cgstAmt/sgstAmt/igstAmt default to 0 (non-INR sale, or a
@@ -408,7 +430,7 @@ export async function createInvoice(data: {
     // G1 Part D: each line's own slice of tax/discount, snapshotted alongside its already-snapshotted
     // taxRate. Zero for a non-INR sale (matches the invoice-level amounts, which are also 0 then).
     const lineTax = allocateLineTax(items, discountScale, currency === 'INR' && isSameState);
-    const itemsWithTax = items.map((i, idx) => ({ ...i, ...lineTax[idx] }));
+    const itemsWithTax = items.map((i, idx) => ({ ...i, ...lineTax[idx], ...(materialLineIds.has(idx) ? { id: materialLineIds.get(idx)! } : {}) }));
 
     const inv = await tx.salesInvoice.create({
       data: {
@@ -507,7 +529,7 @@ export async function createInvoice(data: {
           // more than what is still due, only the due part settles the bill — the rest stays as credit on the
           // customer's account for next time (it is already in currentBalance).
           const v = oldGoldValuations.get(p)!;
-          const exchange = await bookOldGoldExchange(tx, ctx, userId, { clientId: data.clientId, ...p.oldGold!, notes: p.notes }, v);
+          const exchange = await bookOldGoldExchange(tx, ctx, userId, { clientId: data.clientId, ...p.oldGold!, notes: p.notes, branchId: data.branchId }, v, METAL_MOVEMENT.OLD_GOLD_EXCHANGE);
           const settle = round2(Math.min(v.valuedAmount, remaining));
           result = settle > 0.005
             ? await applyPayment(tx, ctx.companyId, runningInvoice, {
@@ -667,6 +689,13 @@ async function priceInvoice(
     if (goldRate === undefined) {
       throw new AppError('goldRate or karat (to resolve today\'s rate) is required', 400);
     }
+    if (i.materialSale) {
+      if (i.tagId) throw new AppError('A material sale line cannot also carry a tag', 400);
+      if (!i.karat) throw new AppError('A material sale line needs the metal karat/purity it is drawn from', 400);
+      if (!(i.netGoldWeight > 0)) throw new AppError('A material sale line needs a weight to sell', 400);
+      if (!Number.isInteger(i.quantity) || i.quantity < 1) throw new AppError('A material sale line needs a quantity of at least 1', 400);
+      if (bd) throw new AppError('A material sale line cannot carry a material breakdown', 400);
+    }
     const tagInfo = i.tagId ? tagInfoById.get(i.tagId) : undefined;
     const resolvedCategoryId = categoryId ?? tagInfo?.categoryId ?? null;
     const resolvedKarat = i.karat ?? tagInfo?.metalKarat ?? null;
@@ -714,7 +743,7 @@ async function priceInvoice(
       uqc = hsn.defaultUqc ?? null;
     }
     return {
-      ...rest, tagId: i.tagId ?? null, goldRate, makingCharge, wastagePercent,
+      ...rest, tagId: i.tagId ?? null, materialSale: !!i.materialSale, goldRate, makingCharge, wastagePercent,
       // Stored as the bill's own record; an amended line that no longer carries one clears the old copy.
       materialBreakdown: bd ? (bd.normalized as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
       stoneWeight: i.stoneWeight ?? 0, stoneValue: i.stoneValue ?? 0, unitPrice, totalPrice,
@@ -909,6 +938,11 @@ export async function amendInvoice(invoiceId: string, data: {
     });
     // J3 Decision 5: a voided invoice is closed — no further amend, payment, or return against it.
     if (inv.status === 'VOID') throw new AppError('This invoice has been voided and cannot be amended', 409);
+    // A material (vault) line moved metal out of the Metal Vault when it was billed; re-pricing it in place would leave
+    // the vault and the bill disagreeing. Void the bill and issue a new one instead.
+    if (inv.items.some((i) => i.materialSale) || items.some((i) => i.materialSale)) {
+      throw new AppError('An invoice with a material (Metal Vault) line cannot be amended — void it and issue a new one', 409);
+    }
     // G1 Part N: the same IRN guard voidInvoice already has (sales.service.ts's voidInvoice,
     // below) — an e-invoice with a live IRN can never be silently rewritten in-app; the only
     // legal corrections after IRN generation are a GST credit/debit note or an IRP cancellation,
@@ -1186,6 +1220,15 @@ export async function voidInvoice(invoiceId: string, ctx: TenantContext, userId:
       // A piece taken off the bill entirely is no longer billed by whatever estimate quoted it —
       // exact mirror of amendInvoice's own removed-line handling.
       await tx.tagEstimate.updateMany({ where: { companyId: ctx.companyId, invoiceId, tagId: { in: tagIds } }, data: { status: 'SENT', invoiceId: null } });
+    }
+
+    // Material (vault) lines: the metal goes back to the very lots it came from, at the cost it left at.
+    for (const it of invoice.items.filter((i) => i.materialSale)) {
+      const { cost } = await restoreVaultMetal(tx, ctx.companyId, {
+        saleReferenceType: 'InvoiceItem', saleReferenceId: it.id, weight: Number(it.netGoldWeight) * it.quantity,
+        meta: { referenceType: 'InvoiceVoid', referenceId: it.id, userId, branchId: invoice.branchId },
+      });
+      cogsAmount += cost;
     }
 
     // F1: exact inverse of createInvoice's own compound entry. taxableAmount is derived from the
@@ -1470,6 +1513,10 @@ export async function reverseInvoicePayment(paymentId: string, ctx: TenantContex
         if (stockClaimed.count !== 1) {
           throw new AppError('This exchange\'s metal was reserved or adjusted by another operation just now — retry the reversal', 409);
         }
+        await insertMetalMovement(tx, ctx.companyId, exchange.metalStock!, -stockBefore.availableWt, stockBefore.availableWt, 0, {
+          movementType: METAL_MOVEMENT.OLD_GOLD_EXCHANGE_REVERSAL, referenceType: 'OldGoldExchange', referenceId: exchange.id,
+          userId, branchId: exchange.branchId,
+        });
         // Audited AFTER the transaction commits (see below) — createAuditEntry writes via its own
         // connection, so calling it from inside an open transaction can record an entry for a
         // mutation that later rolls back; captured here, written once the transaction is durable.
@@ -1571,14 +1618,18 @@ export async function listClientPayments(ctx: TenantContext, clientId: string) {
 // are never written to: a return is a new record referencing the sale, not an edit to it.
 export async function createSalesReturn(data: {
   invoiceId: string;
-  items: Array<{ invoiceItemId: string; amount?: number }>; // amount defaults to what the
+  items: Array<{ invoiceItemId: string; amount?: number; weight?: number /* grams, material (vault) lines only — omit to return what is still outstanding */ }>; // amount defaults to what the
   // customer actually paid for that line: totalPrice grossed up by its own snapshotted taxRate
   // (matching client.currentBalance's debit on sale, which is tax-inclusive) — not a formal GST
   // credit-note reversal (no TaxInvoice counterpart is created; see CLAUDE.md/ROADMAP D1 notes).
   reason?: string;
   notes?: string;
+  // The branch the piece physically came back to, when that is not the branch it was sold from. Defaults to the
+  // tag's own branch. A returned tagged piece is NOT back in stock: see the RETURNED_PENDING_INSPECTION flip below.
+  returnBranchId?: string;
 }, ctx: TenantContext, userId: string, opts: { issueCreditNote?: boolean } = {}) {
   if (data.items.length === 0) throw new AppError('At least one item is required', 400);
+  if (data.returnBranchId) await assertBranchAccessible(data.returnBranchId, ctx, 'Return branch');
 
   // Layer 2: the invoice is validated as belonging to ctx.companyId — a Company-B invoiceId
   // must 404, not let a Company-A user return items against another company's sale.
@@ -1598,31 +1649,18 @@ export async function createSalesReturn(data: {
   const taxDetails = invoice.taxDetails;
   const isSameState = !!taxDetails && Number(taxDetails.cgst) > 0;
 
+  const requestedLineIds = data.items.map((r) => r.invoiceItemId);
+  if (new Set(requestedLineIds).size !== requestedLineIds.length) {
+    throw new AppError('The same invoice line cannot appear twice in one return', 400);
+  }
   const invoiceItemById = new Map(invoice.items.map((i) => [i.id, i]));
-  const resolvedItems = data.items.map((r) => {
+  for (const r of data.items) {
     const line = invoiceItemById.get(r.invoiceItemId);
     if (!line) throw new AppError(`Invoice item not found on this invoice: ${r.invoiceItemId}`, 404);
-    if (!line.tagId) throw new AppError('Only tagged lines can be returned (no physical item on a free-text line)', 400);
-    const taxRate = taxDetails ? Number(line.taxRate) : 0;
-    const paidAmount = Number(line.totalPrice) * (1 + taxRate);
-    const amount = r.amount ?? paidAmount;
-    // Back out the revenue/tax split from whatever amount is actually being refunded (the default
-    // or a caller override) — same tax-inclusive assumption the default itself uses.
-    const revenuePortion = amount / (1 + taxRate);
-    return {
-      invoiceItemId: line.id, tagId: line.tagId, amount,
-      revenuePortion, taxPortion: amount - revenuePortion,
-    };
-  });
-
-  const tagIds = resolvedItems.map((r) => r.tagId);
-  if (new Set(tagIds).size !== tagIds.length) {
-    throw new AppError('The same tag cannot appear on more than one line of a return', 400);
+    if (!line.tagId && !line.materialSale) {
+      throw new AppError('Only tagged lines can be returned (or material lines drawn from the Metal Vault) — no physical item on a free-text line', 400);
+    }
   }
-
-  const totalAmount = resolvedItems.reduce((s, r) => s + r.amount, 0);
-  const revenueReversal = resolvedItems.reduce((s, r) => s + r.revenuePortion, 0);
-  const taxReversal = resolvedItems.reduce((s, r) => s + r.taxPortion, 0);
 
   // G2g-7g: a SalesReturn is its own GSTR-3B outward source document (gstr3bReporting.service.ts's
   // loader reads it by its own returnDate, attributed to the ORIGINAL invoice's seller registration
@@ -1643,15 +1681,73 @@ export async function createSalesReturn(data: {
     // is already proven to belong to this company via the invoice check above, but scoping the
     // query itself is cheap, consistent insurance against a future code path reusing this same
     // helper with less-trusted input.
+    // Serialise returns (and voids/amends) of this invoice, then read what has already been returned on its lines FRESH —
+    // two returns of the same line racing each other must not both see "nothing returned yet".
+    await tx.$queryRaw`SELECT "id" FROM "sales_invoices" WHERE "id" = ${invoice.id} FOR UPDATE`;
+    const fresh = await tx.salesInvoice.findUniqueOrThrow({ where: { id: invoice.id }, select: { status: true } });
+    if (fresh.status === 'VOID') throw new AppError('This invoice has been voided and cannot be returned against', 409);
+    const priorReturns = await tx.salesReturnItem.findMany({
+      where: { companyId: ctx.companyId, invoiceItemId: { in: requestedLineIds } },
+      select: { invoiceItemId: true, returnedWeight: true },
+    });
+    const priorWeightByLine = new Map<string, number>();
+    const returnedLines = new Set<string>();
+    for (const pr of priorReturns) {
+      returnedLines.add(pr.invoiceItemId);
+      priorWeightByLine.set(pr.invoiceItemId, (priorWeightByLine.get(pr.invoiceItemId) ?? 0) + Number(pr.returnedWeight ?? 0));
+    }
+
+    const resolvedItems = data.items.map((r) => {
+      const line = invoiceItemById.get(r.invoiceItemId)!;
+      const taxRate = taxDetails ? Number(line.taxRate) : 0;
+      let fraction = 1;
+      let weight: number | null = null;
+      if (line.materialSale) {
+        // A material line can be returned in parts: never more than was sold, summed over every return so far.
+        const sold = Math.round(Number(line.netGoldWeight) * line.quantity * 10000) / 10000;
+        const outstanding = Math.round((sold - (priorWeightByLine.get(line.id) ?? 0)) * 10000) / 10000;
+        weight = r.weight ?? outstanding;
+        if (!(weight > 0)) throw new AppError(`Line ${line.productCode} has nothing left to return`, 409);
+        if (weight > outstanding + 0.00005) {
+          throw new AppError(`Line ${line.productCode}: ${weight} g cannot be returned — only ${outstanding} g of the ${sold} g sold is outstanding`, 409);
+        }
+        fraction = weight / sold;
+      } else if (returnedLines.has(line.id)) {
+        // The tag status check below would not catch a piece that was returned and then sold again on another bill.
+        throw new AppError(`Line ${line.productCode} has already been returned`, 409);
+      }
+      const paidAmount = Number(line.totalPrice) * (1 + taxRate) * fraction;
+      const amount = r.amount ?? paidAmount;
+      // Back out the revenue/tax split from whatever amount is actually being refunded (the default
+      // or a caller override) — same tax-inclusive assumption the default itself uses.
+      const revenuePortion = amount / (1 + taxRate);
+      return {
+        invoiceItemId: line.id, tagId: line.tagId, weight, amount,
+        revenuePortion, taxPortion: amount - revenuePortion,
+      };
+    });
+
+    const tagIds = resolvedItems.map((r) => r.tagId).filter((t): t is string => !!t);
+    if (new Set(tagIds).size !== tagIds.length) {
+      throw new AppError('The same tag cannot appear on more than one line of a return', 400);
+    }
+
+    const totalAmount = resolvedItems.reduce((s, r) => s + r.amount, 0);
+    const revenueReversal = resolvedItems.reduce((s, r) => s + r.revenuePortion, 0);
+    const taxReversal = resolvedItems.reduce((s, r) => s + r.taxPortion, 0);
+
     const tags = await tx.jewelryTag.findMany({ where: { id: { in: tagIds }, companyId: ctx.companyId } });
     const notSold = tags.filter((t) => t.status !== 'SOLD');
     if (notSold.length > 0) {
       throw new AppError(`Tag(s) not currently SOLD, cannot return: ${notSold.map((t) => t.tagNumber).join(', ')}`, 409);
     }
 
+    // The tag itself comes back — same row, same tag number, same history (the tag_history trigger records the
+    // change) — but NOT as saleable stock: it waits at the branch it came back to for Head Office inspection
+    // (RETURNED_PENDING_INSPECTION). Only an authorised inspection PASS makes it IN_STOCK again.
     const flipped = await tx.jewelryTag.updateMany({
       where: { id: { in: tagIds }, status: 'SOLD', companyId: ctx.companyId },
-      data: { status: 'IN_STOCK' },
+      data: { status: TAG_STATUS_RETURNED_PENDING_INSPECTION, ...(data.returnBranchId ? { branchId: data.returnBranchId } : {}) },
     });
     if (flipped.count !== tagIds.length) {
       throw new AppError('One or more tags changed status just now — retry the return', 409);
@@ -1662,7 +1758,7 @@ export async function createSalesReturn(data: {
     // F1 COGS/inventory reversal — the returned piece goes back on the shelf at its own
     // (immutable) costPrice, same figure createInvoice originally moved out of Inventory.
     const costPriceByTagId = new Map(tags.map((t) => [t.id, Number(t.costPrice)]));
-    const cogsReversal = resolvedItems.reduce((s, r) => s + (costPriceByTagId.get(r.tagId) ?? 0), 0);
+    let cogsReversal = resolvedItems.reduce((s, r) => s + (r.tagId ? (costPriceByTagId.get(r.tagId) ?? 0) : 0), 0);
 
     const created = await tx.salesReturn.create({
       data: {
@@ -1676,12 +1772,43 @@ export async function createSalesReturn(data: {
         totalAmount,
         items: {
           createMany: {
-            data: resolvedItems.map((r) => ({ invoiceItemId: r.invoiceItemId, tagId: r.tagId, amount: r.amount })),
+            data: resolvedItems.map((r) => ({
+              invoiceItemId: r.invoiceItemId, tagId: r.tagId, returnedWeight: r.weight, amount: r.amount,
+            })),
           },
         },
       },
       include: { items: { include: { tag: { select: { tagNumber: true } } } } },
     });
+
+    // Repair Register: one case per returned tagged line, in the same transaction as the flip above — so a piece can
+    // never be parked as RETURNED_PENDING_INSPECTION without a register row to follow it. Pure operational record:
+    // no ledger or customer-balance movement (the return's own entries below are the only financial effect).
+    const repairCases: Array<{ id: string }> = [];
+    for (const item of created.items.filter((i) => i.tagId)) {
+      const tag = tags.find((t) => t.id === item.tagId)!;
+      const repairNumber = await nextDocumentNumber(ctx.companyId, 'RPR', 'RPR', tx);
+      repairCases.push(await tx.repairCase.create({
+        data: {
+          companyId: ctx.companyId, repairNumber, tagId: tag.id, salesReturnItemId: item.id,
+          originBranchId: data.returnBranchId ?? tag.branchId, status: REPAIR_STATUS.RETURNED_PENDING_TRANSFER,
+          currentLocation: REPAIR_LOCATION.BRANCH, returnReason: data.reason ?? null,
+          description: tag.name, karat: tag.metalKarat, grossWeight: tag.grossWeight, stoneWeight: tag.stoneWeight,
+          netWeight: tag.netWeight, createdById: userId,
+        },
+        select: { id: true },
+      }));
+    }
+
+    // Material lines: the returned grams go back to the Metal Vault lots the sale drew from, at the cost they left at.
+    // Each return line is the cause of its own movements, so replaying it can never restore twice.
+    for (const item of created.items.filter((i) => i.returnedWeight != null)) {
+      const { cost } = await restoreVaultMetal(tx, ctx.companyId, {
+        saleReferenceType: 'InvoiceItem', saleReferenceId: item.invoiceItemId, weight: Number(item.returnedWeight),
+        meta: { referenceType: 'SalesReturnItem', referenceId: item.id, userId, branchId: invoice.branchId },
+      });
+      cogsReversal += cost;
+    }
 
     // F1: exact reversal of createInvoice's compound entry, scoped to just the returned lines —
     // Dr Revenue + Dr GST payable + Dr Inventory must equal Cr Accounts Receivable + Cr COGS.
@@ -1717,9 +1844,12 @@ export async function createSalesReturn(data: {
       });
     }
 
-    return { created, creditNote };
+    return { created, creditNote, repairCases };
   });
 
+  for (const rc of salesReturn.repairCases) {
+    await createAuditEntry('repair_cases', rc.id, userId, 'CREATE', undefined, { status: REPAIR_STATUS.RETURNED_PENDING_TRANSFER, source: 'SALES_RETURN' }, ctx.companyId);
+  }
   await createAuditEntry('sales_returns', salesReturn.created.id, userId, 'CREATE', undefined, undefined, ctx.companyId);
   if (salesReturn.creditNote) {
     await createAuditEntry(
@@ -1739,26 +1869,58 @@ export async function createSalesReturn(data: {
 // against any future purchase — not tied to one specific invoice (confirmed with the user).
 // Also adds the melted-down weight to the Metal Vault via the existing addMetalStock(), so the
 // physical metal is tracked, not just the financial side.
+//
+// A customer may hand over a TAGGED piece (a JewelryTag we sold): pass `tagId`. For this version that is an old-metal
+// purchase, not a buy-back for resale — the tag is RETIRED (never deleted: its record and history stay) and its metal is
+// what enters the vault. Karat, weights and description then default from the tag when omitted.
 export async function createOldGoldExchange(data: {
   clientId: string;
-  description: string;
-  karat: string;
-  grossWeight: number;
+  description?: string;
+  karat?: string;
+  grossWeight?: number;
   stoneWeight?: number;
   deductionPercent?: number;
   exchangeDate?: Date;
   notes?: string;
+  branchId?: string;
+  tagId?: string;
 }, ctx: TenantContext, userId: string) {
   // Layer 2: the client this exchange credits must belong to the caller's own company.
   await assertOwnedByCompany('client', data.clientId, ctx.companyId, 'Client');
+  if (data.branchId) await assertBranchAccessible(data.branchId, ctx);
+
+  let tag: Awaited<ReturnType<typeof loadTagForBuyback>> | null = null;
+  if (data.tagId) {
+    tag = await loadTagForBuyback(ctx, data.tagId);
+    await assertBranchAccessible(tag.branchId, ctx);
+  }
+  const karat = data.karat ?? tag?.metalKarat ?? undefined;
+  const grossWeight = data.grossWeight ?? (tag ? Number(tag.grossWeight) : undefined);
+  const description = data.description ?? (tag ? `Old tagged piece ${tag.tagNumber}` : undefined);
+  if (!karat || grossWeight === undefined || !description) {
+    throw new AppError('Description, karat and gross weight are required', 400);
+  }
+  const resolved = {
+    ...data, description, karat, grossWeight, stoneWeight: data.stoneWeight ?? (tag ? Number(tag.stoneWeight) : undefined),
+    branchId: data.branchId ?? tag?.branchId, tagId: data.tagId,
+  };
 
   const exchangeDate = data.exchangeDate ?? new Date();
-  const valuation = await valueOldGold(data, exchangeDate, ctx);
+  const valuation = await valueOldGold(resolved, exchangeDate, ctx);
 
-  const exchange = await tenantTransaction(ctx.companyId, (tx) => bookOldGoldExchange(tx, ctx, userId, data, valuation));
+  const exchange = await tenantTransaction(ctx.companyId, (tx) => bookOldGoldExchange(tx, ctx, userId, resolved, valuation));
 
   await createAuditEntry('old_gold_exchanges', exchange.id, userId, 'CREATE', undefined, undefined, ctx.companyId);
   return exchange;
+}
+
+// The tag a customer hands back for its metal: it must be this company's and currently SOLD (a piece we still hold, or one
+// already on memo/retired, is not the customer's to hand back).
+async function loadTagForBuyback(ctx: TenantContext, tagId: string) {
+  const tag = await tenantQuery(ctx.companyId, (tx) => tx.jewelryTag.findFirst({ where: { id: tagId, companyId: ctx.companyId } }));
+  if (!tag) throw new AppError('Tag not found', 404);
+  if (tag.status !== 'SOLD') throw new AppError(`Tag ${tag.tagNumber} is ${tag.status}, not SOLD — only a sold piece can be taken back as old metal`, 409);
+  return tag;
 }
 
 type OldGoldValuation = {
@@ -1809,22 +1971,39 @@ async function bookOldGoldExchange(
   tx: Prisma.TransactionClient,
   ctx: TenantContext,
   userId: string,
-  data: { clientId: string; description: string; karat: string; grossWeight: number; notes?: string },
+  data: { clientId: string; description: string; karat: string; grossWeight: number; notes?: string; branchId?: string | null; tagId?: string | null },
   v: OldGoldValuation,
+  // CUSTOMER_PURCHASE for the standalone screen; OLD_GOLD_EXCHANGE when the metal is handed over against a bill.
+  movementType: MetalMovementType = METAL_MOVEMENT.CUSTOMER_PURCHASE,
 ) {
   const exchangeNumber = await nextDocumentNumber(ctx.companyId, 'OGX', 'OGX', tx, v.exchangeDate.getFullYear());
+  const exchangeId = randomUUID();
+
+  // A tagged piece is consumed by this exchange: SOLD -> RETIRED, count-checked so the same tag can never be taken
+  // back twice (a replay or a race finds it already RETIRED and the whole exchange rolls back).
+  if (data.tagId) {
+    const retired = await tx.jewelryTag.updateMany({
+      where: { id: data.tagId, companyId: ctx.companyId, status: 'SOLD' },
+      data: { status: 'RETIRED' },
+    });
+    if (retired.count !== 1) throw new AppError('This tag is no longer SOLD — it cannot be taken back as old metal', 409);
+  }
+
   const stock = await addMetalStock(
     {
       materialName: data.description, karat: data.karat, purity: v.purity,
       grossWeight: data.grossWeight, netWeight: v.netWeight,
       sourceType: 'CUSTOMER_SUPPLIED', sourceRef: exchangeNumber, avgCostPerGram: v.deductedRate,
     },
-    ctx.companyId, userId, tx
+    ctx.companyId, userId, tx,
+    { movementType, referenceType: 'OldGoldExchange', referenceId: exchangeId, branchId: data.branchId },
   );
 
   const created = await tx.oldGoldExchange.create({
     data: {
+      id: exchangeId,
       companyId: ctx.companyId,
+      branchId: data.branchId ?? null, tagId: data.tagId ?? null,
       exchangeNumber, clientId: data.clientId, exchangeDate: v.exchangeDate, description: data.description,
       karat: data.karat, grossWeight: data.grossWeight, stoneWeight: v.stoneWeight, netWeight: v.netWeight,
       ratePerGram: v.ratePerGram, deductionPercent: v.deductionPercent, valuedAmount: v.valuedAmount,

@@ -111,6 +111,7 @@ describe('GSTR-1 reporting integration (G2g-3e)', () => {
     await tenantQuery(tenant.company.id, (tx) => tx.salesDebitNote.deleteMany({ where: { companyId: tenant.company.id } }));
     await tenantQuery(tenant.company.id, (tx) => tx.debitNote.deleteMany({ where: { companyId: tenant.company.id } }));
     await cleanupJournalEntries([...invoiceIds, ...salesReturnIds, ...creditNoteIds, ...debitNoteIds, ...procurementDebitNoteIds]);
+    await prisma.repairCase.deleteMany({ where: { salesReturnItem: { return: { invoiceId: { in: invoiceIds } } } } }); // returned-jewellery register rows reference the return lines
     await prisma.salesReturn.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.invoicePayment.deleteMany({ where: { invoiceId: { in: invoiceIds } } });

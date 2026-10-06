@@ -36,6 +36,7 @@ const EVENT_COLOR: Record<string, 'default' | 'success' | 'info' | 'warning' | '
 const EVENT_OPTIONS = Object.entries(EVENT_LABEL).map(([value, label]) => ({ value, label }));
 const STATUS_LABEL: Record<string, string> = {
   IN_STOCK: 'In Stock', ON_APPROVAL: 'On Memo', TRANSFERRED: 'In Transit', SOLD: 'Sold', RETIRED: 'Retired', RETURNED: 'Returned',
+  RETURNED_PENDING_INSPECTION: 'Returned — pending inspection', IN_TRANSIT_TO_HO: 'In transit to HO', HO_RECEIVED: 'At HO — pending inspection', REPAIR_REQUIRED: 'Repair required', IN_REPAIR: 'In repair', REPAIR_COMPLETED: 'Repair done', MELT_PENDING: 'Melt pending', RETAGGED: 'Retagged',
 };
 const STATUS_OPTIONS = Object.entries(STATUS_LABEL).map(([value, label]) => ({ value, label }));
 

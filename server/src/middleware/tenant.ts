@@ -102,7 +102,9 @@ type ScopedModel =
   // G2g-4b — Sales Debit Note (outward/sell-side — a wholly separate domain from 'debitNote' above)
   | 'salesDebitNote'
   // G8a — GST integration foundation
-  | 'gstIntegrationConfig';
+  | 'gstIntegrationConfig'
+  // Returned-jewellery pipeline (Repair Register / Branch->HO custody)
+  | 'repairCase' | 'repairTransfer';
 
 // Routed through tenantQuery (Form 1 — see tenantContext.ts) rather than a bare prisma call:
 // this is a read against a tenant-scoped table, so it follows the same one standard pattern as

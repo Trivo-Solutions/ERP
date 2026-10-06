@@ -399,10 +399,10 @@ export async function getTag(ctx: TenantContext, id: string) {
  * (a purchase return flips its tag to RETIRED, as does a manual retire) — their details must not change
  * and a fresh label must not be printed for a piece that is no longer ours. Enforced here, not just in the UI.
  */
-export const LOCKED_TAG_STATUSES = ['SOLD', 'RETIRED'] as const;
+export const LOCKED_TAG_STATUSES = ['SOLD', 'RETIRED', 'RETAGGED'] as const;
 export function assertTagEditable(status: string, action: 'edited' | 'reprinted') {
   if ((LOCKED_TAG_STATUSES as readonly string[]).includes(status)) {
-    const why = status === 'SOLD' ? 'sold' : 'retired / purchase-returned';
+    const why = status === 'SOLD' ? 'sold' : status === 'RETAGGED' ? 'retagged (replaced by a new tag)' : 'retired / purchase-returned';
     throw new AppError(`This tag is ${why} and can no longer be ${action}`, 409);
   }
 }

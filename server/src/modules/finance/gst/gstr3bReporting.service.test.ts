@@ -165,6 +165,9 @@ describe('G2g-7b: GSTR-3B Reporting Service Integration', () => {
       tx.salesDebitNote.deleteMany({ where: { companyId: tenant.company.id } })
     );
     await tenantQuery(tenant.company.id, (tx) =>
+      tx.repairCase.deleteMany({ where: { companyId: tenant.company.id } })
+    );
+    await tenantQuery(tenant.company.id, (tx) =>
       tx.salesReturn.deleteMany({ where: { companyId: tenant.company.id } })
     );
     await cleanupJournalEntries([...invoiceIds, ...creditNoteIds, ...salesDebitNoteIds]);

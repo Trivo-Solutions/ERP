@@ -91,6 +91,8 @@ export const NAV_ITEMS: NavItem[] = [
       { label: 'Branches',          path: '/tagging/branches',  permission: 'branch:create' },
       { label: 'Branch Transfers',  path: '/tagging/transfers', permission: 'branch:transfer' },
       { label: 'Branch Receives',   path: '/tagging/receives',  permission: 'branch:transfer' },
+      { label: 'Repair Register',   path: '/tagging/repairs',   permission: 'repair:view' },
+      { label: 'Repair Transfers',  path: '/tagging/repair-transfers', permission: 'repair:view' },
     ],
   },
   {
@@ -145,6 +147,9 @@ export const NAV_ITEMS: NavItem[] = [
       { label: 'Sales Report', path: '/reports/sales-report', permission: 'report:view' },
       { label: 'Stock Book', path: '/reports/stock-book', permission: 'report:view' },
       { label: 'Barcode History', path: '/reports/barcode-history', permission: 'report:view' },
+      { label: 'Sales Returns', path: '/reports/sales-returns', permission: 'sales:view' },
+      { label: 'Repair Register', path: '/reports/repair-register', permission: 'repair:view' },
+      { label: 'Repair Transfers', path: '/reports/repair-transfers', permission: 'repair:view' },
       { label: 'Stock on Hand', path: '/reports/stock-on-hand', permission: 'report:view' },
       { label: 'Dead Stock / Ageing', path: '/reports/dead-stock', permission: 'report:view' },
       { label: 'Day Book', path: '/reports/day-book', permission: 'report:financial_view' },

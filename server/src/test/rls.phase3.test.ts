@@ -147,6 +147,7 @@ describe('PostgreSQL RLS policies (migration 20260923180000, Phase 3 tables)', (
       expect(rows.map((r) => r.id)).toEqual([stockB.id]);
     });
 
+    await prisma.metalStockMovement.deleteMany({ where: { metalStockId: { in: [stockA.id, stockB.id] } } });
     await prisma.metalStock.deleteMany({ where: { id: { in: [stockA.id, stockB.id] } } });
   });
 

@@ -72,6 +72,7 @@ describe('Credit Note lifecycle (G2c)', () => {
     await tenantQuery(tenant.company.id, (tx) => tx.creditNote.deleteMany({ where: { companyId: tenant.company.id } }));
 
     await cleanupJournalEntries([...invoiceIds, ...salesReturnIds, ...creditNoteIds]);
+    await prisma.repairCase.deleteMany({ where: { salesReturnItem: { return: { invoiceId: { in: invoiceIds } } } } }); // returned-jewellery register rows reference the return lines
     await prisma.salesReturn.deleteMany({ where: { invoiceId: { in: invoiceIds } } }); // cascades sales_return_items
     await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.invoicePayment.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
@@ -133,7 +134,7 @@ describe('Credit Note lifecycle (G2c)', () => {
       expect(cnOwnEntries).toHaveLength(0);
 
       const freshTag = await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } });
-      expect(freshTag.status).toBe('IN_STOCK');
+      expect(freshTag.status).toBe('RETURNED_PENDING_INSPECTION');
     });
 
     it('createCreditNoteForExistingReturn wraps an existing return that had none, reusing its journal', async () => {

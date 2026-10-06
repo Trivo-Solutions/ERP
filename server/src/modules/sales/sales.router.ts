@@ -288,10 +288,30 @@ salesRouter.get('/returns', requirePermission('sales:view'), async (req: Request
       companyId: req.tenant!.companyId,
       ...(req.query.invoiceId && { invoiceId: req.query.invoiceId as string }),
     },
-    include: { items: { include: { tag: { select: { tagNumber: true } } } } },
+    include: {
+      client: { select: { name: true } },
+      invoice: { select: { invoiceNumber: true, branch: { select: { name: true } } } },
+      // Each returned tagged line's Repair Register row says what became of the piece (the register itself stays
+      // the financial one — repair transactions live in the Repair Register, not here).
+      items: { include: {
+        tag: { select: { tagNumber: true, name: true, status: true, branch: { select: { name: true } } } },
+        repairCase: { select: { id: true, repairNumber: true, status: true, inspectionResult: true } },
+      } },
+    },
     orderBy: { returnDate: 'desc' },
   }));
-  res.json({ success: true, data: returns });
+  res.json({
+    success: true,
+    data: returns.map((r) => {
+      const cases = r.items.map((i) => i.repairCase).filter((c): c is NonNullable<typeof c> => !!c);
+      // Inspection status of the return as a whole: none for a material-only return, PENDING until every piece is cleared.
+      const inspectionStatus = cases.length === 0 ? 'NOT_APPLICABLE'
+        : cases.every((c) => c.status === 'INSPECTION_PASSED') ? 'PASSED'
+        : cases.some((c) => ['MELT_PENDING', 'RETAGGED'].includes(c.status)) && cases.every((c) => ['INSPECTION_PASSED', 'MELT_PENDING', 'RETAGGED'].includes(c.status)) ? 'COMPLETED'
+        : 'PENDING';
+      return { ...r, customerName: r.client.name, invoiceNumber: r.invoice.invoiceNumber, branchName: r.invoice.branch?.name ?? null, inspectionStatus };
+    }),
+  });
 });
 
 salesRouter.post('/returns', requirePermission('return:create'), async (req: Request, res: Response) => {

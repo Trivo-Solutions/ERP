@@ -54,7 +54,9 @@ describe('G2d: Credit Note Templates & Printing UI', () => {
     await tenantQuery(tenant.company.id, (tx) => tx.creditNoteTemplate.deleteMany({ where: { companyId: tenant.company.id } }));
     await tenantQuery(tenantB.company.id, (tx) => tx.creditNoteTemplate.deleteMany({ where: { companyId: tenantB.company.id } }));
     await cleanupJournalEntries(invoiceIds);
+    await prisma.repairCase.deleteMany({ where: { companyId: tenant.company.id } });
     await prisma.salesReturnItem.deleteMany({ where: { companyId: tenant.company.id } });
+    await prisma.repairCase.deleteMany({ where: { salesReturnItem: { return: { companyId: tenant.company.id } } } }); // returned-jewellery register rows reference the return lines
     await prisma.salesReturn.deleteMany({ where: { companyId: tenant.company.id } });
     await prisma.taxInvoice.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
     await prisma.salesInvoice.deleteMany({ where: { id: { in: invoiceIds } } });

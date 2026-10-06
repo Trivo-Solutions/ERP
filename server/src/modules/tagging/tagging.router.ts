@@ -7,6 +7,8 @@ import * as svc from './tagging.service';
 import * as lots from './purchaseLot.service';
 import * as history from './tagHistory.service';
 import * as tagTx from './tagTransactions.service';
+import * as repair from './returnRepair.service';
+import { parseOptionalDate } from '../../shared/parseDate';
 
 export const taggingRouter = Router();
 taggingRouter.use(authenticate, resolveTenantContext);
@@ -255,4 +257,90 @@ taggingRouter.post('/audits/:id/scan', requirePermission('stock:adjust'), async 
 taggingRouter.post('/audits/:id/complete', requirePermission('stock:adjust'), async (req: Request, res: Response) => {
   const audit = await svc.completeStockAudit(req.params.id, req.tenant!, req.user!.userId);
   res.json({ success: true, data: audit });
+});
+
+// ─── Returned jewellery: Repair Register, Repair Transfers (branch -> HO), inspection, retagging ──────────────────
+// The branch half (view, create/send a transfer) is repair:view / repair:send; everything that happens AT Head Office
+// (receive, inspect, repair, final inspection, retag, reprint) has its own permission AND is refused by the service
+// unless the caller is granted the Head Office branch — so a permission alone never lets a branch user act as HO.
+const q = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+
+taggingRouter.get('/repairs', requirePermission('repair:view'), async (req: Request, res: Response) => {
+  const data = await repair.listRepairCases(req.tenant!, {
+    dateFrom: parseOptionalDate(req.query.dateFrom, 'From date'), dateTo: parseOptionalDate(req.query.dateTo, 'To date'),
+    branchId: q(req.query.branchId), headOffice: req.query.headOffice === 'true', repairNumber: q(req.query.repairNumber),
+    tagNumber: q(req.query.tagNumber), returnNumber: q(req.query.returnNumber), invoiceNumber: q(req.query.invoiceNumber),
+    customer: q(req.query.customer), status: q(req.query.status), assignedToId: q(req.query.assignedToId),
+    repairEmployeeId: q(req.query.repairEmployeeId), inspectionResult: q(req.query.inspectionResult),
+  });
+  res.json({ success: true, data });
+});
+
+taggingRouter.get('/repairs/employees', requirePermission('repair:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await repair.listRepairEmployees(req.tenant!) });
+});
+
+taggingRouter.get('/repairs/:id', requirePermission('repair:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await repair.getRepairCase(req.tenant!, req.params.id) });
+});
+
+taggingRouter.post('/repairs/:id/inspect', requirePermission('repair:inspect'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await repair.inspectRepairCase(req.params.id, req.body ?? {}, req.tenant!, req.user!.userId) });
+});
+
+taggingRouter.post('/repairs/:id/start', requirePermission('repair:work'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await repair.startRepair(req.params.id, req.body ?? {}, req.tenant!, req.user!.userId) });
+});
+
+taggingRouter.post('/repairs/:id/complete', requirePermission('repair:work'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await repair.completeRepair(req.params.id, req.body ?? {}, req.tenant!, req.user!.userId) });
+});
+
+taggingRouter.post('/repairs/:id/final-inspection', requirePermission('repair:inspect'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await repair.finalInspect(req.params.id, req.body ?? {}, req.tenant!, req.user!.userId) });
+});
+
+taggingRouter.post('/repairs/:id/retag', requirePermission('retag:create'), async (req: Request, res: Response) => {
+  const out = await repair.retagTag({ ...(req.body ?? {}), repairCaseId: req.params.id }, req.tenant!, req.user!.userId);
+  res.status(201).json({ success: true, data: out });
+});
+
+// Same tag, same number: records the reprint and hands back the label to print (the client posts it to the print agent).
+taggingRouter.post('/tags/:id/reprint', requirePermission('retag:reprint'), async (req: Request, res: Response) => {
+  const tag = await repair.reprintTag(req.params.id, req.body?.reason, req.tenant!, req.user!.userId);
+  const print = await svc.getTagPrintTspl(req.tenant!, req.params.id, q(req.body?.templateId));
+  res.json({ success: true, data: { tag, print } });
+});
+
+taggingRouter.get('/repair-transfers', requirePermission('repair:view'), async (req: Request, res: Response) => {
+  const data = await repair.listRepairTransfers(req.tenant!, {
+    dateFrom: parseOptionalDate(req.query.dateFrom, 'From date'), dateTo: parseOptionalDate(req.query.dateTo, 'To date'),
+    branchId: q(req.query.branchId), tagNumber: q(req.query.tagNumber), transferNumber: q(req.query.transferNumber),
+    status: q(req.query.status), repairNumber: q(req.query.repairNumber),
+  });
+  res.json({ success: true, data });
+});
+
+taggingRouter.get('/repair-transfers/:id', requirePermission('repair:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await repair.getRepairTransfer(req.tenant!, req.params.id) });
+});
+
+taggingRouter.post('/repair-transfers', requirePermission('repair:send'), async (req: Request, res: Response) => {
+  res.status(201).json({ success: true, data: await repair.createRepairTransfer(req.body ?? {}, req.tenant!, req.user!.userId) });
+});
+
+taggingRouter.post('/repair-transfers/:id/send', requirePermission('repair:send'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await repair.sendRepairTransfer(req.params.id, req.tenant!, req.user!.userId) });
+});
+
+taggingRouter.post('/repair-transfers/:id/cancel', requirePermission('repair:send'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await repair.cancelRepairTransfer(req.params.id, req.tenant!, req.user!.userId) });
+});
+
+taggingRouter.post('/repair-transfers/:id/receive', requirePermission('repair:receive'), async (req: Request, res: Response) => {
+  const { repairCaseIds } = req.body ?? {};
+  if (repairCaseIds !== undefined && (!Array.isArray(repairCaseIds) || repairCaseIds.some((x: unknown) => typeof x !== 'string'))) {
+    return res.status(400).json({ success: false, error: 'repairCaseIds must be a list of ids' });
+  }
+  res.json({ success: true, data: await repair.receiveRepairTransfer(req.params.id, req.tenant!, req.user!.userId, repairCaseIds) });
 });
