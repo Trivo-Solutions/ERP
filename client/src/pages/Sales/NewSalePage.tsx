@@ -579,10 +579,17 @@ export function NewSalePage() {
   };
 
   const [materialSaleOpen, setMaterialSaleOpen] = useState(false);
-  const addMaterialLine = (e: { metal: string; karat: string; weight: number; rate: number }) => {
+  // Grams of each karat already on this invoice as material lines — the dialog's availability shows what is left after them.
+  const materialInCartByKarat: Record<string, number> = {};
+  lines.forEach((l) => {
+    if (l.materialSale && l.karat) materialInCartByKarat[l.karat] = (materialInCartByKarat[l.karat] ?? 0) + Number(l.netGoldWeight) * Number(l.quantity || 1);
+  });
+  // Pieces is descriptive only: `quantity` multiplies the weight on the server, so it stays 1 and the count rides in the description.
+  const addMaterialLine = (e: { metal: string; karat: string; weight: number; pieces: number; rate: number }) => {
     setLines((p) => [...p, {
       key: nextKey(), materialSale: true,
-      productCode: `MAT-${e.karat}`, description: `Loose ${e.metal === 'GOLD' ? 'gold' : 'silver'} ${e.karat}`, karat: e.karat,
+      productCode: `MAT-${e.karat}`, karat: e.karat,
+      description: `Loose ${e.metal === 'GOLD' ? 'gold' : 'silver'} ${e.karat}${e.pieces > 1 ? ` · ${e.pieces} pcs` : ''}`,
       quantity: 1, grossWeight: e.weight, netGoldWeight: e.weight, stoneWeight: 0,
       goldRate: e.rate, makingCharge: 0, wastagePercent: 0, stoneValue: 0,
     }]);
@@ -1716,7 +1723,7 @@ export function NewSalePage() {
         </DialogActions>
       </Dialog>
 
-      <MaterialSaleDialog open={materialSaleOpen} karats={karatList} rateByKarat={latestRateByKarat}
+      <MaterialSaleDialog open={materialSaleOpen} karats={karatList} rateByKarat={latestRateByKarat} inCartByKarat={materialInCartByKarat}
         onClose={() => setMaterialSaleOpen(false)} onAdd={addMaterialLine} />
       <CustomerMismatchDialog open={mismatchOpen && !!pendingEstimate} onCancel={() => setMismatchOpen(false)} onConfirm={() => void confirmEstimate()} />
 
