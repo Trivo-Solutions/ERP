@@ -19,6 +19,7 @@ import { findMakingCharge } from '../../utils/estimateCalc';
 import { EstimateBreakdown, estimateTotals, newRowKey } from './EstimateBreakdown';
 import { CustomerMismatchDialog } from './CustomerMismatchDialog';
 import { isEstimateCustomerMismatch } from '../../utils/estimateCustomer';
+import { MaterialSaleDialog } from './MaterialSaleDialog';
 import { MaterialPricingDialog, MaterialPricingEntry } from './MaterialPricingDialog';
 import { SaleSummary, SaleFigures } from './SaleSummary';
 import { useAuthStore } from '../../store/auth.store';
@@ -37,6 +38,7 @@ interface LineItem {
   key: string;
   tagId?: string;
   tagNumber?: string;
+  materialSale?: boolean; // loose metal sold out of the Metal Vault: no tag, the server consumes vault stock
   productCode: string;
   description: string;
   huid?: string;
@@ -361,6 +363,7 @@ export function NewSalePage() {
     setLines((inv.items ?? []).map((it: any): LineItem => ({
       key: nextKey(), invoiceItemId: it.id, rateType: it.rateType,
       tagId: it.tagId ?? undefined, tagNumber: it.tagId ? it.productCode : undefined,
+      materialSale: it.materialSale || undefined,
       productCode: it.productCode, description: it.description, huid: it.huid ?? undefined, karat: it.karat ?? undefined,
       quantity: Number(it.quantity), grossWeight: Number(it.grossWeight), netGoldWeight: Number(it.netGoldWeight),
       stoneWeight: Number(it.stoneWeight), goldRate: Number(it.goldRate), makingCharge: Number(it.makingCharge),
@@ -573,6 +576,17 @@ export function NewSalePage() {
     setPendingEstimate(null);
     await adoptEstimateCustomer(est);
     if (activeTab === 0 && getValues('clientId') && getValues('branchId')) setActiveTab(1); // straight on to the items
+  };
+
+  const [materialSaleOpen, setMaterialSaleOpen] = useState(false);
+  const addMaterialLine = (e: { metal: string; karat: string; weight: number; rate: number }) => {
+    setLines((p) => [...p, {
+      key: nextKey(), materialSale: true,
+      productCode: `MAT-${e.karat}`, description: `Loose ${e.metal === 'GOLD' ? 'gold' : 'silver'} ${e.karat}`, karat: e.karat,
+      quantity: 1, grossWeight: e.weight, netGoldWeight: e.weight, stoneWeight: 0,
+      goldRate: e.rate, makingCharge: 0, wastagePercent: 0, stoneValue: 0,
+    }]);
+    setMaterialSaleOpen(false);
   };
 
   const addCustomLine = () => {
@@ -813,10 +827,11 @@ export function NewSalePage() {
         // for the line's category (C3) instead of pricing the making charge at zero. wastagePercent
         // stays an always-explicit 0 default — unlike goldRate/makingCharge, a genuine 0% wastage
         // is a common, deliberate value, not a "field left blank" signal.
-        makingCharge: l.invoiceItemId ? Number(l.makingCharge) : Number(l.makingCharge) || undefined,
+        makingCharge: l.invoiceItemId || l.materialSale ? Number(l.makingCharge) : Number(l.makingCharge) || undefined,
         wastagePercent: Number(l.wastagePercent) || 0,
         stoneValue: Number(l.stoneValue) || 0,
         tagId: l.tagId,
+        ...(l.materialSale && { materialSale: true }),
         categoryId: l.categoryId || undefined,
         hsnCode: l.hsnCode || undefined,
         salesPersonId: l.salesPersonId || undefined,
@@ -1084,6 +1099,7 @@ export function NewSalePage() {
                       </Grid>
                       <Grid item xs={4} sx={{ display: 'flex', alignItems: 'center' }}>
                         <Button variant="outlined" startIcon={<Add />} onClick={addCustomLine} sx={{ whiteSpace: 'nowrap' }}>Add custom line</Button>
+                        <Button variant="outlined" startIcon={<Add />} onClick={() => setMaterialSaleOpen(true)} sx={{ whiteSpace: 'nowrap', ml: 1 }}>Material Sale</Button>
                       </Grid>
 
 
@@ -1126,13 +1142,18 @@ export function NewSalePage() {
                                             <Button size="small" sx={{ p: 0, minWidth: 0, fontSize: 11 }} disabled={matLoading} onClick={() => void openMaterials(l.key)}>Materials (F4)</Button>
                                           )}
                                         </Box>
+                                      ) : l.materialSale ? (
+                                        <Box>
+                                          <Chip size="small" color="info" label="Material" sx={{ height: 18, fontSize: 10 }} />
+                                          <Typography variant="body2" color="text.secondary" noWrap title={l.description}>{l.description}</Typography>
+                                        </Box>
                                       ) : (
                                         <TextField size="small" fullWidth placeholder="Description" value={l.description} disabled={isLocked(l)}
                                           onChange={(e) => updateLine(l.key, 'description', e.target.value)} />
                                       )}
                                     </TableCell>
                                     <TableCell>
-                                      {l.tagId ? (
+                                      {l.tagId || l.materialSale ? (
                                         <Typography variant="body2">{l.categoryName ?? '—'}</Typography>
                                       ) : (
                                         <TextField size="small" select fullWidth value={l.categoryId ?? ''} disabled={isLocked(l)}
@@ -1149,7 +1170,7 @@ export function NewSalePage() {
                                       )}
                                     </TableCell>
                                     <TableCell align="right">
-                                      {l.tagId ? <Typography component="span" variant="body2" sx={{ fontFamily: 'monospace' }}>{Number(l.netGoldWeight).toFixed(3)}</Typography> : (
+                                      {l.tagId || l.materialSale ? <Typography component="span" variant="body2" sx={{ fontFamily: 'monospace' }}>{Number(l.netGoldWeight).toFixed(3)}</Typography> : (
                                         <TextField size="small" fullWidth type="number" value={l.netGoldWeight} disabled={isLocked(l)}
                                           inputProps={{ step: 0.001, min: 0, style: { textAlign: 'right', width: 50 } }}
                                           onChange={(e) => updateLine(l.key, 'netGoldWeight', Number(e.target.value))} />
@@ -1176,23 +1197,23 @@ export function NewSalePage() {
                                         onChange={(e) => updateLine(l.key, 'goldRate', Number(e.target.value))} />
                                     </TableCell>
                                     <TableCell align="right">
-                                      <TextField size="small" fullWidth type="number" value={l.makingCharge} disabled={isLocked(l) || l.rateType === 'FIXED'}
+                                      <TextField size="small" fullWidth type="number" value={l.makingCharge} disabled={isLocked(l) || l.rateType === 'FIXED' || !!l.materialSale}
                                         inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right' } }}
                                         onChange={(e) => updateLine(l.key, 'makingCharge', Number(e.target.value))} />
                                     </TableCell>
                                     <TableCell align="right">
-                                      <TextField size="small" fullWidth type="number" value={l.wastagePercent} disabled={isLocked(l) || l.rateType === 'FIXED'}
+                                      <TextField size="small" fullWidth type="number" value={l.wastagePercent} disabled={isLocked(l) || l.rateType === 'FIXED' || !!l.materialSale}
                                         inputProps={{ step: 0.1, min: 0, style: { textAlign: 'right' } }}
                                         onChange={(e) => updateLine(l.key, 'wastagePercent', Number(e.target.value))} />
                                     </TableCell>
                                     <TableCell align="right">
-                                      <TextField size="small" fullWidth type="number" value={l.stoneValue} disabled={isLocked(l) || l.rateType === 'FIXED'}
+                                      <TextField size="small" fullWidth type="number" value={l.stoneValue} disabled={isLocked(l) || l.rateType === 'FIXED' || !!l.materialSale}
                                         inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right' } }}
                                         onChange={(e) => updateLine(l.key, 'stoneValue', Number(e.target.value))} />
                                     </TableCell>
                                     </>)}
                                     <TableCell align="right">
-                                      <TextField size="small" fullWidth type="number" value={l.quantity} disabled={!!l.estimate || isLocked(l)}
+                                      <TextField size="small" fullWidth type="number" value={l.quantity} disabled={!!l.estimate || !!l.materialSale || isLocked(l)}
                                         inputProps={{ step: 1, min: 1, style: { textAlign: 'right' } }}
                                         onChange={(e) => updateLine(l.key, 'quantity', Number(e.target.value))} />
                                     </TableCell>
@@ -1695,6 +1716,8 @@ export function NewSalePage() {
         </DialogActions>
       </Dialog>
 
+      <MaterialSaleDialog open={materialSaleOpen} karats={karatList} rateByKarat={latestRateByKarat}
+        onClose={() => setMaterialSaleOpen(false)} onAdd={addMaterialLine} />
       <CustomerMismatchDialog open={mismatchOpen && !!pendingEstimate} onCancel={() => setMismatchOpen(false)} onConfirm={() => void confirmEstimate()} />
 
       {matSession && (

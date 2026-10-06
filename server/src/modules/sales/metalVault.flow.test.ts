@@ -250,6 +250,18 @@ describe('Metal Vault / tag stock movements', () => {
       expect(await vaultTotal()).toBeCloseTo(6);
     });
 
+    it('a mixed bill (tagged + material, rate edited) is priced by the server: weight x rate, tag sold, vault drawn', async () => {
+      const tag = await makeTag();
+      const inv = await invoiceFor({ items: [taggedLine(tag.id), materialLine(2.5, { goldRate: 5200 })] });
+
+      const mat = inv.items.find((i) => i.materialSale)!;
+      expect(Number(mat.totalPrice)).toBeCloseTo(2.5 * 5200);
+      expect(Number(inv.subtotal)).toBeCloseTo(48000 + 2.5 * 5200);
+      expect((await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } })).status).toBe('SOLD');
+      expect(inv.items.find((i) => i.tagId)!.materialSale).toBe(false);
+      expect(await vaultTotal()).toBeCloseTo(7.5);
+    });
+
     it('rejects a material line without a karat or a weight', async () => {
       await expect(invoiceFor({ items: [materialLine(4, { karat: undefined })] })).rejects.toMatchObject({ statusCode: 400 });
       await expect(invoiceFor({ items: [materialLine(0)] })).rejects.toMatchObject({ statusCode: 400 });
