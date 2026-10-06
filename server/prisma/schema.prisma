@@ -2184,8 +2184,21 @@ model OldGoldExchange {
   reversedById     String?
   reversedBy       User?       @relation("ExchangeReversedBy", fields: [reversedById], references: [id])
   reversalReason   String?
+  // Material Purchase (non-tagged old gold bought over the counter at a TESTED purity, valued off the 24K Old Gold
+  // rate). All null on a plain exchange; testedPurityPercent being set is what marks a row as a Material Purchase.
+  // Snapshots — a later rate change never reprices a past purchase. ratePerGram above = effectivePurchaseRate and
+  // valuedAmount = the purchase value, so every existing reader (ledger, reversal) keeps working unchanged.
+  metalType             String?
+  testedPurityPercent   Decimal? @db.Decimal(7, 4)
+  fineWeight            Decimal? @db.Decimal(12, 4)
+  baseRate24K           Decimal? @db.Decimal(12, 4)
+  effectivePurchaseRate Decimal? @db.Decimal(12, 4)
+  createdById           String?
+  // Replay guard: one dialog-open = one key; the same key can never book a second purchase.
+  idempotencyKey        String?
 
   @@unique([companyId, exchangeNumber])
+  @@unique([companyId, idempotencyKey])
   @@index([companyId])
   @@index([tagId])
   @@map("old_gold_exchanges")

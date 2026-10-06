@@ -9,6 +9,7 @@ import { useSnackbar } from 'notistack';
 import { apiGet, apiPost } from '../../api/client';
 import { PageHeader } from '../../components/common/PageHeader';
 import { useAuthStore } from '../../store/auth.store';
+import { MaterialPurchaseDialog } from './MaterialPurchaseDialog';
 
 function fmt(n: number) {
   return '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
@@ -28,6 +29,7 @@ export function OldGoldExchange() {
   // sales:view route guard (see pageRoutes.tsx / navItems.tsx).
   const canRecord = useAuthStore((s) => s.hasPermission('invoice:create'));
   const [form, setForm] = useState(EMPTY);
+  const [purchaseOpen, setPurchaseOpen] = useState(false);
 
   const set = (field: keyof typeof EMPTY, value: string) => setForm((p) => ({ ...p, [field]: value }));
 
@@ -47,6 +49,9 @@ export function OldGoldExchange() {
     queryKey: ['old-gold-exchanges'], queryFn: () => apiGet<any[]>('/sales/exchanges'),
   });
   const exchanges: any[] = exchangesData ?? [];
+
+  const { data: purchasesData } = useQuery({ queryKey: ['material-purchases'], queryFn: () => apiGet<any[]>('/sales/material-purchases') });
+  const purchases: any[] = (purchasesData as any)?.data ?? purchasesData ?? [];
 
   const grossWeight = Number(form.grossWeight) || 0;
   const stoneWeight = Number(form.stoneWeight) || 0;
@@ -77,7 +82,10 @@ export function OldGoldExchange() {
 
   return (
     <Box>
-      <PageHeader title="Old Gold Exchange" />
+      <PageHeader title="Old Gold Exchange" actions={canRecord ? [
+        { label: 'Purchase Old Gold / Material', icon: <Savings />, onClick: () => setPurchaseOpen(true) },
+      ] : undefined} />
+      <MaterialPurchaseDialog open={purchaseOpen} onClose={() => setPurchaseOpen(false)} />
 
       <Card sx={{ mb: 2 }}>
         <CardContent>
@@ -179,6 +187,53 @@ export function OldGoldExchange() {
               ))}
               {exchanges.length === 0 && (
                 <TableRow><TableCell colSpan={7} align="center" sx={{ py: 4 }}>No old gold exchanges yet</TableCell></TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </Box>
+      </Card>
+
+      <Typography variant="h6" sx={{ mt: 3, mb: 1 }}>Material Purchases</Typography>
+      <Card>
+        <Box sx={{ overflowX: 'auto' }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Purchase #</TableCell>
+                <TableCell>Date / Time</TableCell>
+                <TableCell>Customer</TableCell>
+                <TableCell>Branch</TableCell>
+                <TableCell>Material</TableCell>
+                <TableCell align="right">Gross (g)</TableCell>
+                <TableCell align="right">Purity %</TableCell>
+                <TableCell align="right">Fine (g)</TableCell>
+                <TableCell align="right">24K OG Rate</TableCell>
+                <TableCell align="right">Effective Rate</TableCell>
+                <TableCell align="right">Purchase Value</TableCell>
+                <TableCell>By</TableCell>
+                <TableCell>Credit</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {purchases.map((x: any) => (
+                <TableRow key={x.id} hover>
+                  <TableCell sx={{ fontFamily: 'monospace', fontWeight: 700, fontSize: 12 }}>{x.exchangeNumber}</TableCell>
+                  <TableCell sx={{ fontSize: 12 }}>{new Date(x.createdAt).toLocaleString('en-IN')}</TableCell>
+                  <TableCell>{x.client?.name}</TableCell>
+                  <TableCell>{x.branch?.name}</TableCell>
+                  <TableCell>{x.metalType}</TableCell>
+                  <TableCell align="right" sx={{ fontFamily: 'monospace' }}>{Number(x.grossWeight).toFixed(3)}</TableCell>
+                  <TableCell align="right" sx={{ fontFamily: 'monospace' }}>{Number(x.testedPurityPercent).toFixed(2)}</TableCell>
+                  <TableCell align="right" sx={{ fontFamily: 'monospace' }}>{Number(x.fineWeight).toFixed(4)}</TableCell>
+                  <TableCell align="right" sx={{ fontFamily: 'monospace' }}>{fmt(Number(x.baseRate24K))}</TableCell>
+                  <TableCell align="right" sx={{ fontFamily: 'monospace' }}>{fmt(Number(x.effectivePurchaseRate))}</TableCell>
+                  <TableCell align="right" sx={{ fontFamily: 'monospace', fontWeight: 700 }}>{fmt(Number(x.valuedAmount))}</TableCell>
+                  <TableCell>{x.createdByName ?? '—'}</TableCell>
+                  <TableCell sx={{ fontFamily: 'monospace', color: 'success.main' }}>{x.reversedAt ? 'Reversed' : fmt(Number(x.creditCreated))}</TableCell>
+                </TableRow>
+              ))}
+              {purchases.length === 0 && (
+                <TableRow><TableCell colSpan={13} align="center" sx={{ py: 4 }}>No material purchases yet</TableCell></TableRow>
               )}
             </TableBody>
           </Table>

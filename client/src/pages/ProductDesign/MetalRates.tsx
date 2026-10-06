@@ -38,15 +38,25 @@ export function MetalRates() {
   useEffect(() => { setEdits({}); setOgEdits({}); setEditing(false); }, [date]);
 
   const startEdit = () => {
-    setEdits(Object.fromEntries(sheet.map((r) => [r.karat, r.ratePerGram != null ? String(Number(r.ratePerGram)) : ''])));
-    setOgEdits(Object.fromEntries(sheet.map((r) => [r.karat, r.ogRatePerGram != null ? String(Number(r.ogRatePerGram)) : ''])));
+    const own = sheet.filter((r) => !r.isDerived);
+    setEdits(Object.fromEntries(own.map((r) => [r.karat, r.ratePerGram != null ? String(Number(r.ratePerGram)) : ''])));
+    setOgEdits(Object.fromEntries(own.map((r) => [r.karat, r.ogRatePerGram != null ? String(Number(r.ogRatePerGram)) : ''])));
     setEditing(true);
   };
   const cancelEdit = () => { setEdits({}); setOgEdits({}); setEditing(false); };
 
   // A row is dirty when its rate or its OG rate differs from what is stored. A row's rate is always sent
   // (the server needs it); a blank OG field means "no OG rate" and is sent as null so it can be cleared.
-  const dirty = sheet.filter((r) => {
+  // Calculated (derived) gold rows are never edited or sent — the server recomputes them from the 24K
+  // rates. While editing, they show a live preview of what the save will produce (display only).
+  const base = sheet.find((r) => !r.isDerived && r.karat === '24K');
+  const preview = (r: any, edited: Record<string, string>, stored: any) => {
+    const typed = edited['24K'];
+    const b = typed !== undefined && typed !== '' ? Number(typed) : null;
+    if (b == null || !(b > 0)) return stored;
+    return Math.round(b * Number(r.purity) * 100) / 100;
+  };
+  const dirty = sheet.filter((r) => !r.isDerived).filter((r) => {
     const v = edits[r.karat] ?? '';
     const og = ogEdits[r.karat] ?? '';
     const rateChanged = v !== '' && Number(v) !== (r.ratePerGram == null ? NaN : Number(r.ratePerGram));
@@ -138,10 +148,15 @@ export function MetalRates() {
                       <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1, fontFamily: 'monospace' }}>
                         {(Number(r.purity) * 100).toFixed(2)}%
                       </Typography>
+                      {r.isDerived && <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>calculated</Typography>}
                     </TableCell>
                     <TableCell align="right" sx={{ fontFamily: 'monospace' }}>
-                      {editing ? (
-                        <TextField size="small" type="number" autoFocus value={edits[r.karat]}
+                      {editing && r.isDerived ? (
+                        <Typography component="span" color="text.secondary" fontFamily="monospace" title="Calculated from the 24K rate">
+                          {preview(r, edits, r.ratePerGram) != null ? fmt(preview(r, edits, r.ratePerGram)) : '—'}
+                        </Typography>
+                      ) : editing ? (
+                        <TextField size="small" type="number" autoFocus={r.karat === base?.karat} value={edits[r.karat] ?? ''}
                           placeholder={r.previousRate != null ? String(Number(r.previousRate)) : ''}
                           onChange={(e) => setEdits((p) => ({ ...p, [r.karat]: e.target.value }))}
                           onWheel={(e) => (e.target as HTMLInputElement).blur()}
@@ -156,7 +171,11 @@ export function MetalRates() {
                       )}
                     </TableCell>
                     <TableCell align="right" sx={{ fontFamily: 'monospace' }}>
-                      {editing ? (
+                      {editing && r.isDerived ? (
+                        <Typography component="span" color="text.secondary" fontFamily="monospace" title="Calculated from the 24K old gold rate">
+                          {preview(r, ogEdits, r.ogRatePerGram) != null ? fmt(preview(r, ogEdits, r.ogRatePerGram)) : '—'}
+                        </Typography>
+                      ) : editing ? (
                         <TextField size="small" type="number" value={ogEdits[r.karat] ?? ''}
                           placeholder={r.previousOgRate != null ? String(Number(r.previousOgRate)) : ''}
                           onChange={(e) => setOgEdits((p) => ({ ...p, [r.karat]: e.target.value }))}

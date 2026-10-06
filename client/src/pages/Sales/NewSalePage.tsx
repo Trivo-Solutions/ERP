@@ -20,6 +20,7 @@ import { EstimateBreakdown, estimateTotals, newRowKey } from './EstimateBreakdow
 import { CustomerMismatchDialog } from './CustomerMismatchDialog';
 import { isEstimateCustomerMismatch } from '../../utils/estimateCustomer';
 import { MaterialSaleDialog } from './MaterialSaleDialog';
+import { MaterialPurchaseDialog } from './MaterialPurchaseDialog';
 import { MaterialPricingDialog, MaterialPricingEntry } from './MaterialPricingDialog';
 import { SaleSummary, SaleFigures } from './SaleSummary';
 import { useAuthStore } from '../../store/auth.store';
@@ -579,6 +580,9 @@ export function NewSalePage() {
   };
 
   const [materialSaleOpen, setMaterialSaleOpen] = useState(false);
+  // Metal = buy the customer's old gold (a Material Purchase) and get Store Credit back; the split that asked for it is
+  // turned into a Store Credit split once the purchase is recorded.
+  const [materialPurchase, setMaterialPurchase] = useState<{ open: boolean; splitKey: string | null }>({ open: false, splitKey: null });
   // Grams of each karat already on this invoice as material lines — the dialog's availability shows what is left after them.
   const materialInCartByKarat: Record<string, number> = {};
   lines.forEach((l) => {
@@ -700,6 +704,10 @@ export function NewSalePage() {
 
   // Picking a mode. Store Credit pre-fills what the customer can spend, capped at what is still due on the bill.
   const changePaymentMode = (split: PaymentSplit, mode: string) => {
+    if (mode === 'METAL') { // not a payment mode of its own — opens the Material Purchase; credit then pays the bill
+      setMaterialPurchase({ open: true, splitKey: split.key });
+      return;
+    }
     const others = paymentSplits.filter((x) => x.key !== split.key).reduce((s, x) => s + splitAmount(x), 0);
     setPaymentSplits((p) => p.map((s) => (s.key === split.key ? {
       ...s, mode,
@@ -728,6 +736,26 @@ export function NewSalePage() {
         key: nextPayKey(), paymentDate: new Date().toISOString().split('T')[0], amount: use, mode: 'STORE_CREDIT',
         referenceNo: '', notes: '', og: { description: 'Old gold', karat: '', gross: '', stone: '', deduction: '' },
       }];
+    });
+  };
+
+  // After a Metal purchase: re-read the customer's credit (it now includes the purchase) and settle as much of the bill as
+  // it covers with ONE Store Credit split — the same split the Metal choice came from, or a new one. The purchase itself
+  // is already booked exactly once by the server; this only spends the credit it created.
+  const onMaterialPurchased = async (splitKey: string | null) => {
+    let avail = 0;
+    try {
+      const res = await qc.fetchQuery({ queryKey: ['client-credit', selectedClientId], queryFn: () => apiGet<any>(`/sales/clients/${selectedClientId}/credit`), staleTime: 0 });
+      avail = Number(((res as any)?.data ?? res)?.available) || 0;
+    } catch { return; }
+    const used = paymentSplits.filter((x) => x.key !== splitKey && x.mode === 'STORE_CREDIT').reduce((s, x) => s + (Number(x.amount) || 0), 0);
+    const others = paymentSplits.filter((x) => x.key !== splitKey).reduce((s, x) => s + splitAmount(x), 0);
+    const use = Math.round(Math.max(Math.min(avail - used, total - others), 0) * 100) / 100;
+    if (use <= 0) return;
+    setPaymentSplits((prev) => {
+      if (splitKey && prev.some((x) => x.key === splitKey)) return prev.map((x) => (x.key === splitKey ? { ...x, mode: 'STORE_CREDIT', amount: use } : x));
+      return [...prev, { key: nextPayKey(), paymentDate: new Date().toISOString().split('T')[0], amount: use, mode: 'STORE_CREDIT',
+        referenceNo: '', notes: '', og: { description: 'Old gold', karat: '', gross: '', stone: '', deduction: '' } }];
     });
   };
 
@@ -1360,7 +1388,7 @@ export function NewSalePage() {
                                       <SelectField size="small" fullWidth={false} value={p.mode} sx={{ width: 170 }}
                                         onChange={(e) => changePaymentMode(p, e.target.value)}>
                                         {PAYMENT_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-                                        <option value="OLD_GOLD">Old Gold (metal)</option>
+                                        <option value="METAL" disabled={!selectedClientId || !branchId}>Metal — buy old gold → Store Credit</option>
                                         <option value="STORE_CREDIT" disabled={creditAvailable <= 0 && p.mode !== 'STORE_CREDIT'}>
                                           {creditAvailable > 0 ? `Store Credit (${fmt(creditAvailable)})` : 'Store Credit (none)'}
                                         </option>
@@ -1431,9 +1459,15 @@ export function NewSalePage() {
                             </Alert>
                           )}
                           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mt: 1 }}>
-                            <Button size="small" startIcon={<Add />} onClick={() => addPaymentSplit()}>
-                              Add split (e.g. part cash, part UPI)
-                            </Button>
+                            <Stack direction="row" spacing={1}>
+                              <Button size="small" startIcon={<Add />} onClick={() => addPaymentSplit()}>
+                                Add split (e.g. part cash, part UPI)
+                              </Button>
+                              <Button size="small" variant="outlined" disabled={!selectedClientId || !branchId}
+                                onClick={() => setMaterialPurchase({ open: true, splitKey: null })}>
+                                Metal — purchase old gold
+                              </Button>
+                            </Stack>
                             <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
                               Collecting <b>{fmt(paymentSplitsTotal)}</b> of {fmt(total)}
                               {paymentSplitsTotal > total + 0.005 && paymentSplitsTotal - total <= oldGoldTotal + 0.005 ? (
@@ -1723,6 +1757,9 @@ export function NewSalePage() {
         </DialogActions>
       </Dialog>
 
+      <MaterialPurchaseDialog open={materialPurchase.open} clientId={selectedClientId} branchId={branchId}
+        onClose={() => setMaterialPurchase((m) => ({ ...m, open: false }))}
+        onCompleted={() => void onMaterialPurchased(materialPurchase.splitKey)} />
       <MaterialSaleDialog open={materialSaleOpen} karats={karatList} rateByKarat={latestRateByKarat} inCartByKarat={materialInCartByKarat}
         onClose={() => setMaterialSaleOpen(false)} onAdd={addMaterialLine} />
       <CustomerMismatchDialog open={mismatchOpen && !!pendingEstimate} onCancel={() => setMismatchOpen(false)} onConfirm={() => void confirmEstimate()} />

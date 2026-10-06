@@ -1,5 +1,19 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '../config/database';
 import { tenantQuery } from './tenantContext';
+
+// Gold is quoted once a day as a 24K Gold rate and a 24K Old Gold rate; every other active GOLD karat is
+// DERIVED from those two on the server: base x that karat's KaratMaster purity (the master is the source
+// of truth - e.g. 22K = 0.9160, never 22/24). The derived value is stored in MetalRate like any other
+// rate, so every consumer (resolveMetalRate, /rates/latest, ...) keeps reading the same rows, and a later
+// rate change never reprices a past document (they snapshot the rate they used).
+export const GOLD_BASE_KARAT = '24K';
+
+// Same 2-decimal half-up rounding the rest of the money code uses, done in Decimal so there is no
+// float drift (stored column is Decimal(12,4)).
+export function deriveKaratRate(base: Prisma.Decimal.Value, purity: Prisma.Decimal.Value): Prisma.Decimal {
+  return new Prisma.Decimal(base).mul(purity).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+}
 
 // Resolves the daily rate to use for a given karat as of a given date — the latest
 // MetalRate row with date <= the given date (handles gaps: weekends, days nobody

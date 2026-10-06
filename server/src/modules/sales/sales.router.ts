@@ -409,6 +409,29 @@ salesRouter.post('/exchanges', requirePermission('invoice:create'), async (req: 
   res.status(201).json({ success: true, data: exchange });
 });
 
+// Material Purchase — non-tagged old gold bought at a tested purity; creates the customer's Store Credit + a Metal Vault lot.
+salesRouter.get('/material-purchases', requirePermission('sales:view'), async (req: Request, res: Response) => {
+  res.json({
+    success: true,
+    data: await svc.listMaterialPurchases(req.tenant!, {
+      clientId: req.query.clientId as string | undefined,
+      from: parseOptionalDate(req.query.from, 'From date'),
+      to: parseOptionalDate(req.query.to, 'To date'),
+    }),
+  });
+});
+
+salesRouter.post('/material-purchases', requirePermission('invoice:create'), async (req: Request, res: Response) => {
+  const b = req.body ?? {};
+  // Only the physical facts are read: value, fine weight and rates are always the server's own.
+  const purchase = await svc.createMaterialPurchase({
+    clientId: b.clientId, branchId: b.branchId, metalType: b.metalType, grossWeight: b.grossWeight,
+    testedPurityPercent: b.testedPurityPercent, description: b.description, notes: b.notes, idempotencyKey: b.idempotencyKey,
+    ...(b.purchaseDate && { purchaseDate: parseDate(b.purchaseDate, 'Purchase date') }),
+  }, req.tenant!, req.user!.userId);
+  res.status(201).json({ success: true, data: purchase });
+});
+
 // G1 Part F/L — Tax Invoice Templates. view is separate from create/edit (same reasoning as
 // estimateTemplate: printing/resolving a template needs read access, not edit rights on the designer).
 salesRouter.get('/tax-invoice-templates', requirePermission('taxInvoiceTemplate:view'), async (req: Request, res: Response) => {

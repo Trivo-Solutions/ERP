@@ -14,7 +14,7 @@ import { resolveStateCode } from '../../shared/stateMaster';
 import { splitGst } from '../../shared/gstSplit';
 import { normalizeGstUqc } from '../../shared/gstUqc';
 import { createCreditNoteForReturn } from './creditNote.service';
-import { resolveMetalRate } from '../../shared/metalRate';
+import { resolveMetalRate, GOLD_BASE_KARAT } from '../../shared/metalRate';
 import { isValidKarat } from '../../shared/karatMaster';
 import { addMetalStock } from '../inventory/inventory.service';
 import { METAL_MOVEMENT, MetalMovementType, consumeVaultMetal, restoreVaultMetal, insertMetalMovement } from '../../shared/metalMovement';
@@ -328,6 +328,12 @@ export async function createInvoice(data: {
     // to be rejected doesn't flip inventory it'll just have to unwind.
     // Layer 2: clientId is explicitly scoped to ctx.companyId — a Company-B clientId must fail
     // here (404, "not found") exactly like a nonexistent id, not proceed to be billed against.
+    // Spending store credit: lock the customer's row first so the balance below is read, and the credit consumed,
+    // one transaction at a time — a memo conversion / second invoice for the same customer waits here and then sees
+    // the reduced credit (the invoice-number lock alone does not serialise those other writers).
+    if ((data.payments ?? []).some((p) => normalizeMode(p.mode) === PAYMENT_MODE_STORE_CREDIT)) {
+      await tx.$queryRaw`SELECT "id" FROM "clients" WHERE "id" = ${data.clientId} AND "companyId" = ${ctx.companyId} FOR UPDATE`;
+    }
     const client = await tx.client.findUnique({ where: { id: data.clientId } });
     if (!client || client.companyId !== ctx.companyId) {
       throw new AppError('Client not found', 404);
@@ -1914,6 +1920,113 @@ export async function createOldGoldExchange(data: {
   return exchange;
 }
 
+// Material Purchase: NON-TAGGED old gold bought over the counter at a purity the branch has TESTED. Valued off the 24K
+// Old Gold rate (MetalRate.ogRatePerGram of the 24K row), never the normal gold rate and never karat/24:
+//   fine weight = gross x tested purity / 100;  purchase value = fine weight x 24K Old Gold rate.
+// It is an OldGoldExchange row (same ledger entry, same client credit, same Metal Vault lot + CUSTOMER_PURCHASE movement,
+// same reversal path) carrying the tested-purity snapshot — not a parallel model. The server prices it; nothing the
+// client sends about value, fine weight or rate is read.
+export async function createMaterialPurchase(data: {
+  clientId: string;
+  branchId: string;
+  metalType?: string;
+  grossWeight: number;
+  testedPurityPercent: number;
+  description?: string;
+  purchaseDate?: Date;
+  notes?: string;
+  idempotencyKey?: string;
+}, ctx: TenantContext, userId: string) {
+  const metalType = (data.metalType ?? 'GOLD').toUpperCase();
+  if (metalType !== 'GOLD') throw new AppError('Only GOLD material purchases are supported', 400);
+  const gross = Number(data.grossWeight);
+  const purity = Number(data.testedPurityPercent);
+  if (!Number.isFinite(gross) || !(gross > 0)) throw new AppError('Gross weight must be more than zero', 400);
+  if (!Number.isFinite(purity) || !(purity > 0) || purity > 100) throw new AppError('Tested purity must be above 0 and at most 100%', 400);
+  if (data.idempotencyKey !== undefined && (typeof data.idempotencyKey !== 'string' || data.idempotencyKey.length < 8 || data.idempotencyKey.length > 100)) {
+    throw new AppError('idempotencyKey must be a string of 8-100 characters', 400);
+  }
+
+  await assertOwnedByCompany('client', data.clientId, ctx.companyId, 'Client');
+  await assertBranchAccessible(data.branchId, ctx);
+
+  const purchaseDate = data.purchaseDate ?? new Date();
+  const rate = await resolveMetalRate(ctx.companyId, GOLD_BASE_KARAT, purchaseDate);
+  if (!rate || rate.ogRatePerGram == null || !(Number(rate.ogRatePerGram) > 0)) {
+    throw new AppError(`No 24K Old Gold rate found on or before ${purchaseDate.toDateString()} — enter it in Metal Rates first`, 404);
+  }
+  const base = new Prisma.Decimal(rate.ogRatePerGram);
+  const fine = new Prisma.Decimal(gross).mul(purity).div(100).toDecimalPlaces(4, Prisma.Decimal.ROUND_HALF_UP);
+  const value = fine.mul(base).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+  const effective = base.mul(purity).div(100).toDecimalPlaces(4, Prisma.Decimal.ROUND_HALF_UP);
+  if (!(Number(value) > 0)) throw new AppError('This purchase values to nothing — check the weight and purity', 400);
+
+  // The vault lot's karat label: the active GOLD karat whose purity is nearest the tested one (within 1 point), else
+  // the raw percentage. Free text on MetalStock — the tested purity itself is what the lot is valued and stocked at.
+  const golds = await tenantQuery(ctx.companyId, (tx) => tx.karatMaster.findMany({ where: { companyId: ctx.companyId, metalType: 'GOLD', isActive: true } }));
+  const near = golds
+    .map((k) => ({ code: k.code, d: Math.abs(Number(k.purity) * 100 - purity) }))
+    .filter((k) => k.d <= 1)
+    .sort((a, b) => a.d - b.d)[0];
+  const karatLabel = near?.code ?? `${purity}%`;
+
+  const v: OldGoldValuation = {
+    exchangeDate: purchaseDate, stoneWeight: 0, netWeight: gross, purity: purity / 100,
+    ratePerGram: Number(effective), deductionPercent: 0, deductedRate: Number(effective), valuedAmount: Number(value),
+  };
+
+  let exchange;
+  try {
+    exchange = await tenantTransaction(ctx.companyId, async (tx) => {
+      // Lock the customer's row so their credit moves one transaction at a time, then check they are still usable.
+      await tx.$queryRaw`SELECT "id" FROM "clients" WHERE "id" = ${data.clientId} AND "companyId" = ${ctx.companyId} FOR UPDATE`;
+      const client = await tx.client.findFirst({ where: { id: data.clientId, companyId: ctx.companyId } });
+      if (!client) throw new AppError('Client not found', 404);
+      assertClientActive(client);
+      if (data.idempotencyKey) {
+        const dup = await tx.oldGoldExchange.findFirst({ where: { companyId: ctx.companyId, idempotencyKey: data.idempotencyKey }, select: { exchangeNumber: true } });
+        if (dup) throw new AppError(`This material purchase was already recorded (${dup.exchangeNumber})`, 409);
+      }
+      return bookOldGoldExchange(
+        tx, ctx, userId,
+        { clientId: data.clientId, description: data.description?.trim() || `Old gold ${purity}%`, karat: karatLabel, grossWeight: gross, notes: data.notes, branchId: data.branchId },
+        v, METAL_MOVEMENT.CUSTOMER_PURCHASE,
+        {
+          metalType, testedPurityPercent: purity, fineWeight: Number(fine), baseRate24K: Number(base),
+          effectivePurchaseRate: Number(effective), createdById: userId, idempotencyKey: data.idempotencyKey ?? null,
+        },
+      );
+    });
+  } catch (e: any) {
+    if (e?.code === 'P2002' && data.idempotencyKey) throw new AppError('This material purchase was already recorded', 409);
+    throw e;
+  }
+
+  await createAuditEntry('old_gold_exchanges', exchange.id, userId, 'CREATE', undefined, {
+    kind: 'MATERIAL_PURCHASE', grossWeight: gross, testedPurityPercent: purity, fineWeight: Number(fine),
+    baseRate24K: Number(base), purchaseValue: Number(value),
+  } as any, ctx.companyId);
+  return exchange;
+}
+
+// Completed Material Purchases (the rows carrying a tested-purity snapshot), newest first.
+export async function listMaterialPurchases(ctx: TenantContext, filters: { clientId?: string; from?: Date; to?: Date } = {}) {
+  const rows = await tenantQuery(ctx.companyId, (tx) => tx.oldGoldExchange.findMany({
+    where: {
+      companyId: ctx.companyId, testedPurityPercent: { not: null },
+      ...(filters.clientId && { clientId: filters.clientId }),
+      ...((filters.from || filters.to) && { exchangeDate: { ...(filters.from && { gte: filters.from }), ...(filters.to && { lte: filters.to }) } }),
+    },
+    include: { client: { select: { name: true, clientCode: true } }, branch: { select: { name: true } } },
+    orderBy: { exchangeDate: 'desc' },
+    take: 500,
+  }));
+  const ids = [...new Set(rows.map((r) => r.createdById).filter(Boolean) as string[])];
+  const users = ids.length ? await prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } }) : [];
+  const names = new Map(users.map((u) => [u.id, u.name]));
+  return rows.map((r) => ({ ...r, createdByName: r.createdById ? names.get(r.createdById) ?? null : null, creditCreated: r.valuedAmount }));
+}
+
 // The tag a customer hands back for its metal: it must be this company's and currently SOLD (a piece we still hold, or one
 // already on memo/retired, is not the customer's to hand back).
 async function loadTagForBuyback(ctx: TenantContext, tagId: string) {
@@ -1975,6 +2088,11 @@ async function bookOldGoldExchange(
   v: OldGoldValuation,
   // CUSTOMER_PURCHASE for the standalone screen; OLD_GOLD_EXCHANGE when the metal is handed over against a bill.
   movementType: MetalMovementType = METAL_MOVEMENT.CUSTOMER_PURCHASE,
+  // Material Purchase only: the tested-purity valuation snapshot stored on the row (see createMaterialPurchase).
+  snapshot?: {
+    metalType: string; testedPurityPercent: number; fineWeight: number; baseRate24K: number;
+    effectivePurchaseRate: number; createdById: string; idempotencyKey?: string | null;
+  },
 ) {
   const exchangeNumber = await nextDocumentNumber(ctx.companyId, 'OGX', 'OGX', tx, v.exchangeDate.getFullYear());
   const exchangeId = randomUUID();
@@ -2008,6 +2126,7 @@ async function bookOldGoldExchange(
       karat: data.karat, grossWeight: data.grossWeight, stoneWeight: v.stoneWeight, netWeight: v.netWeight,
       ratePerGram: v.ratePerGram, deductionPercent: v.deductionPercent, valuedAmount: v.valuedAmount,
       metalStockId: stock.id, notes: data.notes,
+      ...(snapshot && { ...snapshot, idempotencyKey: snapshot.idempotencyKey ?? null }),
     },
     include: { metalStock: true },
   });

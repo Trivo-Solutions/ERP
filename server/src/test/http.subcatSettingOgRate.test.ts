@@ -52,18 +52,18 @@ describe('HTTP: setting types, OG rate', () => {
   it('rate sheet stores an OG rate, a rate-only re-save keeps it, null clears it, and bad values are 400', async () => {
     const date = '2026-10-03';
     const save = (rates: any[]) => a.post('/designs/rates/batch', { date, rates });
-    const sheetRow = async () => (await a.get(`/designs/rates/sheet?date=${date}`)).body.data.find((r: any) => r.karat === '22K');
+    const sheetRow = async () => (await a.get(`/designs/rates/sheet?date=${date}`)).body.data.find((r: any) => r.karat === '24K');
 
-    expect((await save([{ karat: '22K', ratePerGram: 6500, ogRatePerGram: 6100 }])).status).toBe(200);
+    expect((await save([{ karat: '24K', ratePerGram: 6500, ogRatePerGram: 6100 }])).status).toBe(200);
     expect(Number((await sheetRow()).ogRatePerGram)).toBe(6100);
 
-    expect((await save([{ karat: '22K', ratePerGram: 6550 }])).status).toBe(200);
+    expect((await save([{ karat: '24K', ratePerGram: 6550 }])).status).toBe(200);
     const kept = await sheetRow();
     expect(Number(kept.ratePerGram)).toBe(6550);
     expect(Number(kept.ogRatePerGram)).toBe(6100);
 
-    expect((await save([{ karat: '22K', ratePerGram: 6550, ogRatePerGram: 0 }])).status).toBe(400);
-    expect((await save([{ karat: '22K', ratePerGram: 6550, ogRatePerGram: null }])).status).toBe(200);
+    expect((await save([{ karat: '24K', ratePerGram: 6550, ogRatePerGram: 0 }])).status).toBe(400);
+    expect((await save([{ karat: '24K', ratePerGram: 6550, ogRatePerGram: null }])).status).toBe(200);
     expect((await sheetRow()).ogRatePerGram).toBeNull();
   });
 });
