@@ -72,6 +72,7 @@ import { GstCompliancePage } from './pages/Compliance/GstCompliancePage';
 import { TaxInvoiceTemplatesPage } from './pages/Sales/TaxInvoiceTemplatesPage';
 import { TaxInvoiceTemplateDesignerPage } from './pages/Sales/TaxInvoiceTemplateDesignerPage';
 import { CreditNotesPage } from './pages/Sales/CreditNotesPage';
+import { CustomerAdvances } from './pages/Sales/CustomerAdvances';
 import { CreditNoteTemplatesPage } from './pages/Sales/CreditNoteTemplatesPage';
 
 // Finance
@@ -201,6 +202,7 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="sales/tax-invoice-templates" element={<RequirePermission permission="taxInvoiceTemplate:view"><TaxInvoiceTemplatesPage /></RequirePermission>} />
       <Route path="sales/tax-invoice-templates/designer" element={<RequirePermission permission="taxInvoiceTemplate:view"><TaxInvoiceTemplateDesignerPage /></RequirePermission>} />
       <Route path="sales/credit-notes" element={<RequirePermission permission="creditNote:view"><CreditNotesPage /></RequirePermission>} />
+      <Route path="sales/advances" element={<RequirePermission permission="payment:view"><CustomerAdvances /></RequirePermission>} />
       <Route path="sales/credit-note-templates" element={<RequirePermission permission="creditNoteTemplate:view"><CreditNoteTemplatesPage /></RequirePermission>} />
 
       {/* Finance */}

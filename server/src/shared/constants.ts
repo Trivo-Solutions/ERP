@@ -19,6 +19,9 @@ export const DEFAULT_HSN_CODE = '7113';
 // (client ledger, day book) must skip them, or the same credit is counted twice.
 export const PAYMENT_MODE_OLD_GOLD = 'OLD_GOLD';       // customer's old metal, valued and melted in on this very bill
 export const PAYMENT_MODE_STORE_CREDIT = 'STORE_CREDIT'; // credit already on the customer's account (return / earlier exchange)
+// Customer Advance (money received before the bill, held in ledger 2400) applied to an invoice. Unlike the two
+// modes above it is NOT a CREDIT_SETTLEMENT_MODE: it moves the receivable (Dr 2400 / Cr AR) like a receipt.
+export const PAYMENT_MODE_CUSTOMER_ADVANCE = 'CUSTOMER_ADVANCE';
 export const CREDIT_SETTLEMENT_MODES: string[] = [PAYMENT_MODE_OLD_GOLD, PAYMENT_MODE_STORE_CREDIT];
 
 // ─── Returned-jewellery pipeline (sale return → HO inspection → repair → stock / melt / retag) ───

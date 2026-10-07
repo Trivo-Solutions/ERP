@@ -6,7 +6,7 @@ import { priceMaterialBreakdown } from '../../shared/materialBreakdown';
 import { createAuditEntry } from '../../middleware/audit';
 import { emit } from '../../shared/websocket';
 import {
-  DEFAULT_HSN_CODE, CREDIT_SETTLEMENT_MODES, PAYMENT_MODE_OLD_GOLD, PAYMENT_MODE_STORE_CREDIT,
+  DEFAULT_HSN_CODE, CREDIT_SETTLEMENT_MODES, PAYMENT_MODE_OLD_GOLD, PAYMENT_MODE_STORE_CREDIT, PAYMENT_MODE_CUSTOMER_ADVANCE,
   TAG_STATUS_RETURNED_PENDING_INSPECTION, REPAIR_STATUS, REPAIR_LOCATION,
 } from '../../shared/constants';
 import { assertPanIfRequired, assertCashLimit } from '../../shared/compliance';
@@ -19,6 +19,7 @@ import { isValidKarat } from '../../shared/karatMaster';
 import { addMetalStock } from '../inventory/inventory.service';
 import { METAL_MOVEMENT, MetalMovementType, consumeVaultMetal, restoreVaultMetal, insertMetalMovement } from '../../shared/metalMovement';
 import { postAutoJournalEntry } from '../finance/finance.service';
+import { lockAdvances, loadSpendableAdvance, recordAdvanceApplication, releaseAdvanceApplication } from './customerAdvanceApply';
 import { LEDGER_ACCOUNT, cashOrBankAccount } from '../../shared/ledgerAccounts';
 import { nextDocumentNumber, gstFinancialYear } from '../../shared/numberSequence';
 import { TenantContext, tenantTransaction, tenantQuery, tenantBatch } from '../../shared/tenantContext';
@@ -36,6 +37,8 @@ type PaymentInput = {
   referenceNo?: string; forexRate?: number; notes?: string;
   /** Required when mode is OLD_GOLD; `amount` is then ignored — the server values the metal itself. */
   oldGold?: OldGoldInput;
+  /** Required when mode is CUSTOMER_ADVANCE: which advance of this customer pays `amount`. */
+  advanceId?: string;
 };
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -44,6 +47,9 @@ const normalizeMode = (mode: string) => mode.trim().toUpperCase();
 // OLD_GOLD / STORE_CREDIT only exist inside createInvoice (they settle a bill from credit); a standalone
 // "record a payment" has no such thing to draw on, so it must not accept them.
 function assertReceiptMode(mode: string) {
+  if (normalizeMode(mode) === PAYMENT_MODE_CUSTOMER_ADVANCE) {
+    throw new AppError('A customer advance is applied from the Customer Advances screen or while creating an invoice, not as a plain receipt', 400);
+  }
   if (CREDIT_SETTLEMENT_MODES.includes(normalizeMode(mode))) {
     throw new AppError(`${mode} can only be used while creating an invoice`, 400);
   }
@@ -321,6 +327,12 @@ export async function createInvoice(data: {
     }
   }
 
+  const advancePayments = (data.payments ?? []).filter((p) => normalizeMode(p.mode) === PAYMENT_MODE_CUSTOMER_ADVANCE);
+  if (advancePayments.length > 0 && currency !== 'INR') throw new AppError('Customer advances can only be applied to a rupee invoice', 400);
+  for (const p of advancePayments) {
+    if (typeof p.amount !== 'number' || !(p.amount > 0) || Math.abs(p.amount * 100 - Math.round(p.amount * 100)) > 1e-6) throw new AppError('Customer advance amount must be positive with at most 2 decimal places', 400);
+  }
+
   const invoice = await tenantTransaction(ctx.companyId, async (tx) => {
     const invoiceNumber = await nextDocumentNumber(ctx.companyId, 'INV', 'INV', tx, gstFinancialYear(data.invoiceDate));
 
@@ -339,7 +351,23 @@ export async function createInvoice(data: {
       throw new AppError('Client not found', 404);
     }
     assertClientActive(client);
-    checkCreditLimit(client, totalAmount);
+    // Customer advances settle part of this bill straight away, so they count toward the credit-limit test: the
+    // exposure that is left is the bill minus what the advances pay. Locked and validated here, before any tag is
+    // touched, from the server's own rows — never a client-supplied balance.
+    let advanceCover = 0;
+    if (advancePayments.length > 0) {
+      await lockAdvances(tx, ctx.companyId, advancePayments.map((p) => p.advanceId as string));
+      const drawn = new Map<string, number>();
+      for (const p of advancePayments) {
+        const { remaining } = await loadSpendableAdvance(tx, ctx.companyId, p.advanceId, data.clientId);
+        const used = round2((drawn.get(p.advanceId!) ?? 0) + p.amount);
+        if (used > remaining + 0.005) throw new AppError(`Advance has only ${remaining.toFixed(2)} available; ${used.toFixed(2)} was asked for`, 409);
+        drawn.set(p.advanceId!, used);
+        advanceCover += p.amount;
+      }
+      if (advanceCover > totalAmount + 0.005) throw new AppError('Customer advances applied are more than the bill total', 400);
+    }
+    checkCreditLimit(client, round2(totalAmount - advanceCover));
     // Credit the customer already holds, read BEFORE this invoice's own debit below. Negative currentBalance =
     // money we owe them (from a return, or an earlier exchange). No row lock is needed to spend it safely: the
     // INV number just taken above locks this company's invoice-number row until commit, so two invoices can
@@ -552,6 +580,11 @@ export async function createInvoice(data: {
           }
           creditAvailable -= p.amount;
           result = await applyPayment(tx, ctx.companyId, runningInvoice, p, userId, { fromCredit: true });
+        } else if (mode === PAYMENT_MODE_CUSTOMER_ADVANCE) {
+          if (p.amount > remaining + 0.005) {
+            throw new AppError(`Customer advance of ${p.amount} is more than the ${round2(remaining)} still due on this bill`, 400);
+          }
+          result = await applyPayment(tx, ctx.companyId, runningInvoice, p, userId, { advanceId: p.advanceId });
         } else {
           result = await applyPayment(tx, ctx.companyId, runningInvoice, p, userId);
         }
@@ -1291,7 +1324,7 @@ export async function voidInvoice(invoiceId: string, ctx: TenantContext, userId:
 // optional inline payment (bill-and-collect in one screen). Both must apply a payment to an
 // invoice + client balance identically — duplicating this math in two places is exactly how the
 // A1 currency bug happened (two code paths computing the same thing, silently drifting apart).
-async function applyPayment(
+export async function applyPayment(
   tx: Prisma.TransactionClient,
   companyId: string,
   invoice: { id: string; clientId: string; paidAmount: unknown; totalAmount: unknown; exchangeRate: unknown },
@@ -1301,7 +1334,8 @@ async function applyPayment(
   // booked, or store credit from a return) — the row and the invoice's paid/due figures are written as for
   // any payment, but no cash came in, so there is no journal and the client's balance is left alone (the
   // credit was booked in the ledger and on the balance when it arose; the sale's debit already netted it).
-  opts: { fromCredit?: boolean } = {},
+  // advanceId: settled from a Customer Advance (ledger 2400) — see the branches below.
+  opts: { fromCredit?: boolean; advanceId?: string; idempotencyKey?: string } = {},
 ) {
   const forexGainLoss = data.forexRate
     ? (Number(invoice.exchangeRate) - data.forexRate) * data.amount
@@ -1309,7 +1343,12 @@ async function applyPayment(
 
   // Sec 269ST — before anything is written. Earlier splits of the same sale are already in the table
   // (same transaction), so a bill-and-collect with several CASH splits is aggregated correctly.
-  if (!opts.fromCredit) await assertCashLimit(tx, companyId, invoice.clientId, data);
+  if (!opts.fromCredit && !opts.advanceId) await assertCashLimit(tx, companyId, invoice.clientId, data);
+  // The advance being spent: must be the invoice customer's own, unreversed, with enough left (rows locked by the caller).
+  const advance = opts.advanceId ? await loadSpendableAdvance(tx, companyId, opts.advanceId, invoice.clientId) : null;
+  if (advance && round2(data.amount) > advance.remaining + 0.005) {
+    throw new AppError(`Advance ${advance.adv.advanceNumber} has only ${advance.remaining.toFixed(2)} available; ${data.amount.toFixed(2)} was asked for`, 409);
+  }
 
   const newPaid = Number(invoice.paidAmount) + data.amount;
   const newBalance = Number(invoice.totalAmount) - newPaid;
@@ -1319,10 +1358,16 @@ async function applyPayment(
     data: {
       companyId, paymentNumber, invoiceId: invoice.id, clientId: invoice.clientId,
       paymentDate: data.paymentDate, amount: data.amount,
-      mode: data.mode, referenceNo: data.referenceNo, notes: data.notes,
+      mode: advance ? PAYMENT_MODE_CUSTOMER_ADVANCE : data.mode, referenceNo: advance ? advance.adv.advanceNumber : data.referenceNo, notes: data.notes,
       forexRate: data.forexRate, forexGainLoss: forexGainLoss || null,
     },
   });
+  if (advance) {
+    await recordAdvanceApplication(tx, {
+      companyId, advanceId: advance.adv.id, clientId: invoice.clientId, invoiceId: invoice.id, invoicePaymentId: payment.id,
+      amount: data.amount, appliedById: userId, idempotencyKey: opts.idempotencyKey,
+    });
+  }
 
   await tx.salesInvoice.update({
     where: { id: invoice.id },
@@ -1333,7 +1378,20 @@ async function applyPayment(
     },
   });
 
-  if (!opts.fromCredit) {
+  if (advance) {
+    // Money was booked as a liability when the advance was received (Dr Cash / Cr 2400). Applying it only moves
+    // that liability onto this bill: Dr 2400 / Cr AR. No revenue, GST, inventory — the sale posted those. The
+    // customer's receivable balance falls by the same amount a receipt would take off it.
+    await postAutoJournalEntry(tx, companyId, {
+      date: data.paymentDate, description: `Customer advance ${advance.adv.advanceNumber} applied (${payment.paymentNumber})`,
+      referenceType: 'InvoicePayment', referenceId: payment.id, userId,
+      lines: [
+        { accountCode: LEDGER_ACCOUNT.CUSTOMER_ADVANCES, debit: data.amount },
+        { accountCode: LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE, credit: data.amount },
+      ],
+    });
+    await tx.client.update({ where: { id: invoice.clientId }, data: { currentBalance: { decrement: data.amount } } });
+  } else if (!opts.fromCredit) {
     // F1: cash/bank in, receivable down — the ledger mirror of the currentBalance decrement below.
     // Forex gain/loss (when this payment's rate differs from the invoice's) isn't journaled yet —
     // same "recorded but not yet fully wired" boundary as other deferred items (see D1/D3 notes);
@@ -1443,7 +1501,21 @@ export async function reverseInvoicePayment(paymentId: string, ctx: TenantContex
     let exchangeSnapshot: Record<string, unknown> | null = null;
     let metalStockAudit: { id: string; before: Record<string, unknown>; after: Record<string, unknown> } | null = null;
 
-    if (!CREDIT_SETTLEMENT_MODES.includes(mode)) {
+    let advanceRelease: Awaited<ReturnType<typeof releaseAdvanceApplication>> | null = null;
+    if (mode === PAYMENT_MODE_CUSTOMER_ADVANCE) {
+      // The application is released and the advance's available amount restored; the ORIGINAL advance receipt
+      // (Dr Cash / Cr 2400) is not touched. Exact inverse of applyPayment's advance branch.
+      advanceRelease = await releaseAdvanceApplication(tx, ctx.companyId, payment.id, userId, reason);
+      await postAutoJournalEntry(tx, ctx.companyId, {
+        date: new Date(), description: `Reversal of customer advance application ${payment.paymentNumber}`,
+        referenceType: 'InvoicePaymentReversal', referenceId: payment.id, userId,
+        lines: [
+          { accountCode: LEDGER_ACCOUNT.ACCOUNTS_RECEIVABLE, debit: amount },
+          { accountCode: LEDGER_ACCOUNT.CUSTOMER_ADVANCES, credit: amount },
+        ],
+      });
+      await tx.client.update({ where: { id: payment.clientId }, data: { currentBalance: { increment: amount } } });
+    } else if (!CREDIT_SETTLEMENT_MODES.includes(mode)) {
       // Real cash/bank/UPI/card receipt — exact inverse of applyPayment's non-credit branch.
       await postAutoJournalEntry(tx, ctx.companyId, {
         date: new Date(), description: `Reversal of payment ${payment.paymentNumber}`,
@@ -1534,7 +1606,7 @@ export async function reverseInvoicePayment(paymentId: string, ctx: TenantContex
     // above, for every mode) is the whole of it for this mode; no currentBalance/journal/exchange
     // movement was ever made for a STORE_CREDIT-mode payment to begin with.
 
-    return { payment, invoiceBefore, invoiceAfter, exchangeReversal, exchangeSnapshot, metalStockAudit };
+    return { payment, invoiceBefore, invoiceAfter, exchangeReversal, exchangeSnapshot, metalStockAudit, advanceRelease };
   });
 
   // Every createAuditEntry call below runs AFTER the transaction has committed — it writes via its
@@ -1546,6 +1618,15 @@ export async function reverseInvoicePayment(paymentId: string, ctx: TenantContex
     { reversedAt: new Date().toISOString(), reason, invoice: result.invoiceAfter, exchangeReversed: result.exchangeReversal },
     ctx.companyId,
   );
+  if (result.advanceRelease) {
+    const r = result.advanceRelease;
+    await createAuditEntry(
+      'customer_advances', r.advance.id, userId, 'REVERSE_APPLICATION',
+      { advanceNumber: r.advance.advanceNumber, appliedAmount: r.appliedBefore, invoicePaymentId: result.payment.id },
+      { appliedAmount: r.appliedAfter, applicationId: r.app.id, amountReleased: Number(r.app.amount), reason },
+      ctx.companyId,
+    );
+  }
   if (result.exchangeReversal) {
     await createAuditEntry(
       'old_gold_exchanges', result.exchangeReversal.id, userId, 'REVERSE',

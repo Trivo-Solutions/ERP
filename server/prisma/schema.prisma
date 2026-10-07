@@ -116,6 +116,8 @@ model Company {
   suppliers                 Supplier[]
   metalStocks               MetalStock[]
   metalStockMovements       MetalStockMovement[]
+  customerAdvances          CustomerAdvance[]
+  customerAdvanceApplications CustomerAdvanceApplication[]
   stoneLots                 StoneLot[]
   stoneLotSplits            StoneLotSplit[]
   consumables               Consumable[]
@@ -730,6 +732,10 @@ model User {
   invoicesVoided               SalesInvoice[]         @relation("InvoiceVoidedBy")
   paymentsReversed             InvoicePayment[]       @relation("PaymentReversedBy")
   exchangesReversed            OldGoldExchange[]      @relation("ExchangeReversedBy")
+  advancesCreated              CustomerAdvance[]      @relation("AdvanceCreatedBy")
+  advancesReversed             CustomerAdvance[]      @relation("AdvanceReversedBy")
+  advanceApplicationsMade      CustomerAdvanceApplication[] @relation("AdvanceAppliedBy")
+  advanceApplicationsReversed  CustomerAdvanceApplication[] @relation("AdvanceApplicationReversedBy")
   // G2a
   creditNotesCreated           CreditNote[]           @relation("CreditNoteCreatedBy")
   creditNotesCancelled         CreditNote[]           @relation("CreditNoteCancelledBy")
@@ -2338,6 +2344,7 @@ model Client {
   salesReturns     SalesReturn[]
   oldGoldExchanges OldGoldExchange[]
   payments         InvoicePayment[]
+  customerAdvances CustomerAdvance[]
   repairJobs       RepairJob[]
   manufacturedTags JewelryTag[]
   creditNotes      CreditNote[]
@@ -2877,6 +2884,7 @@ model Branch {
   memoOuts            MemoOut[]
   oldGoldExchanges    OldGoldExchange[]
   metalStockMovements MetalStockMovement[]
+  customerAdvances    CustomerAdvance[]
   taxInvoiceTemplates TaxInvoiceTemplate[]
   creditNoteTemplates CreditNoteTemplate[]
   debitNoteTemplates  DebitNoteTemplate[]
@@ -3687,6 +3695,7 @@ model SalesInvoice {
   billedEstimates TagEstimate[]
   exportDocs      ExportDocument[]
   payments        InvoicePayment[]
+  advanceApplications CustomerAdvanceApplication[]
   returns         SalesReturn[]
   repairJob       RepairJob?
   creditNotes     CreditNote[]
@@ -3833,10 +3842,89 @@ model InvoicePayment {
   reversedById   String?
   reversedBy     User?         @relation("PaymentReversedBy", fields: [reversedById], references: [id])
   reversalReason String?
+  // Customer Advances: set when this payment was settled from a customer advance.
+  advanceApplications CustomerAdvanceApplication[] // at most one (invoicePaymentId is unique)
 
   @@unique([companyId, paymentNumber])
+  // Composite-FK target so an advance application can only point at a payment of the SAME customer and company.
+  @@unique([id, clientId, companyId])
   @@index([companyId])
   @@map("invoice_payments")
+}
+
+// Customer Advance (Phase 1: schema only). Money a customer pays BEFORE any invoice, held as a LIABILITY
+// (ledger 2400 Customer Advances) — deliberately separate from the F2 on-account payment / Store Credit
+// mechanism (Client.currentBalance), which is unchanged. Originates at one branch; may be applied at another.
+// Guarded by DB CHECK constraints (see the migration): amount > 0, appliedAmount >= 0, refundedAmount >= 0,
+// appliedAmount + refundedAmount <= amount. Refund is V2 (column only).
+model CustomerAdvance {
+  id             String    @id @default(cuid())
+  companyId      String
+  company        Company   @relation(fields: [companyId], references: [id])
+  branchId       String
+  branch         Branch    @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  clientId       String
+  client         Client    @relation(fields: [clientId, companyId], references: [id, companyId], onDelete: Restrict)
+  advanceNumber  String
+  advanceDate    DateTime
+  amount         Decimal   @db.Decimal(12, 2)
+  appliedAmount  Decimal   @default(0) @db.Decimal(12, 2)
+  refundedAmount Decimal   @default(0) @db.Decimal(12, 2)
+  mode           String
+  referenceNo    String?
+  notes          String?
+  createdById    String
+  createdBy      User      @relation("AdvanceCreatedBy", fields: [createdById], references: [id])
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  idempotencyKey String?
+  reversedAt     DateTime?
+  reversedById   String?
+  reversedBy     User?     @relation("AdvanceReversedBy", fields: [reversedById], references: [id])
+  reversalReason String?
+
+  applications CustomerAdvanceApplication[]
+
+  @@unique([companyId, advanceNumber])
+  @@unique([companyId, idempotencyKey])
+  @@unique([id, companyId])
+  // Composite-FK target for CustomerAdvanceApplication: an application can only name an advance of its own customer.
+  @@unique([id, clientId, companyId])
+  @@index([companyId, clientId])
+  @@index([companyId, branchId])
+  @@index([companyId, advanceDate])
+  @@map("customer_advances")
+}
+
+// One use of a customer advance against an invoice. Always paired with an InvoicePayment row (invoicePaymentId is
+// unique). A reversal flags the row (never deleted), same posture as InvoicePayment.
+model CustomerAdvanceApplication {
+  id               String          @id @default(cuid())
+  companyId        String
+  company          Company         @relation(fields: [companyId], references: [id])
+  advanceId        String
+  clientId         String
+  advance          CustomerAdvance @relation(fields: [advanceId, clientId, companyId], references: [id, clientId, companyId], onDelete: Restrict)
+  invoiceId        String
+  invoice          SalesInvoice    @relation(fields: [invoiceId, companyId], references: [id, companyId], onDelete: Restrict)
+  invoicePaymentId String
+  invoicePayment   InvoicePayment  @relation(fields: [invoicePaymentId, clientId, companyId], references: [id, clientId, companyId], onDelete: Restrict)
+  amount           Decimal         @db.Decimal(12, 2)
+  appliedAt        DateTime        @default(now())
+  appliedById      String
+  appliedBy        User            @relation("AdvanceAppliedBy", fields: [appliedById], references: [id])
+  reversedAt       DateTime?
+  reversedById     String?
+  reversedBy       User?           @relation("AdvanceApplicationReversedBy", fields: [reversedById], references: [id])
+  reversalReason   String?
+  // Retry guard for the standalone "apply advance" call: same key + same advance = the same application.
+  idempotencyKey   String?
+
+  @@unique([invoicePaymentId])
+  @@unique([companyId, idempotencyKey])
+  @@index([companyId, advanceId])
+  @@index([companyId, invoiceId])
+  @@map("customer_advance_applications")
 }
 
 // A completed retail sale reversed (D1) — the customer brought a piece back. Deliberately a new,

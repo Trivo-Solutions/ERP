@@ -116,6 +116,7 @@ export const NAV_ITEMS: NavItem[] = [
       { label: 'GST Compliance & AATO', path: '/sales/gst-compliance', permission: 'gst:registration_view' },
       { label: 'Tax Invoice Templates', path: '/sales/tax-invoice-templates', permission: 'taxInvoiceTemplate:view' },
       // G2d — Credit Notes & Templates
+      { label: 'Customer Advances', path: '/sales/advances', permission: 'payment:view' },
       { label: 'Credit Notes', path: '/sales/credit-notes', permission: 'creditNote:view' },
       { label: 'Credit Note Templates', path: '/sales/credit-note-templates', permission: 'creditNoteTemplate:view' },
     ],

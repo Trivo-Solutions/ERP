@@ -82,7 +82,7 @@ describe('Phase 5: database-enforced tenant isolation', () => {
       accounts: await count(tx, `SELECT count(*)::int n FROM accounts`),
       roles: await count(tx, `SELECT count(*)::int n FROM roles`),
     }));
-    expect(own).toEqual({ clients: 12, suppliers: 5, accounts: 44, roles: 6 }); // 44 = the starter chart, incl. 6600 Round Off + 1404/2204 RCM (G2g-7d)
+    expect(own).toEqual({ clients: 12, suppliers: 5, accounts: 45, roles: 6 }); // 44 = the starter chart, incl. 6600 Round Off + 1404/2204 RCM (G2g-7d)
   });
 
   it('a bare SELECT with NO company filter at all returns only the session company\'s rows — application code forgetting its filter is still contained', async () => {

@@ -56,7 +56,7 @@ describe('TRIVO Starter Package v1', () => {
 
   it('includes the chart-of-accounts codes the ledger posting code depends on', () => {
     const codes = new Set(STARTER_PACKAGE_V1.chartOfAccounts.map((a) => a.code));
-    for (const c of ['1101', '1102', '1200', '1300', '1401', '1402', '1403', '2100', '2201', '2202', '2203', '4000', '5000', '6600']) expect(codes.has(c), c).toBe(true);
+    for (const c of ['1101', '1102', '1200', '1300', '1401', '1402', '1403', '2100', '2201', '2202', '2203', '2400', '4000', '5000', '6600']) expect(codes.has(c), c).toBe(true);
   });
 });
 

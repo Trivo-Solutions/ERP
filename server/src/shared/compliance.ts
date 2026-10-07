@@ -80,7 +80,12 @@ export async function assertCashLimit(
     where: { companyId, clientId, mode: { equals: 'CASH', mode: 'insensitive' }, paymentDate: { gte: start, lt: end }, reversedAt: null },
     _sum: { amount: true },
   });
-  const already = Number(agg._sum.amount ?? 0);
+  // Customer Advance cash receipts are cash received from this client too: same day, same limit.
+  const advAgg = await tx.customerAdvance.aggregate({
+    where: { companyId, clientId, mode: { equals: 'CASH', mode: 'insensitive' }, advanceDate: { gte: start, lt: end }, reversedAt: null },
+    _sum: { amount: true },
+  });
+  const already = Number(agg._sum.amount ?? 0) + Number(advAgg._sum.amount ?? 0);
   const total = already + payment.amount;
   if (total >= CASH_RECEIPT_LIMIT) {
     throw new AppError(

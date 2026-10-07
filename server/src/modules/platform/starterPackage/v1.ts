@@ -138,6 +138,7 @@ export const STARTER_PACKAGE_V1: StarterPackageDefinition = {
     // customers, this is tax this company self-assesses as the recipient of a notified supply.
     { code: '2204', name: 'RCM Tax Payable', type: 'LIABILITY', subType: 'TAX', isSystem: true },
     { code: '2300', name: 'Loan Payable', type: 'LIABILITY', subType: 'LOAN', isSystem: true },
+    { code: '2400', name: 'Customer Advances', type: 'LIABILITY', subType: 'CURRENT', isSystem: true },
     // Equity
     { code: '3000', name: 'Owner Equity', type: 'EQUITY', isSystem: true },
     { code: '3100', name: 'Retained Earnings', type: 'EQUITY', isSystem: true },

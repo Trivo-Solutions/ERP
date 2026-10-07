@@ -4,7 +4,7 @@ import { AppError } from '../../middleware/error';
 import { nextDocumentNumber } from '../../shared/numberSequence';
 import { tenantQuery, tenantBatch, tenantTransaction, TenantContext, BranchAccess } from '../../shared/tenantContext';
 import { assertOwnedByCompany, assertAllOwned } from '../../middleware/tenant';
-import { CREDIT_SETTLEMENT_MODES } from '../../shared/constants';
+import { CREDIT_SETTLEMENT_MODES, PAYMENT_MODE_CUSTOMER_ADVANCE } from '../../shared/constants';
 import { getStarterPackage, type StarterAccount } from '../platform/starterPackage';
 import { splitGst } from '../../shared/gstSplit';
 import { round2 } from '../../shared/inputGst';
@@ -520,9 +520,9 @@ export async function getDayBook(companyId: string, date: Date) {
       select: { invoiceNumber: true, invoiceType: true, totalAmount: true, client: { select: { name: true } } },
     }),
     tx.invoicePayment.findMany({
-      // Money received only — old gold / store credit settlements are already in the exchanges / returns below.
+      // Money received only — an applied customer advance is cash booked on the day it was received (not here); old gold / store credit settlements are already in the exchanges / returns below.
       // Not reversed (J3 Decision 1) — a reversed payment moved no money for this day's rollup either.
-      where: { companyId, paymentDate: { gte: start, lte: end }, mode: { notIn: CREDIT_SETTLEMENT_MODES }, reversedAt: null },
+      where: { companyId, paymentDate: { gte: start, lte: end }, mode: { notIn: [...CREDIT_SETTLEMENT_MODES, PAYMENT_MODE_CUSTOMER_ADVANCE] }, reversedAt: null },
       select: { mode: true, amount: true },
     }),
     tx.salesReturn.findMany({

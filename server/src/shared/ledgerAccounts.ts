@@ -18,6 +18,8 @@ export const LEDGER_ACCOUNT = {
   // existing company; new companies get it from the Starter Package chart.
   RCM_INPUT_TAX_CREDIT: '1404',
   ACCOUNTS_PAYABLE: '2100',
+  // Customer Advances: money received before any invoice — a liability until applied (migration 20261007100000).
+  CUSTOMER_ADVANCES: '2400',
   CGST_PAYABLE: '2201',
   SGST_PAYABLE: '2202',
   IGST_PAYABLE: '2203',

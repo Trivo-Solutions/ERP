@@ -265,6 +265,7 @@ export async function deleteClient(id: string, ctx: TenantContext, userId: strin
         select: {
           salesOrders: true, memoOuts: true, salesInvoices: true, salesReturns: true,
           oldGoldExchanges: true, payments: true, repairJobs: true, manufacturedTags: true,
+          customerAdvances: true,
         },
       },
     },

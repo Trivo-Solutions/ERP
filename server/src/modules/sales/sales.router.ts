@@ -5,6 +5,7 @@ import { resolveTenantContext, assertBranchAccessible } from '../../middleware/t
 import { AppError } from '../../middleware/error';
 import { parseDate, parseOptionalDate } from '../../shared/parseDate';
 import * as svc from './sales.service';
+import * as advanceSvc from './customerAdvance.service';
 import * as salesReportSvc from './salesReport.service';
 import * as creditNoteSvc from './creditNote.service';
 import * as salesDebitNoteSvc from './salesDebitNote.service';
@@ -272,6 +273,60 @@ salesRouter.get('/clients/:clientId/payments', requirePermission('payment:view')
 salesRouter.post('/clients/:clientId/payments', requirePermission('payment:create'), async (req: Request, res: Response) => {
   const payment = await svc.recordClientPayment({ clientId: req.params.clientId, ...req.body, paymentDate: parseDate(req.body.paymentDate, 'Payment date', true) }, req.tenant!, req.user!.userId);
   res.status(201).json({ success: true, data: payment });
+});
+
+// Customer Advances (Phase 2) — money received before any invoice; a liability, not Store Credit.
+salesRouter.get('/advances', requirePermission('payment:view'), async (req: Request, res: Response) => {
+  const q = req.query as Record<string, string | undefined>;
+  const day = (v: string | undefined, label: string, endOfDay = false) => {
+    if (!v) return undefined;
+    const d = parseDate(v, label);
+    if (endOfDay) d.setDate(d.getDate() + 1);
+    return d;
+  };
+  const data = await advanceSvc.listCustomerAdvances(req.tenant!, {
+    dateFrom: day(q.dateFrom, 'Date from'), dateTo: day(q.dateTo, 'Date to', true),
+    clientId: q.clientId, branchId: q.branchId, advanceNumber: q.advanceNumber, mode: q.mode, createdById: q.createdById, status: q.status,
+  });
+  res.json({ success: true, data });
+});
+
+salesRouter.post('/advances', requirePermission('payment:create'), async (req: Request, res: Response) => {
+  const b = req.body ?? {};
+  const { advance, replayed } = await advanceSvc.createCustomerAdvance(
+    { clientId: b.clientId, branchId: b.branchId, amount: b.amount, mode: b.mode, referenceNo: b.referenceNo, notes: b.notes, idempotencyKey: b.idempotencyKey },
+    req.tenant!, req.user!.userId,
+  );
+  res.status(replayed ? 200 : 201).json({ success: true, data: advance, replayed });
+});
+
+salesRouter.get('/advances/:id', requirePermission('payment:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await advanceSvc.getCustomerAdvance(req.tenant!, req.params.id) });
+});
+
+// Phase 3: the customer's advances still holding money (oldest first) for the bill screen — same gate as Store Credit
+// (client:view). Not narrowed to the caller's branches: an advance taken at one branch can be spent at another.
+salesRouter.get('/clients/:clientId/advances/available', requirePermission('client:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await advanceSvc.listAvailableAdvances(req.tenant!, req.params.clientId) });
+});
+
+salesRouter.get('/advances/:id/applications', requirePermission('payment:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await advanceSvc.listAdvanceApplications(req.tenant!, req.params.id) });
+});
+
+// Apply advance(s) to an existing invoice: { allocations: [{ advanceId, amount }] } or { auto: true, maxAmount? }.
+salesRouter.post('/invoices/:id/apply-advances', requirePermission('payment:create'), async (req: Request, res: Response) => {
+  const b = req.body ?? {};
+  const data = await advanceSvc.applyCustomerAdvance(
+    req.params.id,
+    { allocations: b.allocations, auto: b.auto === true, maxAmount: b.maxAmount, idempotencyKey: b.idempotencyKey },
+    req.tenant!, req.user!.userId,
+  );
+  res.status(data.replayed ? 200 : 201).json({ success: true, data });
+});
+
+salesRouter.post('/advances/:id/reverse', requirePermission('payment:reverse'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await advanceSvc.reverseCustomerAdvance(req.params.id, req.tenant!, req.user!.userId, req.body?.reason) });
 });
 
 // Credit a customer holds (from sales returns / old-gold exchanges) that the New Sale screen can spend as the

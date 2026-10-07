@@ -125,6 +125,8 @@ interface PaymentSplit {
   notes: string;
   // OLD_GOLD only. The amount is not typed: the server values net weight x today's rate for the karat, less deduction %.
   og: { description: string; karat: string; gross: string; stone: string; deduction: string };
+  // CUSTOMER_ADVANCE only: which of the customer's advances pays this split (money received before the bill — not Store Credit).
+  advanceId?: string;
 }
 
 const PAYMENT_MODES: Array<{ value: string; label: string }> = [
@@ -339,6 +341,17 @@ export function NewSalePage() {
   // not touched here (they stay as recorded); returned lines are locked, as the server enforces.
   const { id: editId } = useParams();
   const isEdit = !!editId;
+  // Customer Advances: money this customer paid BEFORE any bill, held separately from Store Credit above. Server-read,
+  // oldest first; an advance is only spent when the user picks the Customer Advance mode / presses Apply.
+  const { data: advRes } = useQuery({
+    queryKey: ['client-advances', selectedClientId],
+    queryFn: () => apiGet<any>(`/sales/clients/${selectedClientId}/advances/available`),
+    enabled: !!selectedClientId && !editId,
+    staleTime: 0,
+  });
+  const advanceData: any = (advRes as any)?.data ?? advRes ?? {};
+  const advanceList: Array<{ id: string; advanceNumber: string; advanceDate: string; amount: number; appliedAmount: number; availableAmount: number; branch?: { name: string } }> = advanceData.advances ?? [];
+  const advanceTotalAvailable = Number(advanceData.totalAvailable) || 0;
   const { data: editInvoice } = useQuery({
     queryKey: ['invoice-detail', editId], queryFn: () => apiGet<any>(`/sales/invoices/${editId}`), enabled: isEdit,
   });
@@ -703,22 +716,65 @@ export function NewSalePage() {
   const paymentSplitsTotal = paymentSplits.reduce((s, p) => s + splitAmount(p), 0);
 
   // Picking a mode. Store Credit pre-fills what the customer can spend, capped at what is still due on the bill.
+  // What is still unspent in one advance after the other splits on this bill have taken their share.
+  const advanceLeft = (advanceId: string, exceptKey?: string) => {
+    const a = advanceList.find((x) => x.id === advanceId);
+    const spent = paymentSplits.filter((x) => x.mode === 'CUSTOMER_ADVANCE' && x.advanceId === advanceId && x.key !== exceptKey)
+      .reduce((t, x) => t + (Number(x.amount) || 0), 0);
+    return Math.round(Math.max((a?.availableAmount ?? 0) - spent, 0) * 100) / 100;
+  };
   const changePaymentMode = (split: PaymentSplit, mode: string) => {
     if (mode === 'METAL') { // not a payment mode of its own — opens the Material Purchase; credit then pays the bill
       setMaterialPurchase({ open: true, splitKey: split.key });
       return;
     }
     const others = paymentSplits.filter((x) => x.key !== split.key).reduce((s, x) => s + splitAmount(x), 0);
+    if (mode === 'CUSTOMER_ADVANCE') { // pre-pick the oldest advance that still has money, capped at what is still due
+      const pick = advanceList.find((a) => advanceLeft(a.id, split.key) > 0);
+      if (!pick) return;
+      setPaymentSplits((p) => p.map((s) => (s.key === split.key ? {
+        ...s, mode, advanceId: pick.id, referenceNo: pick.advanceNumber,
+        amount: Math.round(Math.min(advanceLeft(pick.id, split.key), Math.max(total - others, 0)) * 100) / 100,
+      } : s)));
+      return;
+    }
     setPaymentSplits((p) => p.map((s) => (s.key === split.key ? {
-      ...s, mode,
+      ...s, mode, advanceId: undefined,
       amount: mode === 'STORE_CREDIT' ? Math.round(Math.min(creditAvailable, Math.max(total - others, 0)) * 100) / 100 : s.amount,
     } : s)));
+  };
+  // "Apply advance" shortcut: spends the customer's advances oldest-first, up to what the bill still needs, as one split
+  // per advance (each keeps its own advanceId), taken off the last money split so the bill is not collected twice.
+  const applyAdvances = () => {
+    setCollectPayment(true);
+    const settlement = (x: PaymentSplit) => x.mode === 'STORE_CREDIT' || x.mode === 'OLD_GOLD' || x.mode === 'CUSTOMER_ADVANCE';
+    let need = Math.max(total - paymentSplits.filter(settlement).reduce((s, x) => s + splitAmount(x), 0), 0);
+    const adds: PaymentSplit[] = [];
+    for (const a of advanceList) {
+      const use = Math.round(Math.min(advanceLeft(a.id), need) * 100) / 100;
+      if (use <= 0) continue;
+      adds.push({ key: nextPayKey(), paymentDate: new Date().toISOString().split('T')[0], amount: use, mode: 'CUSTOMER_ADVANCE',
+        referenceNo: a.advanceNumber, notes: '', advanceId: a.id, og: { description: 'Old gold', karat: '', gross: '', stone: '', deduction: '' } });
+      need = Math.round((need - use) * 100) / 100;
+    }
+    if (adds.length === 0) return;
+    setPaymentSplits((prev) => {
+      let overshoot = Math.max(prev.reduce((s, x) => s + splitAmount(x), 0) + adds.reduce((s, x) => s + x.amount, 0) - total, 0);
+      const trimmed = [...prev];
+      for (let i = trimmed.length - 1; i >= 0 && overshoot > 0.005; i--) {
+        if (settlement(trimmed[i])) continue;
+        const cut = Math.min(Number(trimmed[i].amount) || 0, overshoot);
+        trimmed[i] = { ...trimmed[i], amount: Math.round(((Number(trimmed[i].amount) || 0) - cut) * 100) / 100 };
+        overshoot -= cut;
+      }
+      return [...trimmed.filter((x) => !(x.mode === 'CASH' && !(Number(x.amount) > 0) && !x.referenceNo && !x.notes)), ...adds];
+    });
   };
   // "Use credit" shortcut: one Store Credit split for as much as the customer has (not already used) and the bill
   // needs, taken off the last money split so the bill is not collected twice.
   const useStoreCredit = () => {
     setCollectPayment(true);
-    const creditSplit = (x: PaymentSplit) => x.mode === 'STORE_CREDIT' || x.mode === 'OLD_GOLD';
+    const creditSplit = (x: PaymentSplit) => x.mode === 'STORE_CREDIT' || x.mode === 'OLD_GOLD' || x.mode === 'CUSTOMER_ADVANCE';
     const settledByCredit = paymentSplits.filter(creditSplit).reduce((s, x) => s + splitAmount(x), 0);
     const alreadyStoreCredit = paymentSplits.filter((x) => x.mode === 'STORE_CREDIT').reduce((s, x) => s + (Number(x.amount) || 0), 0);
     const use = Math.round(Math.max(Math.min(creditAvailable - alreadyStoreCredit, total - settledByCredit), 0) * 100) / 100;
@@ -762,6 +818,9 @@ export function NewSalePage() {
   // Store credit cannot be spent beyond what the account holds; old gold needs its metal details and a rate for the karat.
   const storeCreditUsed = collectPayment ? paymentSplits.filter((x) => x.mode === 'STORE_CREDIT').reduce((s, x) => s + (Number(x.amount) || 0), 0) : 0;
   const creditBlocked = storeCreditUsed > creditAvailable + 0.005;
+  // Each advance split must name an advance, and one advance cannot be spent beyond what it holds across all splits.
+  const advanceSplits = collectPayment ? paymentSplits.filter((x) => x.mode === 'CUSTOMER_ADVANCE') : [];
+  const advanceBlocked = advanceSplits.some((x) => !x.advanceId || (Number(x.amount) || 0) > advanceLeft(x.advanceId, x.key) + 0.005);
   const oldGoldSplits = collectPayment ? paymentSplits.filter((x) => x.mode === 'OLD_GOLD') : [];
   const oldGoldIncomplete = oldGoldSplits.some((x) => !x.og.description.trim() || !x.og.karat || !((Number(x.og.gross) || 0) > 0)
     || (Number(x.og.stone) || 0) > (Number(x.og.gross) || 0) || oldGoldValue(x) <= 0);
@@ -802,6 +861,7 @@ export function NewSalePage() {
       qc.invalidateQueries({ queryKey: ['invoice-detail'] });
       // Credit was spent (or old gold left some behind) and the customer's balance moved.
       qc.invalidateQueries({ queryKey: ['client-credit'] });
+      qc.invalidateQueries({ queryKey: ['client-advances'] });
       qc.invalidateQueries({ queryKey: ['clients-list'] });
       setCreatedInvoice(inv);
       enqueueSnackbar(`Invoice ${inv?.invoiceNumber ?? ''} ${isEdit ? 'updated' : 'created'}`, { variant: 'success' });
@@ -831,6 +891,7 @@ export function NewSalePage() {
               // Old gold: the server values the metal itself — this is only the preview figure.
               amount: splitAmount(p),
               mode: p.mode,
+              ...(p.mode === 'CUSTOMER_ADVANCE' && { advanceId: p.advanceId }),
               referenceNo: p.referenceNo || undefined,
               notes: p.notes || undefined,
               ...(p.mode === 'OLD_GOLD' && {
@@ -1323,9 +1384,17 @@ export function NewSalePage() {
                       </Alert>
                     )}
 
+                    {!isEdit && advanceTotalAvailable > 0 && (
+                      <Alert severity="success" sx={{ mb: 1 }}
+                        action={<Button color="inherit" size="small" sx={{ whiteSpace: 'nowrap' }} onClick={applyAdvances}>Apply advance</Button>}>
+                        Customer Advance available: <b>{fmt(advanceTotalAvailable)}</b> across {advanceList.length} advance{advanceList.length === 1 ? '' : 's'} (money {selectedClient?.name} paid
+                        before this bill — separate from Store Credit). Nothing is used unless you apply it.
+                      </Alert>
+                    )}
+
                     {!isEdit && creditAvailable > 0 && (
                       <Alert severity="info" sx={{ mb: 1 }}
-                        action={<Button color="inherit" size="small" onClick={useStoreCredit}>Use credit</Button>}>
+                        action={<Button color="inherit" size="small" sx={{ whiteSpace: 'nowrap' }} onClick={useStoreCredit}>Use credit</Button>}>
                         {selectedClient?.name} has <b>{fmt(creditAvailable)}</b> credit on account (from a sales return or old gold exchange). Pay with it using the Store Credit mode.
                       </Alert>
                     )}
@@ -1352,7 +1421,7 @@ export function NewSalePage() {
                       {collectPayment && (
                         <Box sx={{ mt: 1 }}>
                           <Box sx={{ overflowX: 'auto' }}>
-                            <Table size="small">
+                            <Table size="small" sx={{ width: '100%', '& th, & td': { px: 1, whiteSpace: 'nowrap' }, '& td:nth-of-type(4), & td:nth-of-type(5)': { width: '50%' } }}>
                               <TableHead>
                                 <TableRow>
                                   <TableCell>Transaction Date</TableCell>
@@ -1360,7 +1429,7 @@ export function NewSalePage() {
                                   <TableCell>Mode</TableCell>
                                   <TableCell>Reference #</TableCell>
                                   <TableCell>Remarks</TableCell>
-                                  <TableCell />
+                                  <TableCell sx={{ width: 48 }} />
                                 </TableRow>
                               </TableHead>
                               <TableBody>
@@ -1385,21 +1454,24 @@ export function NewSalePage() {
                                     </TableCell>
                                     <TableCell>
                                       {/* Native select: arrow keys / type-ahead change it without opening it (CLAUDE.md §10). */}
-                                      <SelectField size="small" fullWidth={false} value={p.mode} sx={{ width: 170 }}
+                                      <SelectField size="small" fullWidth={false} value={p.mode} sx={{ width: 230 }}
                                         onChange={(e) => changePaymentMode(p, e.target.value)}>
                                         {PAYMENT_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
                                         <option value="METAL" disabled={!selectedClientId || !branchId}>Metal — buy old gold → Store Credit</option>
+                                        <option value="CUSTOMER_ADVANCE" disabled={advanceTotalAvailable <= 0 && p.mode !== 'CUSTOMER_ADVANCE'}>
+                                          {advanceTotalAvailable > 0 ? `Customer Advance (${fmt(advanceTotalAvailable)})` : 'Customer Advance (none)'}
+                                        </option>
                                         <option value="STORE_CREDIT" disabled={creditAvailable <= 0 && p.mode !== 'STORE_CREDIT'}>
                                           {creditAvailable > 0 ? `Store Credit (${fmt(creditAvailable)})` : 'Store Credit (none)'}
                                         </option>
                                       </SelectField>
                                     </TableCell>
                                     <TableCell>
-                                      <TextField size="small" value={p.referenceNo} sx={{ width: 130 }}
+                                      <TextField size="small" fullWidth value={p.referenceNo} sx={{ minWidth: 120 }}
                                         onChange={(e) => updatePaymentSplit(p.key, 'referenceNo', e.target.value)} />
                                     </TableCell>
                                     <TableCell>
-                                      <TextField size="small" value={p.notes} sx={{ width: 150 }}
+                                      <TextField size="small" fullWidth value={p.notes} sx={{ minWidth: 120 }}
                                         onChange={(e) => updatePaymentSplit(p.key, 'notes', e.target.value)} />
                                     </TableCell>
                                     <TableCell>
@@ -1408,6 +1480,29 @@ export function NewSalePage() {
                                       </IconButton>
                                     </TableCell>
                                   </TableRow>
+                                  {p.mode === 'CUSTOMER_ADVANCE' && (
+                                    <TableRow sx={{ '& td': { bgcolor: 'action.hover' } }}>
+                                      <TableCell colSpan={6}>
+                                        <Stack direction="row" spacing={1.5} alignItems="center" useFlexGap sx={{ whiteSpace: 'normal' }}>
+                                          <SelectField size="small" fullWidth={false} label="Advance" value={p.advanceId ?? ''} sx={{ flex: 1, minWidth: 0 }}
+                                            emptyLabel="—"
+                                            onChange={(e) => setPaymentSplits((prev) => prev.map((x) => (x.key === p.key ? {
+                                              ...x, advanceId: e.target.value, referenceNo: advanceList.find((a) => a.id === e.target.value)?.advanceNumber ?? '',
+                                              amount: Math.min(Number(x.amount) || 0, advanceLeft(e.target.value, p.key)) || advanceLeft(e.target.value, p.key),
+                                            } : x)))}>
+                                            {advanceList.map((a) => (
+                                              <option key={a.id} value={a.id}>
+                                                {a.advanceNumber} · {new Date(a.advanceDate).toLocaleDateString('en-IN')} · original {fmt(a.amount)} · applied {fmt(a.appliedAmount)} · available {fmt(advanceLeft(a.id, p.key))}{a.branch ? ` · ${a.branch.name}` : ''}
+                                              </option>
+                                            ))}
+                                          </SelectField>
+                                          <Button size="small" sx={{ whiteSpace: 'nowrap', flexShrink: 0 }} onClick={() => p.advanceId && updatePaymentSplit(p.key, 'amount', Math.min(advanceLeft(p.advanceId, p.key), Math.max(total - paymentSplits.filter((x) => x.key !== p.key).reduce((t, x) => t + splitAmount(x), 0), 0)))}>
+                                            Apply full
+                                          </Button>
+                                        </Stack>
+                                      </TableCell>
+                                    </TableRow>
+                                  )}
                                   {p.mode === 'OLD_GOLD' && (
                                     <TableRow sx={{ '& td': { bgcolor: 'action.hover' } }}>
                                       <TableCell colSpan={6}>
@@ -1453,22 +1548,27 @@ export function NewSalePage() {
                               {selectedClient?.name} has {fmt(creditAvailable)} of store credit, but {fmt(storeCreditUsed)} is entered.
                             </Alert>
                           )}
+                          {advanceBlocked && (
+                            <Alert severity="error" sx={{ mt: 1 }}>
+                              A Customer Advance split needs an advance chosen, and cannot be more than what that advance still holds.
+                            </Alert>
+                          )}
                           {oldGoldIncomplete && (
                             <Alert severity="warning" sx={{ mt: 1 }}>
                               Old gold needs a description, a karat with today's rate, and a weight (stone weight cannot exceed gross) to be valued.
                             </Alert>
                           )}
-                          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mt: 1 }}>
-                            <Stack direction="row" spacing={1}>
-                              <Button size="small" startIcon={<Add />} onClick={() => addPaymentSplit()}>
+                          <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" useFlexGap spacing={1.5} sx={{ mt: 1.5 }}>
+                            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                              <Button size="small" startIcon={<Add />} sx={{ whiteSpace: 'nowrap' }} onClick={() => addPaymentSplit()}>
                                 Add split (e.g. part cash, part UPI)
                               </Button>
-                              <Button size="small" variant="outlined" disabled={!selectedClientId || !branchId}
+                              <Button size="small" variant="outlined" sx={{ whiteSpace: 'nowrap' }} disabled={!selectedClientId || !branchId}
                                 onClick={() => setMaterialPurchase({ open: true, splitKey: null })}>
                                 Metal — purchase old gold
                               </Button>
                             </Stack>
-                            <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+                            <Typography variant="body2" sx={{ fontFamily: 'monospace', ml: 'auto' }}>
                               Collecting <b>{fmt(paymentSplitsTotal)}</b> of {fmt(total)}
                               {paymentSplitsTotal > total + 0.005 && paymentSplitsTotal - total <= oldGoldTotal + 0.005 ? (
                                 <Typography component="span" color="info.main" sx={{ ml: 1.5 }}>
@@ -1490,7 +1590,7 @@ export function NewSalePage() {
 
                     <Stack direction="row" justifyContent="space-between" sx={{ mt: 3 }}>
                       <Button variant="text" onClick={() => setActiveTab(1)}>← Back</Button>
-                      <Button type="submit" variant="contained" size="large" disabled={mutation.isPending || panBlocked || cashBlocked || roundBad || creditBlocked || oldGoldIncomplete}>
+                      <Button type="submit" variant="contained" size="large" disabled={mutation.isPending || panBlocked || cashBlocked || roundBad || creditBlocked || advanceBlocked || oldGoldIncomplete}>
                         {mutation.isPending ? (isEdit ? 'Saving…' : 'Creating…') : isEdit ? 'Save Changes' : 'Create Invoice'}
                       </Button>
                     </Stack>

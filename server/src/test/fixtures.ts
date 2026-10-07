@@ -122,6 +122,9 @@ export async function cleanupTestTenant(t: TestTenant) {
   await prisma.repairTransfer.deleteMany({ where: { companyId } });
   await prisma.repairCase.deleteMany({ where: { companyId } });
   await prisma.salesReturnItem.deleteMany({ where: { companyId } }); // before invoiceItem (RESTRICT) — not in the parallel batch below
+  // Customer advances reference invoice payments / invoices / clients (all RESTRICT): applications first, then advances.
+  await prisma.customerAdvanceApplication.deleteMany({ where: { companyId } });
+  await prisma.customerAdvance.deleteMany({ where: { companyId } });
   // Wave 1 — deepest leaves (detail/child rows with no further children of their own).
   await Promise.all([
     prisma.stockAuditItem.deleteMany({ where: { companyId } }),
