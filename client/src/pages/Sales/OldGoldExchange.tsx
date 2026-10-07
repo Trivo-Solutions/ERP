@@ -12,7 +12,7 @@ import { useAuthStore } from '../../store/auth.store';
 import { exportToCsv } from '../../utils/exportToCsv';
 import { MaterialPurchaseDialog } from './MaterialPurchaseDialog';
 import {
-  EMPTY_FILTERS, RegisterFilters, SUPPORTED_MATERIALS, MATERIAL_PURCHASE_CSV_COLUMNS, buildListParams, materialLabel, purchaseDetailItems,
+  EMPTY_FILTERS, RegisterFilters, SUPPORTED_MATERIALS, PURCHASE_TYPES, purchaseTypeLabel, MATERIAL_PURCHASE_CSV_COLUMNS, buildListParams, materialLabel, purchaseDetailItems,
 } from './materialPurchaseRegister';
 
 const fmt = (n: number) => '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
@@ -32,10 +32,11 @@ export function MaterialPurchaseTable({ rows, onOpen }: { rows: any[]; onOpen: (
               <TableCell>Purchase No.</TableCell>
               <TableCell>Customer</TableCell>
               <TableCell>Material</TableCell>
+              <TableCell>Purchase Type</TableCell>
               <TableCell align="right">Gross Weight</TableCell>
               <TableCell align="right">Tested Purity</TableCell>
               <TableCell align="right">Fine Weight</TableCell>
-              <TableCell align="right">24K Old Gold Rate</TableCell>
+              <TableCell align="right">Base Rate</TableCell>
               <TableCell align="right">Effective Rate</TableCell>
               <TableCell align="right">Purchase Value</TableCell>
               <TableCell align="right">Store Credit</TableCell>
@@ -50,6 +51,7 @@ export function MaterialPurchaseTable({ rows, onOpen }: { rows: any[]; onOpen: (
                 <TableCell sx={{ ...mono, fontWeight: 700, fontSize: 12 }}>{x.exchangeNumber}</TableCell>
                 <TableCell>{x.client?.name}</TableCell>
                 <TableCell>{materialLabel(x.metalType)}</TableCell>
+                <TableCell>{purchaseTypeLabel(x)}</TableCell>
                 <TableCell align="right" sx={mono}>{Number(x.grossWeight).toFixed(3)} g</TableCell>
                 <TableCell align="right" sx={mono}>{Number(x.testedPurityPercent).toFixed(2)}%</TableCell>
                 <TableCell align="right" sx={mono}>{Number(x.fineWeight).toFixed(4)} g</TableCell>
@@ -64,7 +66,7 @@ export function MaterialPurchaseTable({ rows, onOpen }: { rows: any[]; onOpen: (
               </TableRow>
             ))}
             {rows.length === 0 && (
-              <TableRow><TableCell colSpan={13} align="center" sx={{ py: 4 }}>No material purchases found</TableCell></TableRow>
+              <TableRow><TableCell colSpan={14} align="center" sx={{ py: 4 }}>No material purchases found</TableCell></TableRow>
             )}
           </TableBody>
         </Table>
@@ -153,6 +155,10 @@ export function OldGoldExchange() {
           <Grid item xs={6} sm={3} md={2}>
             <SelectField size="small" label="Material" value={filters.metalType} emptyLabel="All"
               onChange={(e) => setF('metalType', e.target.value)} options={SUPPORTED_MATERIALS} />
+          </Grid>
+          <Grid item xs={6} sm={3} md={2}>
+            <SelectField size="small" label="Purchase Type" value={filters.purchaseType} emptyLabel="All"
+              onChange={(e) => setF('purchaseType', e.target.value)} options={PURCHASE_TYPES} />
           </Grid>
           <Grid item xs={6} sm={3} md={2}>
             <SelectField size="small" label="Branch" value={filters.branchId} emptyLabel="All"

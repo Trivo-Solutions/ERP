@@ -14,7 +14,7 @@ import { resolveStateCode } from '../../shared/stateMaster';
 import { splitGst } from '../../shared/gstSplit';
 import { normalizeGstUqc } from '../../shared/gstUqc';
 import { createCreditNoteForReturn } from './creditNote.service';
-import { resolveMetalRate, GOLD_BASE_KARAT } from '../../shared/metalRate';
+import { resolveMetalRate, GOLD_BASE_KARAT, SILVER_BASE_KARAT, BENCHMARK_PURITY } from '../../shared/metalRate';
 import { isValidKarat } from '../../shared/karatMaster';
 import { addMetalStock } from '../inventory/inventory.service';
 import { METAL_MOVEMENT, MetalMovementType, consumeVaultMetal, restoreVaultMetal, insertMetalMovement } from '../../shared/metalMovement';
@@ -2001,9 +2001,15 @@ export async function createOldGoldExchange(data: {
   return exchange;
 }
 
-// Material Purchase: NON-TAGGED old gold bought over the counter at a purity the branch has TESTED. Valued off the 24K
-// Old Gold rate (MetalRate.ogRatePerGram of the 24K row), never the normal gold rate and never karat/24:
-//   fine weight = gross x tested purity / 100;  purchase value = fine weight x 24K Old Gold rate.
+// Material Purchase: NON-TAGGED metal bought over the counter at a purity the branch has TESTED. Two independent choices:
+// material (GOLD | SILVER) and purchaseType, which selects the base-rate FAMILY — never karat/24, never a fallback:
+//   GOLD   base = the 24K row (GOLD_BASE_KARAT);          SILVER base = the 999 row (SILVER_BASE_KARAT)
+//   OLD  -> that row's Old rate (MetalRate.ogRatePerGram)
+//   PURE -> that row's normal rate (MetalRate.ratePerGram)
+//   The base rate is the market 999 rate, so value is on the 999 benchmark (BENCHMARK_PURITY, never purity / 100):
+//   999-equivalent weight = gross x tested purity / 99.9;  purchase value = that weight x the 999 base rate.
+//   fineWeight stays the true fine metal weight (gross x purity / 100) - it is NOT what is valued.
+// The snapshot column baseRate24K holds whichever 999 base rate was used (for Silver it is the Silver 999 rate).
 // It is an OldGoldExchange row (same ledger entry, same client credit, same Metal Vault lot + CUSTOMER_PURCHASE movement,
 // same reversal path) carrying the tested-purity snapshot — not a parallel model. The server prices it; nothing the
 // client sends about value, fine weight or rate is read.
@@ -2011,6 +2017,8 @@ export async function createMaterialPurchase(data: {
   clientId: string;
   branchId: string;
   metalType?: string;
+  // OLD | PURE — picks the 24K rate family. Omitted = OLD (what every caller before this field meant).
+  purchaseType?: string;
   grossWeight: number;
   testedPurityPercent: number;
   description?: string;
@@ -2018,8 +2026,13 @@ export async function createMaterialPurchase(data: {
   notes?: string;
   idempotencyKey?: string;
 }, ctx: TenantContext, userId: string) {
-  const metalType = (data.metalType ?? 'GOLD').toUpperCase();
-  if (metalType !== 'GOLD') throw new AppError('Only GOLD material purchases are supported', 400);
+  const rawMetal = data.metalType ?? 'GOLD';
+  const metalType = typeof rawMetal === 'string' ? rawMetal.trim().toUpperCase() : '';
+  if (metalType !== 'GOLD' && metalType !== 'SILVER') throw new AppError('Material must be GOLD or SILVER', 400);
+  const metalLabel = metalType === 'GOLD' ? 'Gold' : 'Silver';
+  const rawType = data.purchaseType ?? 'OLD';
+  const purchaseType = typeof rawType === 'string' ? rawType.trim().toUpperCase() : '';
+  if (purchaseType !== 'OLD' && purchaseType !== 'PURE') throw new AppError('Purchase type must be OLD or PURE', 400);
   const gross = Number(data.grossWeight);
   const purity = Number(data.testedPurityPercent);
   if (!Number.isFinite(gross) || !(gross > 0)) throw new AppError('Gross weight must be more than zero', 400);
@@ -2032,24 +2045,28 @@ export async function createMaterialPurchase(data: {
   await assertBranchAccessible(data.branchId, ctx);
 
   const purchaseDate = data.purchaseDate ?? new Date();
-  const rate = await resolveMetalRate(ctx.companyId, GOLD_BASE_KARAT, purchaseDate);
-  if (!rate || rate.ogRatePerGram == null || !(Number(rate.ogRatePerGram) > 0)) {
-    throw new AppError(`No 24K Old Gold rate found on or before ${purchaseDate.toDateString()} — enter it in Metal Rates first`, 404);
+  const rate = await resolveMetalRate(ctx.companyId, metalType === 'GOLD' ? GOLD_BASE_KARAT : SILVER_BASE_KARAT, purchaseDate);
+  // The chosen family only — never a fallback from one to the other.
+  const familyRate = purchaseType === 'OLD' ? rate?.ogRatePerGram : rate?.ratePerGram;
+  if (!rate || familyRate == null || !(Number(familyRate) > 0)) {
+    const rateName = metalType === 'GOLD' ? `24K ${purchaseType === 'OLD' ? 'Old Gold' : 'Gold'}` : `${purchaseType === 'OLD' ? 'Old Silver' : 'Silver'} Base`;
+    throw new AppError(`No ${rateName} rate found on or before ${purchaseDate.toDateString()} — enter it in Metal Rates first`, 404);
   }
-  const base = new Prisma.Decimal(rate.ogRatePerGram);
+  const base = new Prisma.Decimal(familyRate);
   const fine = new Prisma.Decimal(gross).mul(purity).div(100).toDecimalPlaces(4, Prisma.Decimal.ROUND_HALF_UP);
-  const value = fine.mul(base).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
-  const effective = base.mul(purity).div(100).toDecimalPlaces(4, Prisma.Decimal.ROUND_HALF_UP);
+  const equivalent999 = new Prisma.Decimal(gross).mul(purity).div(100).div(BENCHMARK_PURITY).toDecimalPlaces(4, Prisma.Decimal.ROUND_HALF_UP);
+  const value = equivalent999.mul(base).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+  const effective = base.mul(purity).div(100).div(BENCHMARK_PURITY).toDecimalPlaces(4, Prisma.Decimal.ROUND_HALF_UP);
   if (!(Number(value) > 0)) throw new AppError('This purchase values to nothing — check the weight and purity', 400);
 
   // The vault lot's karat label: the active GOLD karat whose purity is nearest the tested one (within 1 point), else
   // the raw percentage. Free text on MetalStock — the tested purity itself is what the lot is valued and stocked at.
-  const golds = await tenantQuery(ctx.companyId, (tx) => tx.karatMaster.findMany({ where: { companyId: ctx.companyId, metalType: 'GOLD', isActive: true } }));
-  const near = golds
+  const karats = await tenantQuery(ctx.companyId, (tx) => tx.karatMaster.findMany({ where: { companyId: ctx.companyId, metalType, isActive: true } }));
+  const near = karats
     .map((k) => ({ code: k.code, d: Math.abs(Number(k.purity) * 100 - purity) }))
     .filter((k) => k.d <= 1)
     .sort((a, b) => a.d - b.d)[0];
-  const karatLabel = near?.code ?? `${purity}%`;
+  const karatLabel = near?.code ?? (metalType === 'GOLD' ? `${purity}%` : `Silver ${purity}%`);
 
   const v: OldGoldValuation = {
     exchangeDate: purchaseDate, stoneWeight: 0, netWeight: gross, purity: purity / 100,
@@ -2070,10 +2087,10 @@ export async function createMaterialPurchase(data: {
       }
       return bookOldGoldExchange(
         tx, ctx, userId,
-        { clientId: data.clientId, description: data.description?.trim() || `Old gold ${purity}%`, karat: karatLabel, grossWeight: gross, notes: data.notes, branchId: data.branchId },
+        { clientId: data.clientId, description: data.description?.trim() || `${purchaseType === 'OLD' ? 'Old' : 'Pure'} ${metalLabel.toLowerCase()} ${purity}%`, karat: karatLabel, grossWeight: gross, notes: data.notes, branchId: data.branchId },
         v, METAL_MOVEMENT.CUSTOMER_PURCHASE,
         {
-          metalType, testedPurityPercent: purity, fineWeight: Number(fine), baseRate24K: Number(base),
+          metalType, purchaseType, testedPurityPercent: purity, fineWeight: Number(fine), baseRate24K: Number(base),
           effectivePurchaseRate: Number(effective), createdById: userId, idempotencyKey: data.idempotencyKey ?? null,
         },
       );
@@ -2084,7 +2101,7 @@ export async function createMaterialPurchase(data: {
   }
 
   await createAuditEntry('old_gold_exchanges', exchange.id, userId, 'CREATE', undefined, {
-    kind: 'MATERIAL_PURCHASE', grossWeight: gross, testedPurityPercent: purity, fineWeight: Number(fine),
+    kind: 'MATERIAL_PURCHASE', metalType, purchaseType, grossWeight: gross, testedPurityPercent: purity, fineWeight: Number(fine),
     baseRate24K: Number(base), purchaseValue: Number(value),
   } as any, ctx.companyId);
   return exchange;
@@ -2092,8 +2109,10 @@ export async function createMaterialPurchase(data: {
 
 // Completed Material Purchases (the rows carrying a tested-purity snapshot), newest first.
 export async function listMaterialPurchases(ctx: TenantContext, filters: {
-  clientId?: string; from?: Date; to?: Date; branchId?: string; metalType?: string; exchangeNumber?: string; createdById?: string;
+  clientId?: string; from?: Date; to?: Date; branchId?: string; metalType?: string; purchaseType?: string; exchangeNumber?: string; createdById?: string;
 } = {}) {
+  if (filters.metalType && filters.metalType !== 'GOLD' && filters.metalType !== 'SILVER') throw new AppError('Material must be GOLD or SILVER', 400);
+  if (filters.purchaseType && filters.purchaseType !== 'OLD' && filters.purchaseType !== 'PURE') throw new AppError('Purchase type must be OLD or PURE', 400);
   // A requested branch must be one the caller is granted; with none requested a branch-restricted caller is capped to their own set.
   if (filters.branchId) await assertBranchAccessible(filters.branchId, ctx);
   const branchFilter = filters.branchId
@@ -2105,6 +2124,9 @@ export async function listMaterialPurchases(ctx: TenantContext, filters: {
       ...(filters.clientId && { clientId: filters.clientId }),
       ...(branchFilter && { branchId: branchFilter }),
       ...(filters.metalType && { metalType: filters.metalType }),
+      // Historical rows carry NULL and mean OLD.
+      ...(filters.purchaseType === 'OLD' && { OR: [{ purchaseType: null }, { purchaseType: 'OLD' as const }] }),
+      ...(filters.purchaseType === 'PURE' && { purchaseType: 'PURE' as const }),
       ...(filters.createdById && { createdById: filters.createdById }),
       ...(filters.exchangeNumber && { exchangeNumber: { contains: filters.exchangeNumber, mode: 'insensitive' as const } }),
       ...((filters.from || filters.to) && { exchangeDate: { ...(filters.from && { gte: filters.from }), ...(filters.to && { lte: filters.to }) } }),
@@ -2116,7 +2138,7 @@ export async function listMaterialPurchases(ctx: TenantContext, filters: {
   const ids = [...new Set(rows.map((r) => r.createdById).filter(Boolean) as string[])];
   const users = ids.length ? await prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } }) : [];
   const names = new Map(users.map((u) => [u.id, u.name]));
-  return rows.map((r) => ({ ...r, createdByName: r.createdById ? names.get(r.createdById) ?? null : null, creditCreated: r.valuedAmount }));
+  return rows.map((r) => ({ ...r, purchaseType: r.purchaseType ?? 'OLD', createdByName: r.createdById ? names.get(r.createdById) ?? null : null, creditCreated: r.valuedAmount }));
 }
 
 // The tag a customer hands back for its metal: it must be this company's and currently SOLD (a piece we still hold, or one
@@ -2182,7 +2204,7 @@ async function bookOldGoldExchange(
   movementType: MetalMovementType = METAL_MOVEMENT.CUSTOMER_PURCHASE,
   // Material Purchase only: the tested-purity valuation snapshot stored on the row (see createMaterialPurchase).
   snapshot?: {
-    metalType: string; testedPurityPercent: number; fineWeight: number; baseRate24K: number;
+    metalType: string; purchaseType: 'OLD' | 'PURE'; testedPurityPercent: number; fineWeight: number; baseRate24K: number;
     effectivePurchaseRate: number; createdById: string; idempotencyKey?: string | null;
   },
 ) {
@@ -2201,7 +2223,7 @@ async function bookOldGoldExchange(
 
   const stock = await addMetalStock(
     {
-      materialName: data.description, karat: data.karat, purity: v.purity,
+      materialName: data.description, karat: data.karat, purity: v.purity, ...(snapshot && { metalType: snapshot.metalType }),
       grossWeight: data.grossWeight, netWeight: v.netWeight,
       sourceType: 'CUSTOMER_SUPPLIED', sourceRef: exchangeNumber, avgCostPerGram: v.deductedRate,
     },

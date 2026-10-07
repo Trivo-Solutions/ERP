@@ -6,7 +6,7 @@ import { nextSimpleCode } from '../../shared/numberSequence';
 import { nextDocumentNumber } from '../../shared/numberSequence';
 import { TenantContext, tenantTransaction, tenantQuery, tenantBatch } from '../../shared/tenantContext';
 import { assertOwnedByCompany } from '../../middleware/tenant';
-import { GOLD_BASE_KARAT, deriveKaratRate } from '../../shared/metalRate';
+import { GOLD_BASE_KARAT, SILVER_BASE_KARAT, deriveKaratRate } from '../../shared/metalRate';
 
 export async function listDesigns(companyId: string, filters: {
   status?: string; categoryId?: string; search?: string;
@@ -190,10 +190,11 @@ export async function upsertMetalRate(companyId: string, data: {
   date: Date; karat: string; ratePerGram: number; currency?: string; source?: string;
 }) {
   const derived = await tenantQuery(companyId, (_tx) => _tx.karatMaster.findFirst({
-    where: { companyId, code: data.karat, metalType: 'GOLD', isActive: true },
+    where: { companyId, code: data.karat, metalType: { in: ['GOLD', 'SILVER'] }, isActive: true },
   }));
-  if (derived && derived.code !== GOLD_BASE_KARAT) {
-    throw new AppError(`${data.karat} is calculated from the ${GOLD_BASE_KARAT} rate and cannot be set directly`, 400);
+  // Gold: every karat but 24K is calculated. Silver: every purity but the 999 base (925 ...) is calculated.
+  if (derived && derived.code !== (derived.metalType === 'SILVER' ? SILVER_BASE_KARAT : GOLD_BASE_KARAT)) {
+    throw new AppError(`${data.karat} is calculated from the ${derived.metalType === 'SILVER' ? SILVER_BASE_KARAT : GOLD_BASE_KARAT} rate and cannot be set directly`, 400);
   }
   const purity: Record<string, number> = {
     '24K': 0.9999, '22K': 0.916, '18K': 0.75, '14K': 0.585, 'SILVER': 0.925, 'PT': 0.95,
@@ -231,15 +232,17 @@ export async function getRateSheet(companyId: string, date: Date) {
     const byKarat = new Map(onDate.map((r) => [r.karat, r]));
     const prevByKarat = new Map<string, (typeof earlier)[number]>();
     for (const r of earlier) if (!prevByKarat.has(r.karat)) prevByKarat.set(r.karat, r);
-    return karats.map((k) => {
+    // Ordered purity-desc within a metal, so the editable Silver 999 base reads above the calculated purities it feeds.
+    const rows = karats.map((k) => ({ code: k.code, metalType: k.metalType, purity: k.purity as Prisma.Decimal.Value }));
+    return rows.map((k) => {
       const r = byKarat.get(k.code);
       const prev = prevByKarat.get(k.code);
       return {
         karat: k.code,
         metalType: k.metalType,
         purity: k.purity,
-        // Calculated from the 24K rates on save (read-only in the UI).
-        isDerived: k.metalType === 'GOLD' && k.code !== GOLD_BASE_KARAT,
+        // Calculated from the 24K (gold) / 999 (silver) base rates on save (read-only in the UI).
+        isDerived: (k.metalType === 'GOLD' && k.code !== GOLD_BASE_KARAT) || (k.metalType === 'SILVER' && k.code !== SILVER_BASE_KARAT),
         ratePerGram: r ? r.ratePerGram : null,
         ogRatePerGram: r ? r.ogRatePerGram : null,
         source: r?.source ?? null,
@@ -273,21 +276,29 @@ export async function saveRateSheet(companyId: string, date: Date, rates: Array<
   }
   return tenantTransaction(companyId, async (tx) => {
     const karats = await tx.karatMaster.findMany({ where: { companyId, code: { in: [...seen] }, isActive: true } });
-    const purityByCode = new Map(karats.map((k) => [k.code, k.purity]));
+    const purityByCode = new Map<string, Prisma.Decimal.Value>(karats.map((k) => [k.code, k.purity]));
+    // Silver's 100% base row is not in KaratMaster; its purity is 1 by definition.
+    purityByCode.set(SILVER_BASE_KARAT, 1);
     for (const code of seen) if (!purityByCode.has(code)) throw new AppError(`Unknown karat/purity code: ${code}`, 400);
 
-    // Gold: only 24K (rate + OG rate) is entered; every other active GOLD karat is derived from it here,
-    // from KaratMaster purity — never trusted from the caller.
-    const goldKarats = await tx.karatMaster.findMany({ where: { companyId, metalType: 'GOLD', isActive: true } });
-    const derivedGold = goldKarats.filter((k) => k.code !== GOLD_BASE_KARAT);
-    const derivedCodes = new Set(derivedGold.map((k) => k.code));
-    for (const code of seen) {
-      if (derivedCodes.has(code)) throw new AppError(`${code} is calculated from the ${GOLD_BASE_KARAT} rate and cannot be set directly`, 400);
+    // Gold: only 24K (rate + OG rate) is entered; Silver: only the 999 purity. Every other active karat/purity of
+    // that metal is derived from its base here, from KaratMaster purity — never trusted from the caller.
+    const activeKarats = await tx.karatMaster.findMany({ where: { companyId, metalType: { in: ['GOLD', 'SILVER'] }, isActive: true } });
+    const families = [
+      { baseCode: GOLD_BASE_KARAT, derived: activeKarats.filter((k) => k.metalType === 'GOLD' && k.code !== GOLD_BASE_KARAT) },
+      { baseCode: SILVER_BASE_KARAT, derived: activeKarats.filter((k) => k.metalType === 'SILVER' && k.code !== SILVER_BASE_KARAT) },
+    ];
+    for (const f of families) {
+      const codes = new Set(f.derived.map((k) => k.code));
+      for (const code of seen) {
+        if (codes.has(code)) throw new AppError(`${code} is calculated from the ${f.baseCode} rate and cannot be set directly`, 400);
+      }
     }
-    const base = rates.find((r) => r.karat === GOLD_BASE_KARAT);
     const allRates: typeof rates = [...rates];
-    if (base) {
-      for (const k of derivedGold) {
+    for (const f of families) {
+      const base = rates.find((r) => r.karat === f.baseCode);
+      if (!base) continue;
+      for (const k of f.derived) {
         allRates.push({
           karat: k.code,
           ratePerGram: Number(deriveKaratRate(base.ratePerGram, k.purity)),

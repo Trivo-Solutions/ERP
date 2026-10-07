@@ -30,6 +30,8 @@ export async function getMetalStock(companyId: string, filters: {
 export async function addMetalStock(data: {
   materialName: string; karat: string; purity: number;
   grossWeight: number; netWeight: number; location?: string;
+  // GOLD | SILVER — omitted leaves NULL, which every reader treats as GOLD.
+  metalType?: string;
   sourceType: string; sourceRef?: string; avgCostPerGram: number;
 }, companyId: string, userId: string, tx?: Prisma.TransactionClient,
 // What brought this metal in — recorded as the lot's opening MetalStockMovement. Defaults to a manual add.

@@ -474,6 +474,7 @@ salesRouter.get('/material-purchases', requirePermission('sales:view'), async (r
       to: parseOptionalDate(req.query.to, 'To date'),
       branchId: (req.query.branchId as string) || undefined,
       metalType: (req.query.metalType as string) || undefined,
+      purchaseType: (req.query.purchaseType as string) || undefined,
       exchangeNumber: (req.query.exchangeNumber as string) || undefined,
       createdById: (req.query.createdById as string) || undefined,
     }),
@@ -484,7 +485,7 @@ salesRouter.post('/material-purchases', requirePermission('invoice:create'), asy
   const b = req.body ?? {};
   // Only the physical facts are read: value, fine weight and rates are always the server's own.
   const purchase = await svc.createMaterialPurchase({
-    clientId: b.clientId, branchId: b.branchId, metalType: b.metalType, grossWeight: b.grossWeight,
+    clientId: b.clientId, branchId: b.branchId, metalType: b.metalType, purchaseType: b.purchaseType, grossWeight: b.grossWeight,
     testedPurityPercent: b.testedPurityPercent, description: b.description, notes: b.notes, idempotencyKey: b.idempotencyKey,
     ...(b.purchaseDate && { purchaseDate: parseDate(b.purchaseDate, 'Purchase date') }),
   }, req.tenant!, req.user!.userId);

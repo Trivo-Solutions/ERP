@@ -51,10 +51,10 @@ export function MetalRates() {
   // rates. While editing, they show a live preview of what the save will produce (display only).
   const base = sheet.find((r) => !r.isDerived && r.karat === '24K');
   const preview = (r: any, edited: Record<string, string>, stored: any) => {
-    const typed = edited['24K'];
+    const typed = edited[r.metalType === 'SILVER' ? '999' : '24K'];
     const b = typed !== undefined && typed !== '' ? Number(typed) : null;
     if (b == null || !(b > 0)) return stored;
-    return Math.round(b * Number(r.purity) * 100) / 100;
+    return Math.round(b * Number(r.purity) / 0.999 * 100) / 100;
   };
   const dirty = sheet.filter((r) => !r.isDerived).filter((r) => {
     const v = edits[r.karat] ?? '';
@@ -148,11 +148,16 @@ export function MetalRates() {
                       <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1, fontFamily: 'monospace' }}>
                         {(Number(r.purity) * 100).toFixed(2)}%
                       </Typography>
+                      {r.metalType === 'SILVER' && !r.isDerived && (
+                        <Typography variant="caption" color="text.secondary" display="block" fontWeight={400}>
+                          Silver 999 base: Rate column = Silver 999 · OG column = Old Silver 999
+                        </Typography>
+                      )}
                       {r.isDerived && <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>calculated</Typography>}
                     </TableCell>
                     <TableCell align="right" sx={{ fontFamily: 'monospace' }}>
                       {editing && r.isDerived ? (
-                        <Typography component="span" color="text.secondary" fontFamily="monospace" title="Calculated from the 24K rate">
+                        <Typography component="span" color="text.secondary" fontFamily="monospace" title={r.metalType === 'SILVER' ? 'Calculated from the Silver 999 rate' : 'Calculated from the 24K rate'}>
                           {preview(r, edits, r.ratePerGram) != null ? fmt(preview(r, edits, r.ratePerGram)) : '—'}
                         </Typography>
                       ) : editing ? (
@@ -172,7 +177,7 @@ export function MetalRates() {
                     </TableCell>
                     <TableCell align="right" sx={{ fontFamily: 'monospace' }}>
                       {editing && r.isDerived ? (
-                        <Typography component="span" color="text.secondary" fontFamily="monospace" title="Calculated from the 24K old gold rate">
+                        <Typography component="span" color="text.secondary" fontFamily="monospace" title={r.metalType === 'SILVER' ? 'Calculated from the Old Silver 999 rate' : 'Calculated from the 24K old gold rate'}>
                           {preview(r, ogEdits, r.ogRatePerGram) != null ? fmt(preview(r, ogEdits, r.ogRatePerGram)) : '—'}
                         </Typography>
                       ) : editing ? (

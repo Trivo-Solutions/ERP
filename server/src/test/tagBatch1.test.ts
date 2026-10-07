@@ -180,25 +180,25 @@ describe('Tagging batch 1', () => {
       const sheet = await api.get(`/designs/rates/sheet?date=${d1}`);
       const by = Object.fromEntries(sheet.body.data.map((r: any) => [r.karat, r.ratePerGram]));
       expect(Number(by['24K'])).toBe(15028);
-      expect(Number(by['22K'])).toBe(13765.65); // 15028 x 0.9160, derived on the server
-      expect(Number(by['18K'])).toBe(11271);   // 15028 x 0.7500
+      expect(Number(by['22K'])).toBe(13779.43); // 15028 x 0.9160 / 99.9, derived on the server
+      expect(Number(by['18K'])).toBe(11282.28);   // 15028 x 0.7500 / 99.9
 
       // next day: nothing saved yet, but the earlier rate is offered as a hint
       const next = await api.get(`/designs/rates/sheet?date=${d2}`);
       const n22 = next.body.data.find((r: any) => r.karat === '22K');
       expect(n22.ratePerGram).toBeNull();
-      expect(Number(n22.previousRate)).toBe(13765.65);
+      expect(Number(n22.previousRate)).toBe(13779.43);
 
       // editing d2 leaves d1 alone; re-saving d1 edits it in place (no duplicate row)
       await api.post('/designs/rates/batch', { date: d2, rates: [{ karat: '24K', ratePerGram: 15283.5 }] });
       await api.post('/designs/rates/batch', { date: d1, rates: [{ karat: '24K', ratePerGram: 15066 }] });
       const rows = await prisma.metalRate.findMany({ where: { companyId: A.company.id, karat: '22K' }, orderBy: { date: 'asc' } });
-      expect(rows.map((r) => Number(r.ratePerGram))).toEqual([13800.46, 13999.69]);
+      expect(rows.map((r) => Number(r.ratePerGram))).toEqual([13814.27, 14013.7]);
     });
 
     it('existing consumers still get the right rate (resolveMetalRate, /rates/latest, single POST /rates)', async () => {
       const r = await resolveMetalRate(A.company.id, '22K', new Date(`${d1}T00:00:00Z`));
-      expect(Number(r?.ratePerGram)).toBe(13800.46);
+      expect(Number(r?.ratePerGram)).toBe(13814.27);
       expect((await api.get('/designs/rates/latest')).status).toBe(200);
       const single = await api.post('/designs/rates', { date: '2026-10-05T00:00:00.000Z', karat: '24K', ratePerGram: 11414 });
       expect(single.status).toBe(200);
@@ -214,35 +214,35 @@ describe('Tagging batch 1', () => {
       let rows = await by();
       expect(Number(rows['24K'].ratePerGram)).toBe(15000);       // base is stored as typed, not x0.9999
       expect(Number(rows['24K'].ogRatePerGram)).toBe(14000);
-      expect(Number(rows['22K'].ratePerGram)).toBe(13740);       // 91.60%, not 22/24
-      expect(Number(rows['22K'].ogRatePerGram)).toBe(12824);
-      expect(Number(rows['18K'].ratePerGram)).toBe(11250);
-      expect(Number(rows['18K'].ogRatePerGram)).toBe(10500);
-      expect(Number(rows['14K'].ratePerGram)).toBe(8775);
-      expect(Number(rows['14K'].ogRatePerGram)).toBe(8190);
-      expect(Number(rows['10K'].ratePerGram)).toBe(6255);        // 41.70%
+      expect(Number(rows['22K'].ratePerGram)).toBe(13753.75);    // 15000 x 91.60 / 99.9, not 22/24 and not /100
+      expect(Number(rows['22K'].ogRatePerGram)).toBe(12836.84);
+      expect(Number(rows['18K'].ratePerGram)).toBe(11261.26);
+      expect(Number(rows['18K'].ogRatePerGram)).toBe(10510.51);
+      expect(Number(rows['14K'].ratePerGram)).toBe(8783.78);
+      expect(Number(rows['14K'].ogRatePerGram)).toBe(8198.2);
+      expect(Number(rows['10K'].ratePerGram)).toBe(6261.26);     // 41.70% / 99.9
       expect(rows['22K'].isDerived).toBe(true);
       expect(rows['24K'].isDerived).toBe(false);
 
       // changing only the normal 24K leaves the old-gold family alone (OG not sent -> untouched)
       await api.post('/designs/rates/batch', { date: d, rates: [{ karat: '24K', ratePerGram: 16000 }] });
       rows = await by();
-      expect(Number(rows['22K'].ratePerGram)).toBe(14656);
+      expect(Number(rows['22K'].ratePerGram)).toBe(14670.67);
       expect(Number(rows['24K'].ogRatePerGram)).toBe(14000);
-      expect(Number(rows['22K'].ogRatePerGram)).toBe(12824);
+      expect(Number(rows['22K'].ogRatePerGram)).toBe(12836.84);
 
       // changing only OG leaves normal rates alone
       await api.post('/designs/rates/batch', { date: d, rates: [{ karat: '24K', ratePerGram: 16000, ogRatePerGram: 13000 }] });
       rows = await by();
-      expect(Number(rows['22K'].ratePerGram)).toBe(14656);
-      expect(Number(rows['22K'].ogRatePerGram)).toBe(11908);
-      expect(Number(rows['18K'].ogRatePerGram)).toBe(9750);
+      expect(Number(rows['22K'].ratePerGram)).toBe(14670.67);
+      expect(Number(rows['22K'].ogRatePerGram)).toBe(11919.92);
+      expect(Number(rows['18K'].ogRatePerGram)).toBe(9759.76);
 
       // clearing the base OG clears every derived OG
       await api.post('/designs/rates/batch', { date: d, rates: [{ karat: '24K', ratePerGram: 16000, ogRatePerGram: null }] });
       rows = await by();
       expect(rows['22K'].ogRatePerGram).toBeNull();
-      expect(Number(rows['22K'].ratePerGram)).toBe(14656);
+      expect(Number(rows['22K'].ratePerGram)).toBe(14670.67);
 
       // a derived karat cannot be set directly (batch or single endpoint) and nothing is persisted
       expect((await api.post('/designs/rates/batch', { date: d, rates: [{ karat: '24K', ratePerGram: 1 }, { karat: '22K', ratePerGram: 5 }] })).status).toBe(400);
@@ -254,23 +254,75 @@ describe('Tagging batch 1', () => {
       const k14 = await prisma.karatMaster.findFirstOrThrow({ where: { companyId: A.company.id, code: '14K' } });
       await prisma.karatMaster.update({ where: { id: k14.id }, data: { isActive: false } });
       try {
-        // 15001.01 x 0.9160 = 13740.92516 -> 13740.93 ; 15001.01 x 0.7500 = 11250.7575 -> 11250.76
+        // 15001.01 x 0.9160 / 0.999 = 13754.68 ; 15001.01 x 0.7500 / 0.999 = 11262.02
         expect((await api.post('/designs/rates/batch', { date: d, rates: [{ karat: '24K', ratePerGram: 15001.01 }] })).status).toBe(200);
         const rows = Object.fromEntries((await api.get(`/designs/rates/sheet?date=${d}`)).body.data.map((r: any) => [r.karat, r]));
-        expect(Number(rows['22K'].ratePerGram)).toBe(13740.93);
-        expect(Number(rows['18K'].ratePerGram)).toBe(11250.76);
+        expect(Number(rows['22K'].ratePerGram)).toBe(13754.68);
+        expect(Number(rows['18K'].ratePerGram)).toBe(11262.02);
         expect(rows['14K']).toBeUndefined();
         expect(await prisma.metalRate.count({ where: { companyId: A.company.id, date: new Date(`${d}T00:00:00Z`), karat: '14K' } })).toBe(0);
       } finally { await prisma.karatMaster.update({ where: { id: k14.id }, data: { isActive: true } }); }
     });
 
-    it('silver / platinum stay manually entered (no 24K base concept)', async () => {
+    it('silver: only Silver 999 (normal + old) is entered; every other silver purity = base x KaratMaster purity / 99.9', async () => {
       const d = '2026-11-03';
-      expect((await api.post('/designs/rates/batch', { date: d, rates: [{ karat: 'SILVER', ratePerGram: 90, ogRatePerGram: 80 }] })).status).toBe(200);
-      const rows = Object.fromEntries((await api.get(`/designs/rates/sheet?date=${d}`)).body.data.map((r: any) => [r.karat, r]));
-      expect(Number(rows['SILVER'].ratePerGram)).toBe(90);
-      expect(rows['SILVER'].isDerived).toBe(false);
-      expect(rows['925'].ratePerGram).toBeNull();
+      const by = async () => Object.fromEntries((await api.get(`/designs/rates/sheet?date=${d}`)).body.data.map((r: any) => [r.karat, r]));
+      // a real, active Silver 999 master exists (starter masters) - exactly one, at exactly 99.9
+      const masters = await prisma.karatMaster.findMany({ where: { companyId: A.company.id, code: '999' } });
+      expect(masters).toHaveLength(1);
+      expect(Number(masters[0].purity)).toBe(0.999);
+      expect(masters[0]).toMatchObject({ metalType: 'SILVER', isActive: true });
+
+      expect((await api.post('/designs/rates/batch', { date: d, rates: [{ karat: '999', ratePerGram: 230, ogRatePerGram: 200 }] })).status).toBe(200);
+      let rows = await by();
+      expect(rows['999'].isDerived).toBe(false);
+      expect(Number(rows['999'].ratePerGram)).toBe(230);          // the entered market rate, shown as typed - never base x 99.9 / 99.9 re-derived
+      expect(Number(rows['999'].ogRatePerGram)).toBe(200);
+      for (const code of ['SILVER', '925']) expect(rows[code].isDerived).toBe(true);
+      expect(Number(rows['SILVER'].ratePerGram)).toBe(212.96);    // 230 x 92.5 / 99.9 (NOT 212.75 = x 92.5%)
+      expect(Number(rows['SILVER'].ogRatePerGram)).toBe(185.19);  // 200 x 92.5 / 99.9
+      expect(Number(rows['925'].ratePerGram)).toBe(212.96);
+      // the actual KaratMaster purity is read: a 90% silver master derives 230 x 90 / 99.9 = 207.21
+      const k900 = await prisma.karatMaster.create({ data: { companyId: A.company.id, code: '900', metalType: 'SILVER', purity: 0.9, isActive: true } });
+      try {
+        await api.post('/designs/rates/batch', { date: d, rates: [{ karat: '999', ratePerGram: 230, ogRatePerGram: 200 }] });
+        expect(Number((await by())['900'].ratePerGram)).toBe(207.21);
+      } finally { await prisma.karatMaster.delete({ where: { id: k900.id } }); }
+      // tag pricing reads the stored row for the tag's purity
+      expect(Number((await resolveMetalRate(A.company.id, 'SILVER', new Date(`${d}T00:00:00Z`)))?.ratePerGram)).toBe(212.96);
+      // Gold untouched by a silver save
+      expect(rows['22K'].ratePerGram).toBeNull();
+
+      // old-only change leaves normal derived rates alone; normal-only change leaves old alone
+      await api.post('/designs/rates/batch', { date: d, rates: [{ karat: '999', ratePerGram: 230, ogRatePerGram: 100 }] });
+      rows = await by();
+      expect(Number(rows['SILVER'].ratePerGram)).toBe(212.96);
+      expect(Number(rows['SILVER'].ogRatePerGram)).toBe(92.59);
+      await api.post('/designs/rates/batch', { date: d, rates: [{ karat: '999', ratePerGram: 240 }] });
+      rows = await by();
+      expect(Number(rows['SILVER'].ratePerGram)).toBe(222.22);
+      expect(Number(rows['SILVER'].ogRatePerGram)).toBe(92.59);
+
+      // a derived silver purity cannot be set directly (batch or single endpoint); the 999 base can be (direct 999 behaviour)
+      for (const karat of ['SILVER', '925']) {
+        expect((await api.post('/designs/rates/batch', { date: d, rates: [{ karat: '999', ratePerGram: 1 }, { karat, ratePerGram: 5 }] })).status).toBe(400);
+      }
+      expect((await api.post('/designs/rates', { date: `${d}T00:00:00.000Z`, karat: 'SILVER', ratePerGram: 5 })).status).toBe(400);
+      expect((await api.post('/designs/rates', { date: `${d}T00:00:00.000Z`, karat: '999', ratePerGram: 241 })).status).toBe(200);
+      expect(Number((await by())['999'].ratePerGram)).toBe(241);
+      expect(Number((await by())['SILVER'].ratePerGram)).toBe(222.22);   // the single-rate endpoint does not re-derive (pre-existing behaviour)
+
+      // history is never rewritten: a different date keeps its own stored silver rate
+      const d0 = '2026-11-04';
+      await api.post('/designs/rates/batch', { date: d0, rates: [{ karat: '999', ratePerGram: 100 }] });
+      expect(Number((await prisma.metalRate.findFirstOrThrow({ where: { companyId: A.company.id, karat: 'SILVER', date: new Date(`${d}T00:00:00Z`) } })).ratePerGram)).toBe(222.22);
+    });
+
+    it('platinum stays manually entered (no base concept)', async () => {
+      const d = '2026-11-05';
+      const pt = await prisma.karatMaster.findFirst({ where: { companyId: A.company.id, metalType: 'PLATINUM', isActive: true } });
+      if (!pt) return;
+      expect((await api.post('/designs/rates/batch', { date: d, rates: [{ karat: pt.code, ratePerGram: 3000 }] })).status).toBe(200);
     });
 
     it('validates input and is gated by permission; a batch is all-or-nothing', async () => {

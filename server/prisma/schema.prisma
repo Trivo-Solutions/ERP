@@ -2091,6 +2091,9 @@ model MetalStock {
   sourceType     String
   sourceRef      String?
   avgCostPerGram Decimal  @db.Decimal(12, 4)
+  // GOLD | SILVER. NULL on every lot written before this column = GOLD. Vault consumption filters on it, so a Silver
+  // lot can never be drawn as Gold (or the reverse) even if their free-text karat labels happen to match.
+  metalType      String?
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -2150,6 +2153,11 @@ model MetalStockMovement {
 // (Client.currentBalance, same field a sale debits and a SalesReturn credits) as a standing store
 // credit redeemable against any future purchase, and adds the melted-down weight to the Metal
 // Vault (MetalStock, via the existing addMetalStock()) so the metal itself is tracked.
+enum MaterialPurchaseType {
+  OLD
+  PURE
+}
+
 model OldGoldExchange {
   id               String      @id @default(cuid())
   // Denormalized from clientId (Client is company-owned) — Phase 2 of the multi-tenant
@@ -2195,6 +2203,9 @@ model OldGoldExchange {
   // Snapshots — a later rate change never reprices a past purchase. ratePerGram above = effectivePurchaseRate and
   // valuedAmount = the purchase value, so every existing reader (ledger, reversal) keeps working unchanged.
   metalType             String?
+  // OLD (24K Old Gold rate family) | PURE (24K normal Gold rate family). NULL on every row written before this column
+  // = OLD. baseRate24K snapshots whichever family's 24K rate was used.
+  purchaseType          MaterialPurchaseType?
   testedPurityPercent   Decimal? @db.Decimal(7, 4)
   fineWeight            Decimal? @db.Decimal(12, 4)
   baseRate24K           Decimal? @db.Decimal(12, 4)

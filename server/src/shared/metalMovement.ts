@@ -80,12 +80,16 @@ async function moveLot(tx: Prisma.TransactionClient, companyId: string, lot: Lot
 // Returns the cost of the metal taken (weight x each lot's own avgCostPerGram) for the COGS / Inventory entry.
 export async function consumeVaultMetal(
   tx: Prisma.TransactionClient, companyId: string,
-  args: { karat: string; weight: number; meta: Omit<MovementMeta, 'movementType'> },
+  args: { karat: string; weight: number; metalType?: 'GOLD' | 'SILVER'; meta: Omit<MovementMeta, 'movementType'> },
 ): Promise<{ cost: number }> {
   const weight = r4(args.weight);
   if (!(weight > 0)) throw new AppError('Material sale weight must be more than zero', 400);
   const lots = await tx.metalStock.findMany({
-    where: { companyId, karat: args.karat, isActive: true, availableWt: { gt: 0 } },
+    where: {
+      companyId, karat: args.karat, isActive: true, availableWt: { gt: 0 },
+      // Gold and Silver lots never mix: a lot is only drawn as the metal it is. NULL (pre-column lots) is GOLD.
+      ...((args.metalType ?? 'GOLD') === 'GOLD' ? { OR: [{ metalType: null }, { metalType: 'GOLD' }] } : { metalType: args.metalType }),
+    },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
   const available = r4(lots.reduce((s, l) => s + Number(l.availableWt), 0));

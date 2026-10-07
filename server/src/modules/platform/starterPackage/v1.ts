@@ -174,6 +174,7 @@ export const STARTER_PACKAGE_V1: StarterPackageDefinition = {
       { code: '10K', metalType: 'GOLD', purity: '0.4170' },
       { code: 'SILVER', metalType: 'SILVER', purity: '0.9250' },
       { code: '925', metalType: 'SILVER', purity: '0.9250' },
+      { code: '999', metalType: 'SILVER', purity: '0.9990' },
       { code: 'PT', metalType: 'PLATINUM', purity: '0.9500' },
     ],
 
