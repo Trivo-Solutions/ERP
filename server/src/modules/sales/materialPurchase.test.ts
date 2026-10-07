@@ -208,6 +208,19 @@ describe('Material Purchase + Store Credit', () => {
       expect(rows[0].createdByName).toBeTruthy();
       expect(await listMaterialPurchases(B.ctx)).toHaveLength(0);
     });
+
+    it('filters by branch, material, purchase number and creator, and caps a branch-restricted caller', async () => {
+      const p = await buy({ grossWeight: 2, testedPurityPercent: 90 });
+      const num = p.exchangeNumber;
+      expect((await listMaterialPurchases(A.ctx, { exchangeNumber: num.toLowerCase() })).map((r) => r.id)).toContain(p.id);
+      expect(await listMaterialPurchases(A.ctx, { exchangeNumber: 'NO-SUCH-NUMBER' })).toHaveLength(0);
+      expect((await listMaterialPurchases(A.ctx, { branchId, metalType: 'GOLD', createdById: userId })).map((r) => r.id)).toContain(p.id);
+      expect(await listMaterialPurchases(A.ctx, { metalType: 'SILVER' })).toHaveLength(0);
+      expect(await listMaterialPurchases(A.ctx, { createdById: 'someone-else' })).toHaveLength(0);
+      const restricted = { ...A.ctx, branchAccess: { allBranches: false, branchIds: [otherBranchId] } } as any;
+      expect(await listMaterialPurchases(restricted)).toHaveLength(0);
+      await expect(listMaterialPurchases(restricted, { branchId })).rejects.toMatchObject({ statusCode: expect.any(Number) });
+    });
   });
 
   describe('Store Credit as the invoice payment — the purchase is never booked twice', () => {

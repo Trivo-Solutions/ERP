@@ -417,6 +417,10 @@ salesRouter.get('/material-purchases', requirePermission('sales:view'), async (r
       clientId: req.query.clientId as string | undefined,
       from: parseOptionalDate(req.query.from, 'From date'),
       to: parseOptionalDate(req.query.to, 'To date'),
+      branchId: (req.query.branchId as string) || undefined,
+      metalType: (req.query.metalType as string) || undefined,
+      exchangeNumber: (req.query.exchangeNumber as string) || undefined,
+      createdById: (req.query.createdById as string) || undefined,
     }),
   });
 });

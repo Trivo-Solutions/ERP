@@ -78,7 +78,7 @@ export function MaterialPurchaseDialog({ open, onClose, clientId: clientIdProp, 
 
   return (
     <Dialog open={open} onClose={mutation.isPending ? undefined : onClose} maxWidth="sm" fullWidth>
-      <DialogTitle>Purchase Old Gold / Material</DialogTitle>
+      <DialogTitle>New Material Purchase</DialogTitle>
       <DialogContent>
         <Alert severity="info" sx={{ mb: 2 }}>
           Buys the customer's physical gold and creates <b>Store Credit</b> on their account — it does not settle the bill by itself.

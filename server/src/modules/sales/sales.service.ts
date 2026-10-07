@@ -2010,11 +2010,22 @@ export async function createMaterialPurchase(data: {
 }
 
 // Completed Material Purchases (the rows carrying a tested-purity snapshot), newest first.
-export async function listMaterialPurchases(ctx: TenantContext, filters: { clientId?: string; from?: Date; to?: Date } = {}) {
+export async function listMaterialPurchases(ctx: TenantContext, filters: {
+  clientId?: string; from?: Date; to?: Date; branchId?: string; metalType?: string; exchangeNumber?: string; createdById?: string;
+} = {}) {
+  // A requested branch must be one the caller is granted; with none requested a branch-restricted caller is capped to their own set.
+  if (filters.branchId) await assertBranchAccessible(filters.branchId, ctx);
+  const branchFilter = filters.branchId
+    ? filters.branchId
+    : (ctx.branchAccess.allBranches ? undefined : { in: ctx.branchAccess.branchIds });
   const rows = await tenantQuery(ctx.companyId, (tx) => tx.oldGoldExchange.findMany({
     where: {
       companyId: ctx.companyId, testedPurityPercent: { not: null },
       ...(filters.clientId && { clientId: filters.clientId }),
+      ...(branchFilter && { branchId: branchFilter }),
+      ...(filters.metalType && { metalType: filters.metalType }),
+      ...(filters.createdById && { createdById: filters.createdById }),
+      ...(filters.exchangeNumber && { exchangeNumber: { contains: filters.exchangeNumber, mode: 'insensitive' as const } }),
       ...((filters.from || filters.to) && { exchangeDate: { ...(filters.from && { gte: filters.from }), ...(filters.to && { lte: filters.to }) } }),
     },
     include: { client: { select: { name: true, clientCode: true } }, branch: { select: { name: true } } },

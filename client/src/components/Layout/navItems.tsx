@@ -109,7 +109,7 @@ export const NAV_ITEMS: NavItem[] = [
     children: [
       { label: 'Memo-Out Tracking', path: '/sales/memos', permission: 'memo:manage' },
       { label: 'Sales Invoices', path: '/sales/invoices', permission: 'sales:view' },
-      { label: 'Old Gold Exchange', path: '/sales/exchanges', permission: 'sales:view' },
+      { label: 'Material Purchase', path: '/sales/exchanges', permission: 'sales:view' },
       // G1 Part K/L
       { label: 'GST Registrations', path: '/sales/gst-registrations', permission: 'gst:registration_view' },
       // Phase D — AATO + HSN Compliance
