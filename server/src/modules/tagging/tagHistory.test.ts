@@ -13,12 +13,17 @@ describe('barcode history (tag_history trigger + getTagHistory)', () => {
   let A: TestTenant;
   let B: TestTenant;
   let branch2Id: string;
+  let branchAName: string;
+  let userAName: string;
   let tagId: string;
   let bTagId: string;
 
   beforeAll(async () => {
     A = await createTestTenant(`TH-A${suffix}`, ['tag:edit']);
     B = await createTestTenant(`TH-B${suffix}`, []);
+    // TestTenant's branch/user types only carry id + code/email, so read the names the fixture stored.
+    branchAName = (await prisma.branch.findUniqueOrThrow({ where: { id: A.branch.id }, select: { name: true } })).name;
+    userAName = (await prisma.user.findUniqueOrThrow({ where: { id: A.user.id }, select: { name: true } })).name;
     branch2Id = (await prisma.branch.create({ data: { companyId: A.company.id, branchCode: `TH-BR2-${suffix}`, name: 'Second Branch' } })).id;
     const mk = (t: TestTenant, n: string) => prisma.jewelryTag.create({
       data: {
@@ -40,7 +45,7 @@ describe('barcode history (tag_history trigger + getTagHistory)', () => {
     expect(r.rows).toHaveLength(1);
     expect(r.rows[0].event).toBe('CREATED');
     expect(r.rows[0].data.tagNumber).toBe(`TH-A-${suffix}`);
-    expect(r.rows[0].data.branchName).toBe(A.branch.name);
+    expect(r.rows[0].data.branchName).toBe(branchAName);
     expect(Number(r.rows[0].data.costPrice)).toBe(1000);
   });
 
@@ -54,7 +59,7 @@ describe('barcode history (tag_history trigger + getTagHistory)', () => {
     expect(edit.changedFields).toEqual(expect.arrayContaining(['name', 'sellingPrice']));
     expect(edit.changedFields).not.toContain('updatedAt');
     expect(edit.actorUserId).toBe(A.user.id);
-    expect(edit.actorName).toBe(A.user.name);
+    expect(edit.actorName).toBe(userAName);
   });
 
   it('records a status change, and a branch change with the branch shown by name', async () => {
@@ -65,7 +70,7 @@ describe('barcode history (tag_history trigger + getTagHistory)', () => {
     expect(statusChange.event).toBe('STATUS_CHANGE');
     expect(statusChange.changes.status).toEqual({ from: 'IN_STOCK', to: 'RETIRED' });
     expect(branchChange.event).toBe('BRANCH_CHANGE');
-    expect(branchChange.changes.branchId).toEqual({ from: A.branch.name, to: 'Second Branch' });
+    expect(branchChange.changes.branchId).toEqual({ from: branchAName, to: 'Second Branch' });
     expect(branchChange.actorUserId).toBeNull(); // a bare platform write has no request actor
   });
 

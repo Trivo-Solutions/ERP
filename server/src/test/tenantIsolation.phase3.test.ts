@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { platformPrisma as prisma } from '../config/database'; // tests act as the platform/admin role for fixtures and verification; the code under test uses the runtime client
 import { createTestTenant, cleanupTestTenant, TestTenant } from './fixtures';
 import {
-  createDesign, getDesignById, updateDesign, saveBom, generateCostEstimate, upsertMetalRate,
+  createDesign, getDesignById, updateDesign, saveBom, generateCostEstimate,
 } from '../modules/product-design/design.service';
 import {
   createJobCard, recordWipEntry, advanceProcess, submitQcCheckpoint, listJobCards,
@@ -110,7 +110,7 @@ describe('Phase 3: design/manufacturing/inventory/outsourcing/orders tenant isol
 
       // Only Company A has a metal rate — proves generateCostEstimate never falls through to
       // another company's rate row when the caller's own is missing.
-      await upsertMetalRate(companyA.company.id, { date: new Date(), karat: '22K', ratePerGram: 6000 });
+      await prisma.metalRate.create({ data: { companyId: companyA.company.id, date: new Date(), karat: '22K', purity: 0.9167, ratePerGram: 6000 } });
       const estimate = await generateCostEstimate(designA.id, companyA.ctx);
       expect(estimate.companyId).toBe(companyA.company.id);
     });
