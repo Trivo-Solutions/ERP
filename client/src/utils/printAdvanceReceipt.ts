@@ -6,7 +6,7 @@ const INR = (v: unknown) =>
 const DATETIME = (v: unknown) =>
   v ? new Date(v as string).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
 
-const MODE_LABEL: Record<string, string> = { CASH: 'Cash', CARD: 'Card', UPI: 'UPI', BANK_TRANSFER: 'Bank Transfer', CHEQUE: 'Cheque' };
+const MODE_LABEL: Record<string, string> = { SPLIT: 'Split', CASH: 'Cash', CARD: 'Card', UPI: 'UPI', BANK_TRANSFER: 'Bank Transfer', CHEQUE: 'Cheque' };
 export const advanceModeLabel = (m: string) => MODE_LABEL[m] ?? m;
 
 // User-entered text (names, notes, reference) goes into a document.write()-ed page — always escaped.
@@ -65,8 +65,9 @@ export function buildAdvanceReceiptHtml(advance: any, companyName: string): stri
     ${row('Received from', esc(advance.client?.name))}
     ${row('Customer code', esc(advance.client?.clientCode))}
     ${row('Phone', esc(advance.client?.phone))}
-    ${row('Payment mode', esc(advanceModeLabel(advance.mode)))}
-    ${row('Reference no.', esc(advance.referenceNo))}
+    ${Array.isArray(advance.payments) && advance.payments.length > 1
+      ? advance.payments.map((p: any) => row(`Paid by ${esc(advanceModeLabel(p.mode))}`, `&#8377; ${INR(p.amount)}${p.referenceNo ? ` (ref ${esc(p.referenceNo)})` : ''}`)).join('')
+      : row('Payment mode', esc(advanceModeLabel(advance.mode))) + row('Reference no.', esc(advance.referenceNo))}
     ${row('Received by', esc(advance.createdBy?.name))}
   </table>
   <div class="amt"><span class="l">Advance received</span><span class="n ${reversed ? 'strike' : ''}">&#8377; ${INR(advance.amount)}</span></div>

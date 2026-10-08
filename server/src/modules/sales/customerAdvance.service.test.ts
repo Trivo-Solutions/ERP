@@ -165,6 +165,59 @@ describe('Customer Advances Phase 2 — receive, list, reverse', () => {
     });
   });
 
+  describe('split payments', () => {
+    const split = [{ mode: 'cash', amount: 30000 }, { mode: 'UPI', amount: 20000.5, referenceNo: 'UTR9' }];
+    const make = (c: string, over: Record<string, unknown> = {}) =>
+      createCustomerAdvance({ clientId: c, branchId: A.branch.id, payments: split, ...over } as any, A.ctx, A.user.id)
+        .then((r) => { refIds.push(r.advance.id); return r; });
+
+    it('one receipt, total of the lines, one balanced journal across cash and bank, and a clean reversal', async () => {
+      const c = await mk(A);
+      const { advance } = await make(c);
+      expect(advance).toMatchObject({ amount: 50000.5, mode: 'SPLIT', availableAmount: 50000.5 });
+      expect(advance.payments.map((p) => [p.mode, p.amount])).toEqual([['CASH', 30000], ['UPI', 20000.5]]);
+
+      const je = (await getJournalEntry(advance.id))!;
+      expect(lineAmount(je, LEDGER_ACCOUNT.CASH_IN_HAND)).toEqual({ debit: 30000, credit: 0 });
+      expect(lineAmount(je, LEDGER_ACCOUNT.BANK_ACCOUNT)).toEqual({ debit: 20000.5, credit: 0 });
+      expect(lineAmount(je, LEDGER_ACCOUNT.CUSTOMER_ADVANCES)).toEqual({ debit: 0, credit: 50000.5 });
+
+      await reverseCustomerAdvance(advance.id, A.ctx, A.user.id, 'keyed wrong');
+      const rev = (await prisma.journalEntry.findMany({ where: { referenceId: advance.id }, include: { lines: { include: { account: true } } } }))
+        .find((e) => e.description.startsWith('Reversal'))!;
+      const l = (code: string) => rev.lines.find((x) => x.account.code === code)!;
+      expect(Number(l(LEDGER_ACCOUNT.CASH_IN_HAND).credit)).toBe(30000);
+      expect(Number(l(LEDGER_ACCOUNT.BANK_ACCOUNT).credit)).toBe(20000.5);
+    });
+
+    it('only the cash part counts toward the Sec 269ST limit', async () => {
+      const c = await mk(A);
+      await make(c, { payments: [{ mode: 'CASH', amount: 1000 }, { mode: 'BANK_TRANSFER', amount: CASH_RECEIPT_LIMIT * 2 }] });
+      await make(c, { payments: [{ mode: 'CASH', amount: CASH_RECEIPT_LIMIT - 2000 }, { mode: 'UPI', amount: 5000 }] });
+      await expect(make(c, { payments: [{ mode: 'CASH', amount: 1000 }, { mode: 'UPI', amount: 1 }] })).rejects.toThrow(/Cash limit/);
+    });
+
+    it('filters by a mode inside a split, and rejects bad lines', async () => {
+      const c = await mk(A);
+      const { advance } = await make(c);
+      const list = await listCustomerAdvances(A.ctx, { clientId: c, mode: 'UPI' });
+      expect(list.rows.map((r) => r.id)).toContain(advance.id);
+      await expect(make(c, { payments: Array.from({ length: 11 }, () => ({ mode: 'UPI', amount: 1 })) })).rejects.toMatchObject({ statusCode: 400 });
+      await expect(make(c, { payments: [{ mode: 'UPI', amount: 5 }, { mode: 'CASH', amount: 0 }] })).rejects.toMatchObject({ statusCode: 400 });
+      await expect(make(c, { payments: [{ mode: 'OLD_GOLD', amount: 5 }] })).rejects.toMatchObject({ statusCode: 400 });
+    });
+it('allows the same mode on several lines (two UPI payments) in one receipt', async () => {      const c = await mk(A);      const { advance } = await make(c, { payments: [{ mode: 'UPI', amount: 700, referenceNo: 'U1' }, { mode: 'upi', amount: 300, referenceNo: 'U2' }] });      expect(advance).toMatchObject({ amount: 1000, mode: 'SPLIT' });      expect(advance.payments.map((p) => [p.mode, p.amount, p.referenceNo])).toEqual([['UPI', 700, 'U1'], ['UPI', 300, 'U2']]);      expect(lineAmount((await getJournalEntry(advance.id))!, LEDGER_ACCOUNT.BANK_ACCOUNT)).toEqual({ debit: 1000, credit: 0 });    });
+
+    it('a retry with the same key replays; the same key with different lines is refused', async () => {
+      const c = await mk(A);
+      const key = `split-${suffix}`;
+      const a = await make(c, { idempotencyKey: key });
+      const b = await make(c, { idempotencyKey: key });
+      expect(b.replayed).toBe(true); expect(b.advance.id).toBe(a.advance.id);
+      await expect(make(c, { idempotencyKey: key, payments: [{ mode: 'CASH', amount: 20000 }, { mode: 'UPI', amount: 30000.5 }] })).rejects.toMatchObject({ statusCode: 409 });
+    });
+  });
+
   describe('reversal', () => {
     it('reverses an unused advance with the inverse journal, reason and audit', async () => {
       const { advance } = await create({ mode: 'CASH', amount: 4000 });

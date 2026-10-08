@@ -1,0 +1,20 @@
+{
+  "name": "trivo-camera-bridge",
+  "version": "0.1.0",
+  "description": "TRIVO Photography Camera Bridge (Windows). Runs on a photography station, owns the camera, reports status/heartbeat to TRIVO. Phase 5A: foundation + mock camera only.",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.11"
+  }
+}

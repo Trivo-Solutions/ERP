@@ -15,6 +15,8 @@ import { PAYMENT_MODE_CUSTOMER_ADVANCE } from '../../shared/constants';
 // Client.currentBalance, never Store Credit, never an InvoicePayment. Applying one to an invoice is Phase 3 (bottom of this file).
 
 export const ADVANCE_MODES = ['CASH', 'CARD', 'UPI', 'BANK_TRANSFER', 'CHEQUE'] as const;
+export const MAX_PAYMENT_LINES = 10;
+export const SPLIT_MODE = 'SPLIT'; // customer_advances.mode when the receipt was paid in more than one mode
 export type AdvanceStatus = 'ACTIVE' | 'PARTIALLY_APPLIED' | 'FULLY_APPLIED' | 'REFUNDED' | 'REVERSED';
 const ADVANCE_STATUSES: AdvanceStatus[] = ['ACTIVE', 'PARTIALLY_APPLIED', 'FULLY_APPLIED', 'REFUNDED', 'REVERSED'];
 
@@ -36,6 +38,7 @@ const advanceInclude = {
   branch: { select: { id: true, name: true, branchCode: true } },
   createdBy: { select: { id: true, name: true } },
   reversedBy: { select: { id: true, name: true } },
+  payments: { select: { id: true, mode: true, amount: true, referenceNo: true }, orderBy: { createdAt: 'asc' as const } },
 } satisfies Prisma.CustomerAdvanceInclude;
 
 type AdvanceRow = Prisma.CustomerAdvanceGetPayload<{ include: typeof advanceInclude }>;
@@ -49,27 +52,56 @@ function present(a: AdvanceRow) {
     client: a.client, branch: a.branch,
     amount: Number(a.amount), appliedAmount: Number(a.appliedAmount), refundedAmount: Number(a.refundedAmount),
     availableAmount: available, mode: a.mode, referenceNo: a.referenceNo, notes: a.notes,
+    payments: a.payments.map((p) => ({ id: p.id, mode: p.mode, amount: Number(p.amount), referenceNo: p.referenceNo })),
     createdBy: a.createdBy, createdAt: a.createdAt, status,
     reversedAt: a.reversedAt, reversedBy: a.reversedBy, reversalReason: a.reversalReason,
   };
 }
 export type AdvanceView = ReturnType<typeof present>;
 
+export type AdvancePaymentInput = { mode: string; amount: number; referenceNo?: string };
+
+// Validates and normalises the payment lines (a mode may repeat, e.g. two UPI payments), each > 0 with at most 2 decimals.
+function normalisePayments(data: { amount?: number; mode?: string; referenceNo?: string; payments?: AdvancePaymentInput[] }) {
+  const raw = Array.isArray(data.payments) && data.payments.length > 0
+    ? data.payments
+    : [{ mode: data.mode as string, amount: data.amount as number, referenceNo: data.referenceNo }];
+  if (raw.length > MAX_PAYMENT_LINES) throw new AppError(`At most ${MAX_PAYMENT_LINES} payment lines`, 400);
+  return raw.map((r) => {
+    const amount = typeof r?.amount === 'string' ? Number(r.amount) : r?.amount;
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) throw new AppError('Advance amount must be greater than zero', 400);
+    // Money is stored to the paisa — refuse more precision rather than silently round a customer's money.
+    if (Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-6) throw new AppError('Advance amount cannot have more than 2 decimal places', 400);
+    const mode = String(r.mode ?? '').trim().toUpperCase();
+    if (!(ADVANCE_MODES as readonly string[]).includes(mode)) throw new AppError(`Payment mode must be one of ${ADVANCE_MODES.join(', ')}`, 400);
+    const referenceNo = r.referenceNo ? String(r.referenceNo).trim().slice(0, 120) || undefined : undefined;
+    return { mode, amount, referenceNo: mode === 'CASH' ? undefined : referenceNo };
+  });
+}
+
+// Debit lines for the receipt: modes collapse to their ledger account (cash vs bank).
+function ledgerAmounts(lines: { mode: string; amount: number }[]) {
+  const byAccount = new Map<string, number>();
+  for (const l of lines) {
+    const code = cashOrBankAccount(l.mode);
+    byAccount.set(code, (byAccount.get(code) ?? 0) + paise(l.amount));
+  }
+  return [...byAccount].map(([accountCode, p]) => ({ accountCode, amount: rupees(p) }));
+}
+
 export async function createCustomerAdvance(
-  data: { clientId: string; branchId: string; amount: number; mode: string; referenceNo?: string; notes?: string; idempotencyKey?: string },
+  data: { clientId: string; branchId: string; amount?: number; mode?: string; referenceNo?: string; payments?: AdvancePaymentInput[]; notes?: string; idempotencyKey?: string },
   ctx: TenantContext, userId: string,
 ): Promise<{ advance: AdvanceView; replayed: boolean }> {
   for (const k of ['clientId', 'branchId'] as const) {
     if (typeof data[k] !== 'string' || !data[k]) throw new AppError(`${k} is required`, 400);
   }
-  const amount = typeof data.amount === 'string' ? Number(data.amount) : data.amount;
-  if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) throw new AppError('Advance amount must be greater than zero', 400);
-  // Money is stored to the paisa — refuse more precision rather than silently round a customer's money.
-  if (Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-6) throw new AppError('Advance amount cannot have more than 2 decimal places', 400);
-  const mode = String(data.mode ?? '').trim().toUpperCase();
-  if (!(ADVANCE_MODES as readonly string[]).includes(mode)) throw new AppError(`Payment mode must be one of ${ADVANCE_MODES.join(', ')}`, 400);
+  // `payments` is the split form; the plain amount + mode form is a single line.
+  const lines = normalisePayments(data);
+  const amount = rupees(lines.reduce((sum, l) => sum + paise(l.amount), 0));
+  const mode = lines.length === 1 ? lines[0].mode : SPLIT_MODE;
   const idempotencyKey = data.idempotencyKey ? String(data.idempotencyKey).trim().slice(0, 120) || undefined : undefined;
-  const referenceNo = data.referenceNo ? String(data.referenceNo).trim() || undefined : undefined;
+  const referenceNo = lines.length === 1 ? lines[0].referenceNo : undefined;
   const notes = data.notes ? String(data.notes).trim() || undefined : undefined;
 
   await assertOwnedByCompany('client', data.clientId, ctx.companyId, 'Client');
@@ -83,7 +115,9 @@ export async function createCustomerAdvance(
     : Promise.resolve(null);
   const replay = (existing: AdvanceRow) => {
     // Same key reused for a different request is a client bug, not a retry — never hand back the wrong record.
-    if (existing.clientId !== data.clientId || paise(existing.amount) !== paise(amount) || existing.mode !== mode) {
+    const sig = (xs: { mode: string; amount: Prisma.Decimal | number }[]) => xs.map((x) => `${x.mode}:${paise(x.amount)}`).sort().join(",");
+    const sameLines = sig(existing.payments) === sig(lines);
+    if (existing.clientId !== data.clientId || paise(existing.amount) !== paise(amount) || existing.mode !== mode || !sameLines) {
       throw new AppError('This idempotency key was already used for a different advance', 409);
     }
     return { advance: present(existing), replayed: true };
@@ -95,12 +129,15 @@ export async function createCustomerAdvance(
   try {
     created = await tenantTransaction(ctx.companyId, async (tx) => {
       const advanceDate = new Date();
-      await assertCashLimit(tx, ctx.companyId, data.clientId, { paymentDate: advanceDate, amount, mode }); // Sec 269ST
+      // Sec 269ST counts only the cash part of a split receipt.
+      const cashPart = rupees(lines.filter((l) => l.mode === 'CASH').reduce((sum, l) => sum + paise(l.amount), 0));
+      if (cashPart > 0) await assertCashLimit(tx, ctx.companyId, data.clientId, { paymentDate: advanceDate, amount: cashPart, mode: 'CASH' });
       const advanceNumber = await nextDocumentNumber(ctx.companyId, 'ADV', 'ADV', tx, gstFinancialYear(advanceDate));
       const row = await tx.customerAdvance.create({
         data: {
           companyId: ctx.companyId, branchId: data.branchId, clientId: data.clientId, advanceNumber, advanceDate,
           amount, mode, referenceNo, notes, createdById: userId, idempotencyKey,
+          payments: { create: lines.map((l) => ({ mode: l.mode, amount: l.amount, referenceNo: l.referenceNo })) },
         },
         include: advanceInclude,
       });
@@ -108,7 +145,7 @@ export async function createCustomerAdvance(
         date: advanceDate, description: `Customer advance ${advanceNumber}`,
         referenceType: 'CustomerAdvance', referenceId: row.id, userId,
         lines: [
-          { accountCode: cashOrBankAccount(mode), debit: amount },
+          ...ledgerAmounts(lines).map((l) => ({ accountCode: l.accountCode, debit: l.amount })),
           { accountCode: LEDGER_ACCOUNT.CUSTOMER_ADVANCES, credit: amount },
         ],
       });
@@ -125,7 +162,7 @@ export async function createCustomerAdvance(
 
   await createAuditEntry('customer_advances', created.id, userId, 'CREATE', undefined, {
     advanceNumber: created.advanceNumber, clientId: created.clientId, customer: created.client.name,
-    amount, mode, branchId: created.branchId, branch: created.branch.name,
+    amount, mode, payments: lines.map((l) => ({ mode: l.mode, amount: l.amount })), branchId: created.branchId, branch: created.branch.name,
   }, ctx.companyId);
   return { advance: present(created), replayed: false };
 }
@@ -156,7 +193,7 @@ export async function listCustomerAdvances(ctx: TenantContext, f: AdvanceFilters
     ...(branchId ? { branchId } : scope ? { branchId: scope } : {}),
     ...(str(f.clientId) && { clientId: str(f.clientId) }),
     ...(str(f.createdById) && { createdById: str(f.createdById) }),
-    ...(mode && { mode }),
+    ...(mode && (mode === SPLIT_MODE ? { mode } : { payments: { some: { mode } } })),
     ...(str(f.advanceNumber) && { advanceNumber: { contains: str(f.advanceNumber), mode: 'insensitive' } }),
     ...((f.dateFrom || f.dateTo) && { advanceDate: { ...(f.dateFrom && { gte: f.dateFrom }), ...(f.dateTo && { lt: f.dateTo }) } }),
   };
@@ -194,7 +231,7 @@ export async function reverseCustomerAdvance(id: string, ctx: TenantContext, use
   const before = await tenantTransaction(ctx.companyId, async (tx) => {
     // Lock first so a concurrent application (Phase 3) or second reversal serialises behind this one.
     await tx.$queryRaw`SELECT "id" FROM "customer_advances" WHERE "id" = ${id} FOR UPDATE`;
-    const adv = await tx.customerAdvance.findUniqueOrThrow({ where: { id } });
+    const adv = await tx.customerAdvance.findUniqueOrThrow({ where: { id }, include: { payments: true } });
     if (adv.reversedAt) throw new AppError('This advance has already been reversed', 409);
     if (paise(adv.appliedAmount) > 0) throw new AppError('This advance has already been applied to an invoice and cannot be reversed', 409);
     if (paise(adv.refundedAmount) > 0) throw new AppError('This advance has been refunded and cannot be reversed', 409);
@@ -212,7 +249,8 @@ export async function reverseCustomerAdvance(id: string, ctx: TenantContext, use
       referenceType: 'CustomerAdvanceReversal', referenceId: adv.id, userId,
       lines: [
         { accountCode: LEDGER_ACCOUNT.CUSTOMER_ADVANCES, debit: amount },
-        { accountCode: cashOrBankAccount(adv.mode), credit: amount },
+        // Pay back through the accounts the money came in by.
+        ...ledgerAmounts(adv.payments.length ? adv.payments.map((p) => ({ mode: p.mode, amount: Number(p.amount) })) : [{ mode: adv.mode, amount }]).map((l) => ({ accountCode: l.accountCode, credit: l.amount })),
       ],
     });
     return adv;

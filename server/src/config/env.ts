@@ -19,6 +19,14 @@ const envSchema = z.object({
   MINIO_SECRET_KEY: z.string().default('minioadmin'),
   MINIO_BUCKET_NAME: z.string().default('sea-erp-files'),
   MINIO_USE_SSL: z.string().default('false').transform(v => v === 'true'),
+  // Storage foundation (shared/storage). 'minio' = any S3-compatible endpoint addressed by the MINIO_* keys above
+  // (MinIO in dev, R2/S3 in production); 'memory' is for tests/dev only and refused in production.
+  STORAGE_PROVIDER: z.enum(['minio', 'memory']).default('minio'),
+  STORAGE_REGION: z.string().optional(),
+  STORAGE_SIGNED_URL_TTL_SECONDS: z.string().default('300').transform(Number),
+  PHOTO_MAX_UPLOAD_BYTES: z.string().default('26214400').transform(Number), // 25 MB
+  // Operational (not a company setting): how many images this server process encodes at once.
+  PHOTO_PROCESSING_CONCURRENCY: z.string().default('2').transform(Number),
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.string().default('587').transform(Number),
   SMTP_USER: z.string().optional(),

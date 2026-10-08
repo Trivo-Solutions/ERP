@@ -48,3 +48,24 @@ export function assertObjectKeyBelongsToCompany(companyId: string, key: string):
   if (!ok) throw new AppError('File not found', 404);
   return normalized;
 }
+
+// ── Photography (TagImage) keys ──────────────────────────────────────────────────────────────────────────
+//   companies/<companyId>/photography/tags/<tagId>/images/<imageId>/<variant>.<ext>
+// Built ONLY from server-held ids + a fixed variant/extension vocabulary — never from a client filename or
+// key, and never from a branch (a photo belongs to its tag; the tag branch can change).
+export const PHOTO_VARIANTS = ['original', 'optimized', 'thumbnail'] as const;
+export type PhotoVariant = (typeof PHOTO_VARIANTS)[number];
+export const PHOTO_EXTENSIONS = ['jpg', 'png', 'webp'] as const;
+export type PhotoExtension = (typeof PHOTO_EXTENSIONS)[number];
+
+const ENTITY_ID = /^[a-z0-9]{20,32}$/; // cuid, same shape as companyId
+
+export function photographyImageKey(
+  companyId: string, tagId: string, imageId: string, variant: PhotoVariant, ext: PhotoExtension,
+): string {
+  if (!ENTITY_ID.test(tagId)) throw new Error('photography key requires a valid tagId');
+  if (!ENTITY_ID.test(imageId)) throw new Error('photography key requires a valid imageId');
+  if (!(PHOTO_VARIANTS as readonly string[]).includes(variant)) throw new Error(`invalid photo variant: ${variant}`);
+  if (!(PHOTO_EXTENSIONS as readonly string[]).includes(ext)) throw new Error(`invalid photo extension: ${ext}`);
+  return companyObjectKey(companyId, 'photography', 'tags', tagId, 'images', imageId, `${variant}.${ext}`);
+}

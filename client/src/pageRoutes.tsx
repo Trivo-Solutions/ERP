@@ -106,6 +106,11 @@ import { Gstr1Table12 } from './pages/Reports/Gstr1Table12';
 import { Gstr1Table13 } from './pages/Reports/Gstr1Table13';
 import { Gstr1 } from './pages/Reports/Gstr1';
 
+// Photography
+import { PhotographyDashboard } from './pages/Photography/PhotographyDashboard';
+import { PhotographyCapturePage } from './pages/Photography/PhotographyCapturePage';
+import { PhotographySettingsPage } from './pages/Photography/PhotographySettingsPage';
+
 // Settings & Hardware
 import { SettingsPage } from './pages/Settings/SettingsPage';
 import { CompanyUsersPage } from './pages/Settings/CompanyUsersPage';
@@ -173,6 +178,9 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="tagging/tags"         element={<TagsPage />} />
       <Route path="tagging/tags/new"     element={<NewTagPage />} />
       <Route path="tagging/tags/:id/edit" element={<NewTagPage />} />
+      <Route path="photography" element={<RequirePermission permission="photography:view"><PhotographyDashboard /></RequirePermission>} />
+      <Route path="photography/capture" element={<RequirePermission permission="photography:capture"><PhotographyCapturePage /></RequirePermission>} />
+      <Route path="photography/settings" element={<RequirePermission permission="photography:manage_settings"><PhotographySettingsPage /></RequirePermission>} />
       <Route path="tagging/lookup"       element={<StockLookupPage />} />
       <Route path="tagging/transactions" element={<JewelTransactionHistory />} />
       <Route path="tagging/templates"    element={<TagTemplateDesignerPage />} />

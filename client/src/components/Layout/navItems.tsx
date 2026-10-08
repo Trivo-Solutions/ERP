@@ -3,7 +3,7 @@ import {
   DesignServices, ShoppingCart, Inventory2, Assignment, Factory,
   Engineering, Verified, PointOfSale, AccountBalance,
   Dashboard, Settings,
-  HardwareOutlined, Assessment, AltRoute, Style, Tune, Calculate, People,
+  HardwareOutlined, PhotoCamera, Assessment, AltRoute, Style, Tune, Calculate, People,
 } from '@mui/icons-material';
 
 export interface NavItem {
@@ -93,6 +93,14 @@ export const NAV_ITEMS: NavItem[] = [
       { label: 'Branch Receives',   path: '/tagging/receives',  permission: 'branch:transfer' },
       { label: 'Repair Register',   path: '/tagging/repairs',   permission: 'repair:view' },
       { label: 'Repair Transfers',  path: '/tagging/repair-transfers', permission: 'repair:view' },
+    ],
+  },
+  {
+    label: 'Photography', icon: <PhotoCamera />, permission: 'photography:view',
+    children: [
+      { label: 'Dashboard', path: '/photography', permission: 'photography:view' },
+      { label: 'Capture', path: '/photography/capture', permission: 'photography:capture' },
+      { label: 'Settings', path: '/photography/settings', permission: 'photography:manage_settings' },
     ],
   },
   {

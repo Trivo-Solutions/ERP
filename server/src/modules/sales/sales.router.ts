@@ -294,7 +294,7 @@ salesRouter.get('/advances', requirePermission('payment:view'), async (req: Requ
 salesRouter.post('/advances', requirePermission('payment:create'), async (req: Request, res: Response) => {
   const b = req.body ?? {};
   const { advance, replayed } = await advanceSvc.createCustomerAdvance(
-    { clientId: b.clientId, branchId: b.branchId, amount: b.amount, mode: b.mode, referenceNo: b.referenceNo, notes: b.notes, idempotencyKey: b.idempotencyKey },
+    { clientId: b.clientId, branchId: b.branchId, amount: b.amount, mode: b.mode, referenceNo: b.referenceNo, payments: b.payments, notes: b.notes, idempotencyKey: b.idempotencyKey },
     req.tenant!, req.user!.userId,
   );
   res.status(replayed ? 200 : 201).json({ success: true, data: advance, replayed });

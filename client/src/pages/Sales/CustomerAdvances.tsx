@@ -3,7 +3,7 @@ import {
   Box, Card, Grid, Typography, Chip, Button, TextField, Autocomplete, Dialog, DialogTitle, DialogContent,
   DialogActions, Drawer, IconButton, Divider, Alert, Tooltip, CircularProgress, InputAdornment, LinearProgress,
 } from '@mui/material';
-import { Print, Close, Undo, FileDownload } from '@mui/icons-material';
+import { Print, Close, Undo, FileDownload, Add, DeleteOutline } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost } from '../../api/client';
@@ -187,13 +187,18 @@ export function CustomerAdvances() {
 
 // ─── New advance ─────────────────────────────────────────────────────────────
 
+const MAX_PAY_LINES = 10; // matches the server cap
+type PayLine = { key: number; mode: string; amount: string; referenceNo: string };
+
 function NewAdvanceDialog({ clients, branches, onClose, onCreated, companyName }: { clients: any[]; branches: any[]; onClose: () => void; onCreated: (a: any) => void; companyName: string }) {
   const { enqueueSnackbar } = useSnackbar();
   const [client, setClient] = useState<any | null>(null);
   const [branchId, setBranchId] = useState(branches.length === 1 ? branches[0].id : '');
-  const [amount, setAmount] = useState('');
-  const [mode, setMode] = useState('CASH');
-  const [referenceNo, setReferenceNo] = useState('');
+  // One line per payment mode (a split receipt has several, e.g. Cash + UPI); the advance is their total.
+  const nextKey = useRef(1);
+  const [lines, setLines] = useState<PayLine[]>([{ key: 0, mode: 'CASH', amount: '', referenceNo: '' }]);
+  const setLine = (key: number, patch: Partial<PayLine>) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)));
+  const addLine = () => setLines((ls) => (ls.length >= MAX_PAY_LINES ? ls : [...ls, { key: nextKey.current++, mode: ls[ls.length - 1]?.mode ?? 'CASH', amount: '', referenceNo: '' }]));
   const [notes, setNotes] = useState('');
   const [touched, setTouched] = useState(false);
   const [done, setDone] = useState<any | null>(null);
@@ -201,14 +206,20 @@ function NewAdvanceDialog({ clients, branches, onClose, onCreated, companyName }
   const idempotencyKey = useRef(globalThis.crypto?.randomUUID?.() ?? `adv-${Date.now()}-${Math.random()}`).current;
   const submitting = useRef(false);
 
-  const amt = Number(amount);
-  const amountError = !amount ? 'Enter the amount' : !(amt > 0) ? 'Amount must be greater than zero' : Math.abs(amt * 100 - Math.round(amt * 100)) > 1e-6 ? 'Up to 2 decimal places' : '';
-  const errors = { client: client ? '' : 'Select a customer', branch: branchId ? '' : 'Select a branch', amount: amountError };
-  const invalid = Object.values(errors).some(Boolean);
-  const refUsed = mode !== 'CASH';
+  const lineError = (l: PayLine) => {
+    const a = Number(l.amount);
+    return !l.amount ? 'Enter the amount' : !(a > 0) ? 'Amount must be greater than zero' : Math.abs(a * 100 - Math.round(a * 100)) > 1e-6 ? 'Up to 2 decimal places' : '';
+  };
+  const amt = lines.reduce((sum, l) => sum + (Number(l.amount) > 0 ? Math.round(Number(l.amount) * 100) : 0), 0) / 100;
+  const errors = { client: client ? '' : 'Select a customer', branch: branchId ? '' : 'Select a branch' };
+  const invalid = !!(errors.client || errors.branch || lines.some((l) => lineError(l)));
+  const split = lines.length > 1;
 
   const save = useMutation({
-    mutationFn: () => apiPost<any>('/sales/advances', { clientId: client.id, branchId, amount: amt, mode, referenceNo: referenceNo || undefined, notes: notes || undefined, idempotencyKey }),
+    mutationFn: () => apiPost<any>('/sales/advances', {
+      clientId: client.id, branchId, notes: notes || undefined, idempotencyKey,
+      payments: lines.map((l) => ({ mode: l.mode, amount: Number(l.amount), referenceNo: l.mode !== 'CASH' && l.referenceNo ? l.referenceNo : undefined })),
+    }),
     onSuccess: (adv) => { setDone(adv); enqueueSnackbar(`Advance ${adv.advanceNumber} received`, { variant: 'success' }); },
     onError: (e: any) => enqueueSnackbar(errMsg(e, 'Could not save the advance'), { variant: 'error' }),
     onSettled: () => { submitting.current = false; },
@@ -259,19 +270,39 @@ function NewAdvanceDialog({ clients, branches, onClose, onCreated, companyName }
               <SelectField size="small" required label="Branch" value={branchId} onChange={(e) => setBranchId(e.target.value)} emptyLabel="Select branch"
                 options={branches.map((b) => ({ value: b.id, label: b.name }))} error={touched && !!errors.branch} helperText={touched ? errors.branch : ' '} />
             </Grid>
-            <Grid item xs={12} sm={6}>
-              <TextField size="small" fullWidth required label="Amount" value={amount} inputMode="decimal" InputLabelProps={{ shrink: true }}
-                onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ''))}
-                InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
-                error={touched && !!errors.amount} helperText={touched ? errors.amount : ' '} />
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <SelectField size="small" required label="Payment Mode" value={mode} onChange={(e) => setMode(e.target.value)} options={MODES} helperText=" " />
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <TextField size="small" fullWidth label={refUsed ? 'Reference No.' : 'Reference No. (not needed for cash)'} disabled={!refUsed} value={refUsed ? referenceNo : ''}
-                onChange={(e) => setReferenceNo(e.target.value)} InputLabelProps={{ shrink: true }} helperText=" " />
-            </Grid>
+            {lines.map((l, i) => {
+              const err = lineError(l);
+              return (
+                <Grid item xs={12} key={l.key}>
+                  <Grid container spacing={1.5} alignItems="flex-start">
+                    <Grid item xs={12} sm={3.5}>
+                      <SelectField size="small" required label={split ? `Payment Mode ${i + 1}` : 'Payment Mode'} value={l.mode} onChange={(e) => setLine(l.key, { mode: e.target.value })}
+                        options={MODES} helperText=" " />
+                    </Grid>
+                    <Grid item xs={6} sm={3.5}>
+                      <TextField size="small" fullWidth required label="Amount" value={l.amount} inputMode="decimal" InputLabelProps={{ shrink: true }}
+                        onChange={(e) => setLine(l.key, { amount: e.target.value.replace(/[^0-9.]/g, '') })}
+                        InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
+                        error={touched && !!err} helperText={touched && err ? err : ' '} />
+                    </Grid>
+                    <Grid item xs={split ? 4.5 : 6} sm={split ? 4 : 5}>
+                      <TextField size="small" fullWidth label={l.mode !== 'CASH' ? 'Reference No.' : 'Reference (n/a for cash)'} disabled={l.mode === 'CASH'} value={l.mode !== 'CASH' ? l.referenceNo : ''}
+                        onChange={(e) => setLine(l.key, { referenceNo: e.target.value })} InputLabelProps={{ shrink: true }} helperText=" " />
+                    </Grid>
+                    {split && (
+                      <Grid item xs={1.5} sm={1}>
+                        <Tooltip title="Remove this payment"><IconButton size="small" aria-label="Remove payment" onClick={() => setLines((ls) => ls.filter((x) => x.key !== l.key))}><DeleteOutline fontSize="small" /></IconButton></Tooltip>
+                      </Grid>
+                    )}
+                  </Grid>
+                </Grid>
+              );
+            })}
+            {lines.length < MAX_PAY_LINES && (
+              <Grid item xs={12} sx={{ mt: -1 }}>
+                <Button size="small" startIcon={<Add />} onClick={addLine}>Split payment</Button>
+              </Grid>
+            )}
             <Grid item xs={12}>
               <TextField size="small" fullWidth multiline minRows={2} label="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} InputLabelProps={{ shrink: true }} placeholder="e.g. for wedding set, due in November" />
             </Grid>
@@ -366,8 +397,10 @@ function AdvanceDetailDrawer({ id, onClose, companyName }: { id: string | null; 
               <Field label="Advance Amount">{money(a.amount)}</Field>
               <Field label="Applied">{money(a.appliedAmount)}</Field>
               <Field label="Available Advance"><Box component="span" sx={{ color: a.availableAmount > 0 ? 'success.main' : 'text.disabled' }}>{money(a.availableAmount)}</Box></Field>
-              <Field label="Payment Mode">{advanceModeLabel(a.mode)}</Field>
-              {a.referenceNo && <Field label="Reference No.">{a.referenceNo}</Field>}
+              {a.payments?.length > 1
+                ? a.payments.map((p: any) => <Field key={p.id} label={advanceModeLabel(p.mode)}>{money(p.amount)}{p.referenceNo ? ` · ${p.referenceNo}` : ''}</Field>)
+                : <><Field label="Payment Mode">{advanceModeLabel(a.mode)}</Field>
+                  {a.referenceNo && <Field label="Reference No.">{a.referenceNo}</Field>}</>}
             </Section>
             {appRows.length > 0 && (
               <Section title="Applied to invoices">

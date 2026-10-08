@@ -32,7 +32,7 @@ Monorepo layout: npm workspaces, `server/` + `client/`, run together via the roo
 |---|---|---|---|
 | `postgres` | `postgres:16-alpine` | 5432 | Primary database (`sea_erp_db`) |
 | `redis` | `redis:7-alpine` | 6379 | Cache / session store |
-| `minio` | `minio/minio` | 9000 (API), 9001 (console) | File storage, S3-compatible |
+| `minio` | `cgr.dev/chainguard/minio` | 9000 (API), 9001 (console) | File storage, S3-compatible |
 
 ### Running it
 
@@ -438,6 +438,57 @@ shape; `price-master` and `making-charges` additionally support a soft-delete `D
 | Stone types | `/stone-types` | C4 — `PriceMaster` stone valuation |
 | Price master | `/price-master` | C4 — stone `saleAmount` auto-resolution |
 | Making charges | `/making-charges` | C3 — invoice line making-charge/wastage auto-fill |
+
+---
+
+### Photography — `/photography` (Camera Bridge remote capture)
+
+Two kinds of caller share this router and are never interchangeable:
+
+| Caller | Authenticates with | Identity it proves |
+|---|---|---|
+| ERP user (browser) | normal login JWT + permission | *who* is asking |
+| Camera Bridge (a photography workstation) | **station credential** `Authorization: Bearer stn_…` | *which bridge* — nothing else |
+
+**Three secrets, three jobs.** The *station credential* identifies the bridge (issued once per station by a user with
+`photography:manage_stations`, `POST /stations/:stationId/credentials`; the plaintext is returned **once** and only a hash is
+stored; scopes `station:heartbeat` + `station:capture`; default expiry 365 days; revocable). The *capture session ticket* (HS256,
+15 min, `POST /capture-sessions`) is one user's authorization to shoot one tag at one station. The *command ticket* is minted by
+the ERP for each command (it carries a `cmd` claim, outlives its command by 60 s) and is what the bridge uploads with. A
+credential alone authorizes no tag; a ticket alone authorizes no station. Credentials issued before Phase 5D carry
+`station:heartbeat` only and are refused by the command and upload endpoints (`401/403`) — **re-issue them**.
+
+**ERP user flow** (permission `photography:capture`)
+
+| Step | Request | Notes |
+|---|---|---|
+| 1 | `POST /capture-sessions` `{ tagId, stationId, captureSource: "BRIDGE" }` | returns `{ sessionId, ticket, expiresAt, … }` |
+| 2 | `POST /capture-commands` `{ ticket, imageType }` | `imageType` ∈ PRIMARY\|SIDE\|BACK\|DETAIL\|OTHER; `201` with the command (`status: QUEUED`). `409 STATION_OFFLINE` if no heartbeat in 90 s; `409 STATION_BUSY` if the station already has a live command; no other body fields are accepted |
+| 3 | `GET /capture-commands/:commandId` | poll; `status` ∈ QUEUED → ACCEPTED → CAPTURING → **UPLOADED** (`image` present) \| FAILED (`failureCode`, `failureDetail`) \| EXPIRED. Only the requesting user can read it |
+
+A command lives 180 s. Stale ones are expired lazily on the next read/poll.
+
+**Bridge flow** (station credential with `station:capture`; every response `Cache-Control: no-store`)
+
+| Request | Purpose |
+|---|---|
+| `POST /stations/heartbeat` | liveness + camera state (`station:heartbeat`). May carry `cameras: { cameras: [{id, displayName, available, selected, unavailableReason?, placement?}], selectedId, selectionRequired }` (the bridge's own discovery result, stored on the station; `GET /stations` returns it as `cameras`, `null` until reported). The answer carries `cameraSelection: { cameraId } \| null` — a camera a user asked for that the bridge has not applied yet |
+| `POST /stations/:stationId/camera-selection` | `photography:capture`. `{ cameraId }` only; the camera must be one the station's bridge reported (`409 CAMERA_UNKNOWN` / `CAMERA_UNAVAILABLE`); company + branch scoped like every station route (other company / branch → 404); audited. `202`. The bridge validates and applies it, then reports the new selection |
+| `GET /stations/commands/next?waitSeconds=0..25` | long-poll for this station's oldest `QUEUED` command → `{ data: { command: { commandId, correlationId, stationId, tagNumber, imageType, ticket, expiresAt } \| null, cameraSelection: { cameraId } \| null } }`. A pending camera request ends the wait early. A command is re-delivered **only while `QUEUED`** |
+| `POST /stations/commands/:commandId/status` | `{ status: "ACCEPTED" }` then `{ status: "CAPTURING" }`, or `{ status: "FAILED", code, detail? }` (`code` ∈ BUSY\|CAMERA_ERROR\|AUTH_ERROR\|UPLOAD_ERROR\|NETWORK_ERROR\|COMMAND_REJECTED\|EXPIRED; `detail` upper-case token). Count-checked transitions: `409 COMMAND_STATE`, `410 COMMAND_EXPIRED` |
+| `POST /images` (multipart: `ticket`, `imageType`, `idempotencyKey`, `file`, optional `capturedAt`, `cameraLabel`) | the same upload pipeline the browser uses. The bridge sends no company/branch/user/station/tag/storage field; the ticket decides. Same `idempotencyKey` ⇒ `200` replay (no second image); first success `201`; the command becomes `UPLOADED` |
+
+The bridge never captures before the ERP has acknowledged `ACCEPTED` → `CAPTURING`. Because redelivery stops at `ACCEPTED`, a
+bridge that crashes and restarts can never receive — and so never re-capture — a command it had already acknowledged; such a
+command simply expires (the user retries).
+
+**Replay / idempotency.** `commandId` = no duplicate *execution* (the bridge remembers it; the ERP refuses a second `ACCEPTED`).
+`idempotencyKey` = no duplicate *image* (one per image, reused by every upload retry). `correlationId` = tracing only.
+
+**Bridge local API** (on the workstation, `127.0.0.1:9102`, `GET` only, Host-header checked, no CORS, no secrets):
+`/health` → `{ ok }`; `/status` → bridge (state, version, mode), station (id, status, `captureScope`), erp (`connectivity`,
+`lastHeartbeatSuccessAt`), camera (state, provider), heartbeat, capture (state, `current` command id + phase, `lastResult`), and
+`lastError` (a normalized category); `/camera/status` → camera state + provider. See `camera-bridge/README.md`.
 
 ---
 

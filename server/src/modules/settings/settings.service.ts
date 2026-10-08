@@ -99,6 +99,8 @@ export async function listConfigs(companyId: string) {
 }
 
 export async function upsertConfig(companyId: string, key: string, value: string, category?: string) {
+  // Photography settings are validated, merged and audited by their own endpoint; the generic key/value door must not bypass that.
+  if (key.toLowerCase().startsWith('photography.')) throw new AppError('Photography settings are managed through /photography/settings', 400);
   return tenantQuery(companyId, (tx) =>
     tx.systemConfig.upsert({
       where: { companyId_key: { companyId, key } },

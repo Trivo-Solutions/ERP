@@ -81,8 +81,9 @@ export async function assertCashLimit(
     _sum: { amount: true },
   });
   // Customer Advance cash receipts are cash received from this client too: same day, same limit.
-  const advAgg = await tx.customerAdvance.aggregate({
-    where: { companyId, clientId, mode: { equals: 'CASH', mode: 'insensitive' }, advanceDate: { gte: start, lt: end }, reversedAt: null },
+  // Counted from the payment lines, so the cash part of a split receipt counts and its UPI part does not.
+  const advAgg = await tx.customerAdvancePayment.aggregate({
+    where: { companyId, mode: { equals: 'CASH', mode: 'insensitive' }, advance: { clientId, advanceDate: { gte: start, lt: end }, reversedAt: null } },
     _sum: { amount: true },
   });
   const already = Number(agg._sum.amount ?? 0) + Number(advAgg._sum.amount ?? 0);

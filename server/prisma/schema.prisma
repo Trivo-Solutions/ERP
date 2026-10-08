@@ -63,136 +63,141 @@ model Company {
   createdAt               DateTime  @default(now())
   updatedAt               DateTime  @updatedAt
 
-  branches                  Branch[]
-  companyUsers              CompanyUser[]
-  roles                     Role[]
-  clients                   Client[]
-  jewelryTags               JewelryTag[]
-  salesInvoices             SalesInvoice[]
-  invoiceItems              InvoiceItem[]
-  numberSequences           NumberSequence[]
-  oldGoldExchanges          OldGoldExchange[]
-  memoOuts                  MemoOut[]
-  memoItems                 MemoItem[]
-  stockAudits               StockAudit[]
-  branchTransfers           BranchTransfer[]
-  tagTemplates              TagTemplate[]
-  invoicePayments           InvoicePayment[]
-  salesReturns              SalesReturn[]
-  repairCases               RepairCase[]
-  repairTransfers           RepairTransfer[]
-  repairTransferItems       RepairTransferItem[]
-  tagRetags                 TagRetag[]
-  accounts                  Account[]
-  journalEntries            JournalEntry[]
-  journalLines              JournalLine[]
-  costCenters               CostCenter[]
-  auditLogs                 AuditLog[]
-  tagHistory                TagHistory[]
-  purchaseReturns           PurchaseReturn[]
-  supplierPayments          SupplierPayment[]
-  purchaseLots              PurchaseLot[]
-  poItemCategories          PoItemCategory[]
-  vendorComponentRates      VendorComponentRate[]
-  poItemComponents          PoItemComponent[]
-  grnItemComponentRates     GrnItemComponentRate[]
-  purchaseReturnItems       PurchaseReturnItem[]
-  purchaseOrders            PurchaseOrder[]
-  poItems                   PoItem[]
-  goodsReceiptNotes         GoodsReceiptNote[]
-  grnItems                  GrnItem[]
-  purchaseRequisitions      PurchaseRequisition[]
-  prItems                   PrItem[]
-  approvalHistory           ApprovalHistory[]
-  hallmarkingBatches        HallmarkingBatch[]
-  hallmarkingItems          HallmarkingItem[]
-  repairJobs                RepairJob[]
-  repairTransactions        RepairTransaction[]
-  designs                   Design[]
-  designFiles               DesignFile[]
-  bomItems                  BomItem[]
-  bomProcesses              BomProcess[]
-  costEstimates             CostEstimate[]
-  suppliers                 Supplier[]
-  metalStocks               MetalStock[]
-  metalStockMovements       MetalStockMovement[]
-  customerAdvances          CustomerAdvance[]
+  branches                    Branch[]
+  companyUsers                CompanyUser[]
+  roles                       Role[]
+  clients                     Client[]
+  jewelryTags                 JewelryTag[]
+  salesInvoices               SalesInvoice[]
+  invoiceItems                InvoiceItem[]
+  numberSequences             NumberSequence[]
+  oldGoldExchanges            OldGoldExchange[]
+  memoOuts                    MemoOut[]
+  memoItems                   MemoItem[]
+  stockAudits                 StockAudit[]
+  branchTransfers             BranchTransfer[]
+  tagTemplates                TagTemplate[]
+  invoicePayments             InvoicePayment[]
+  salesReturns                SalesReturn[]
+  repairCases                 RepairCase[]
+  repairTransfers             RepairTransfer[]
+  repairTransferItems         RepairTransferItem[]
+  tagRetags                   TagRetag[]
+  accounts                    Account[]
+  journalEntries              JournalEntry[]
+  journalLines                JournalLine[]
+  costCenters                 CostCenter[]
+  auditLogs                   AuditLog[]
+  tagHistory                  TagHistory[]
+  purchaseReturns             PurchaseReturn[]
+  supplierPayments            SupplierPayment[]
+  purchaseLots                PurchaseLot[]
+  poItemCategories            PoItemCategory[]
+  vendorComponentRates        VendorComponentRate[]
+  poItemComponents            PoItemComponent[]
+  grnItemComponentRates       GrnItemComponentRate[]
+  purchaseReturnItems         PurchaseReturnItem[]
+  purchaseOrders              PurchaseOrder[]
+  poItems                     PoItem[]
+  goodsReceiptNotes           GoodsReceiptNote[]
+  grnItems                    GrnItem[]
+  purchaseRequisitions        PurchaseRequisition[]
+  prItems                     PrItem[]
+  approvalHistory             ApprovalHistory[]
+  hallmarkingBatches          HallmarkingBatch[]
+  hallmarkingItems            HallmarkingItem[]
+  repairJobs                  RepairJob[]
+  repairTransactions          RepairTransaction[]
+  designs                     Design[]
+  designFiles                 DesignFile[]
+  bomItems                    BomItem[]
+  bomProcesses                BomProcess[]
+  costEstimates               CostEstimate[]
+  suppliers                   Supplier[]
+  metalStocks                 MetalStock[]
+  metalStockMovements         MetalStockMovement[]
+  customerAdvances            CustomerAdvance[]
+  photographyStations         PhotographyStation[]
+  stationCredentials          StationCredential[]
+  tagImages                   TagImage[]
+  photographyCaptureCommands  PhotographyCaptureCommand[]
+  customerAdvancePayments     CustomerAdvancePayment[]
   customerAdvanceApplications CustomerAdvanceApplication[]
-  stoneLots                 StoneLot[]
-  stoneLotSplits            StoneLotSplit[]
-  consumables               Consumable[]
-  consumableTxns            ConsumableTransaction[]
-  salesOrders               SalesOrder[]
-  orderItems                OrderItem[]
-  materialReservations      MaterialReservation[]
-  clientNotifications       ClientNotification[]
-  jobCards                  JobCard[]
-  jobProcesses              JobProcess[]
-  wipTracking               WipTracking[]
-  qcCheckpoints             QcCheckpoint[]
-  artisans                  Artisan[]
-  karigarLedgers            KarigarLedger[]
-  processTolerances         ProcessTolerance[]
-  subcontractorInvoices     SubcontractorInvoice[]
-  hardwareDevices           HardwareDevice[]
-  metalRates                MetalRate[]
-  priceMasters              PriceMaster[]
-  jewelryTagMaterials       JewelryTagMaterial[]
-  makingCharges             MakingCharge[]
-  tagEstimates              TagEstimate[]
-  tagEstimateItems          TagEstimateItem[]
-  estimateTemplates         EstimateTemplate[]
-  stockAuditItems           StockAuditItem[]
-  branchTransferItems       BranchTransferItem[]
-  salesReturnItems          SalesReturnItem[]
-  exportDocuments           ExportDocument[]
-  taxInvoices               TaxInvoice[]
-  systemConfigs             SystemConfig[]
-  userBranchAccess          UserBranchAccess[]
-  companyInvitations        CompanyInvitation[]
-  designCategories          DesignCategory[]
-  karatMasters              KaratMaster[]
-  productCategories         ProductCategory[]
-  subCategories             SubCategory[]
-  categorySubCategories     CategorySubCategory[]
-  collections               Collection[]
-  sizes                     Size[]
-  settingTypes              SettingType[]
-  materialCodes             MaterialCode[]
-  stockTypes                StockType[]
-  stoneTypes                StoneType[]
-  stoneGrades               StoneGrade[]
-  gstRegistrations          CompanyGstRegistration[]
-  taxInvoiceTemplates       TaxInvoiceTemplate[]
+  stoneLots                   StoneLot[]
+  stoneLotSplits              StoneLotSplit[]
+  consumables                 Consumable[]
+  consumableTxns              ConsumableTransaction[]
+  salesOrders                 SalesOrder[]
+  orderItems                  OrderItem[]
+  materialReservations        MaterialReservation[]
+  clientNotifications         ClientNotification[]
+  jobCards                    JobCard[]
+  jobProcesses                JobProcess[]
+  wipTracking                 WipTracking[]
+  qcCheckpoints               QcCheckpoint[]
+  artisans                    Artisan[]
+  karigarLedgers              KarigarLedger[]
+  processTolerances           ProcessTolerance[]
+  subcontractorInvoices       SubcontractorInvoice[]
+  hardwareDevices             HardwareDevice[]
+  metalRates                  MetalRate[]
+  priceMasters                PriceMaster[]
+  jewelryTagMaterials         JewelryTagMaterial[]
+  makingCharges               MakingCharge[]
+  tagEstimates                TagEstimate[]
+  tagEstimateItems            TagEstimateItem[]
+  estimateTemplates           EstimateTemplate[]
+  stockAuditItems             StockAuditItem[]
+  branchTransferItems         BranchTransferItem[]
+  salesReturnItems            SalesReturnItem[]
+  exportDocuments             ExportDocument[]
+  taxInvoices                 TaxInvoice[]
+  systemConfigs               SystemConfig[]
+  userBranchAccess            UserBranchAccess[]
+  companyInvitations          CompanyInvitation[]
+  designCategories            DesignCategory[]
+  karatMasters                KaratMaster[]
+  productCategories           ProductCategory[]
+  subCategories               SubCategory[]
+  categorySubCategories       CategorySubCategory[]
+  collections                 Collection[]
+  sizes                       Size[]
+  settingTypes                SettingType[]
+  materialCodes               MaterialCode[]
+  stockTypes                  StockType[]
+  stoneTypes                  StoneType[]
+  stoneGrades                 StoneGrade[]
+  gstRegistrations            CompanyGstRegistration[]
+  taxInvoiceTemplates         TaxInvoiceTemplate[]
   // G2a
-  creditNotes               CreditNote[]
-  creditNoteItems           CreditNoteItem[]
-  debitNotes                DebitNote[]
-  debitNoteItems            DebitNoteItem[]
+  creditNotes                 CreditNote[]
+  creditNoteItems             CreditNoteItem[]
+  debitNotes                  DebitNote[]
+  debitNoteItems              DebitNoteItem[]
   // G2g-4b — Sales (outward) Debit Note. Wholly separate from the procurement-side DebitNote above.
-  salesDebitNotes           SalesDebitNote[]
+  salesDebitNotes             SalesDebitNote[]
   // G2g-7d — inward RCM foundation.
-  rcmLiabilities            RcmLiability[]
-  selfInvoices              SelfInvoice[]
-  salesDebitNoteItems       SalesDebitNoteItem[]
-  creditNoteTemplates       CreditNoteTemplate[]
-  debitNoteTemplates        DebitNoteTemplate[]
+  rcmLiabilities              RcmLiability[]
+  selfInvoices                SelfInvoice[]
+  salesDebitNoteItems         SalesDebitNoteItem[]
+  creditNoteTemplates         CreditNoteTemplate[]
+  debitNoteTemplates          DebitNoteTemplate[]
   // Phase D: GST AATO
-  gstAatos                  CompanyGstAato[]
-  gstAatoHistories          CompanyGstAatoHistory[]
+  gstAatos                    CompanyGstAato[]
+  gstAatoHistories            CompanyGstAatoHistory[]
   // G2g-6a: statutory filing-period persistence foundation (schema + RLS only — no builder/filing
   // service exists yet; see GstReturnPeriod's own comment).
-  gstReturnPeriods          GstReturnPeriod[]
-  gstFilingSnapshots        GstFilingSnapshot[]
-  gstFilingAttempts         GstFilingAttempt[]
+  gstReturnPeriods            GstReturnPeriod[]
+  gstFilingSnapshots          GstFilingSnapshot[]
+  gstFilingAttempts           GstFilingAttempt[]
   // G2g-7e: GSTR-2B ingestion.
-  gst2bStatements           Gst2bStatement[]
-  gst2bDocuments            Gst2bDocument[]
+  gst2bStatements             Gst2bStatement[]
+  gst2bDocuments              Gst2bDocument[]
   // G8a: GST integration foundation.
-  gstIntegrationConfigs     GstIntegrationConfig[]
-  gstIntegrationCredentials GstIntegrationCredential[]
-  gstIntegrationRequestLogs GstIntegrationRequestLog[]
-  eInvoiceRecords           EInvoiceRecord[]
+  gstIntegrationConfigs       GstIntegrationConfig[]
+  gstIntegrationCredentials   GstIntegrationCredential[]
+  gstIntegrationRequestLogs   GstIntegrationRequestLog[]
+  eInvoiceRecords             EInvoiceRecord[]
 
   @@map("companies")
 }
@@ -706,65 +711,71 @@ model User {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
-  companyMemberships           CompanyUser[]
-  auditLogs                    AuditLog[]
-  karigarIssues                KarigarLedger[]        @relation("IssuedBy")
-  qcSignoffs                   QcCheckpoint[]
-  wipEntries                   WipTracking[]
-  requestedRequisitions        PurchaseRequisition[]  @relation("PRRequester")
-  approvedRequisitions         PurchaseRequisition[]  @relation("PRApprover")
-  performedApprovals           ApprovalHistory[]
-  submittedPOs                 PurchaseOrder[]        @relation("POSubmitter")
-  approvedPOs                  PurchaseOrder[]        @relation("POApprover")
-  tagsCreated                  JewelryTag[]           @relation("TagCreatedBy")
-  transfersRequested           BranchTransfer[]       @relation("TransferRequester")
-  transfersApproved            BranchTransfer[]       @relation("TransferApprover")
-  invoicesSold                 SalesInvoice[]
-  stockAuditsStarted           StockAudit[]
-  tagTemplatesCreated          TagTemplate[]
-  tagEstimatesCreated          TagEstimate[]          @relation("EstimateCreatedBy")
-  tagEstimatesAttended         TagEstimate[]          @relation("EstimateSalesPerson")
-  invoiceItemsSold             InvoiceItem[]          @relation("InvoiceItemSalesPerson")
-  estimateTemplatesCreated     EstimateTemplate[]
-  taxInvoiceTemplatesCreated   TaxInvoiceTemplate[]
-  invitationsSent              CompanyInvitation[]    @relation("InvitationInviter")
-  platformAuditLogs            PlatformAuditLog[]
-  invoicesVoided               SalesInvoice[]         @relation("InvoiceVoidedBy")
-  paymentsReversed             InvoicePayment[]       @relation("PaymentReversedBy")
-  exchangesReversed            OldGoldExchange[]      @relation("ExchangeReversedBy")
-  advancesCreated              CustomerAdvance[]      @relation("AdvanceCreatedBy")
-  advancesReversed             CustomerAdvance[]      @relation("AdvanceReversedBy")
-  advanceApplicationsMade      CustomerAdvanceApplication[] @relation("AdvanceAppliedBy")
-  advanceApplicationsReversed  CustomerAdvanceApplication[] @relation("AdvanceApplicationReversedBy")
+  companyMemberships            CompanyUser[]
+  auditLogs                     AuditLog[]
+  karigarIssues                 KarigarLedger[]              @relation("IssuedBy")
+  qcSignoffs                    QcCheckpoint[]
+  wipEntries                    WipTracking[]
+  requestedRequisitions         PurchaseRequisition[]        @relation("PRRequester")
+  approvedRequisitions          PurchaseRequisition[]        @relation("PRApprover")
+  performedApprovals            ApprovalHistory[]
+  submittedPOs                  PurchaseOrder[]              @relation("POSubmitter")
+  approvedPOs                   PurchaseOrder[]              @relation("POApprover")
+  tagsCreated                   JewelryTag[]                 @relation("TagCreatedBy")
+  transfersRequested            BranchTransfer[]             @relation("TransferRequester")
+  transfersApproved             BranchTransfer[]             @relation("TransferApprover")
+  invoicesSold                  SalesInvoice[]
+  stockAuditsStarted            StockAudit[]
+  tagTemplatesCreated           TagTemplate[]
+  tagEstimatesCreated           TagEstimate[]                @relation("EstimateCreatedBy")
+  tagEstimatesAttended          TagEstimate[]                @relation("EstimateSalesPerson")
+  invoiceItemsSold              InvoiceItem[]                @relation("InvoiceItemSalesPerson")
+  estimateTemplatesCreated      EstimateTemplate[]
+  taxInvoiceTemplatesCreated    TaxInvoiceTemplate[]
+  invitationsSent               CompanyInvitation[]          @relation("InvitationInviter")
+  platformAuditLogs             PlatformAuditLog[]
+  invoicesVoided                SalesInvoice[]               @relation("InvoiceVoidedBy")
+  paymentsReversed              InvoicePayment[]             @relation("PaymentReversedBy")
+  exchangesReversed             OldGoldExchange[]            @relation("ExchangeReversedBy")
+  advancesCreated               CustomerAdvance[]            @relation("AdvanceCreatedBy")
+  advancesReversed              CustomerAdvance[]            @relation("AdvanceReversedBy")
+  photographyStationsRegistered PhotographyStation[]         @relation("StationRegisteredBy")
+  stationCredentialsCreated     StationCredential[]          @relation("StationCredentialCreatedBy")
+  stationCredentialsRevoked     StationCredential[]          @relation("StationCredentialRevokedBy")
+  tagImagesCaptured             TagImage[]                   @relation("TagImageCapturedBy")
+  tagImagesDeleted              TagImage[]                   @relation("TagImageDeletedBy")
+  captureCommandsRequested      PhotographyCaptureCommand[]  @relation("CaptureCommandRequestedBy")
+  advanceApplicationsMade       CustomerAdvanceApplication[] @relation("AdvanceAppliedBy")
+  advanceApplicationsReversed   CustomerAdvanceApplication[] @relation("AdvanceApplicationReversedBy")
   // G2a
-  creditNotesCreated           CreditNote[]           @relation("CreditNoteCreatedBy")
-  creditNotesCancelled         CreditNote[]           @relation("CreditNoteCancelledBy")
-  debitNotesCreated            DebitNote[]            @relation("DebitNoteCreatedBy")
-  debitNotesCancelled          DebitNote[]            @relation("DebitNoteCancelledBy")
-  creditNoteTemplatesCreated   CreditNoteTemplate[]
-  debitNoteTemplatesCreated    DebitNoteTemplate[]
+  creditNotesCreated            CreditNote[]                 @relation("CreditNoteCreatedBy")
+  creditNotesCancelled          CreditNote[]                 @relation("CreditNoteCancelledBy")
+  debitNotesCreated             DebitNote[]                  @relation("DebitNoteCreatedBy")
+  debitNotesCancelled           DebitNote[]                  @relation("DebitNoteCancelledBy")
+  creditNoteTemplatesCreated    CreditNoteTemplate[]
+  debitNoteTemplatesCreated     DebitNoteTemplate[]
   // G2g-4b — Sales Debit Note (outward, sell-side). Distinct relation names from the
   // procurement DebitNote above — the two domains never share a permission or a relation.
-  salesDebitNotesCreated       SalesDebitNote[]       @relation("SalesDebitNoteCreatedBy")
-  salesDebitNotesCancelled     SalesDebitNote[]       @relation("SalesDebitNoteCancelledBy")
+  salesDebitNotesCreated        SalesDebitNote[]             @relation("SalesDebitNoteCreatedBy")
+  salesDebitNotesCancelled      SalesDebitNote[]             @relation("SalesDebitNoteCancelledBy")
   // G2g-7d — inward RCM foundation.
-  rcmLiabilitiesCreated        RcmLiability[]         @relation("RcmLiabilityCreatedBy")
-  rcmLiabilitiesPaid           RcmLiability[]         @relation("RcmLiabilityPaidBy")
-  selfInvoicesCreated          SelfInvoice[]          @relation("SelfInvoiceCreatedBy")
-  selfInvoicesCancelled        SelfInvoice[]          @relation("SelfInvoiceCancelledBy")
+  rcmLiabilitiesCreated         RcmLiability[]               @relation("RcmLiabilityCreatedBy")
+  rcmLiabilitiesPaid            RcmLiability[]               @relation("RcmLiabilityPaidBy")
+  selfInvoicesCreated           SelfInvoice[]                @relation("SelfInvoiceCreatedBy")
+  selfInvoicesCancelled         SelfInvoice[]                @relation("SelfInvoiceCancelledBy")
   // G2g-6a: schema-only foundation — no code creates these rows yet.
-  gstFilingSnapshotsCreated    GstFilingSnapshot[]
-  gstFilingAttemptsCreated     GstFilingAttempt[]
+  gstFilingSnapshotsCreated     GstFilingSnapshot[]
+  gstFilingAttemptsCreated      GstFilingAttempt[]
   // G2g-6e: the actor who performed each controlled lifecycle transition.
-  gstReturnPeriodsFiled        GstReturnPeriod[]      @relation("GstReturnPeriodFiledBy")
-  gstReturnPeriodsLocked       GstReturnPeriod[]      @relation("GstReturnPeriodLockedBy")
+  gstReturnPeriodsFiled         GstReturnPeriod[]            @relation("GstReturnPeriodFiledBy")
+  gstReturnPeriodsLocked        GstReturnPeriod[]            @relation("GstReturnPeriodLockedBy")
   // G2g-7e: GSTR-2B ingestion.
-  gst2bStatementsImported      Gst2bStatement[]       @relation("Gst2bStatementImportedBy")
+  gst2bStatementsImported       Gst2bStatement[]             @relation("Gst2bStatementImportedBy")
   // G8a: GST integration foundation (config admin only — no provider/network action is ever
   // attributed to a user in this phase, since none is performed).
-  gstIntegrationConfigsCreated GstIntegrationConfig[] @relation("GstIntegrationConfigCreatedBy")
-  gstIntegrationConfigsUpdated GstIntegrationConfig[] @relation("GstIntegrationConfigUpdatedBy")
-  eInvoiceRecordsCreated       EInvoiceRecord[]       @relation("EInvoiceRecordCreatedBy")
+  gstIntegrationConfigsCreated  GstIntegrationConfig[]       @relation("GstIntegrationConfigCreatedBy")
+  gstIntegrationConfigsUpdated  GstIntegrationConfig[]       @relation("GstIntegrationConfigUpdatedBy")
+  eInvoiceRecordsCreated        EInvoiceRecord[]             @relation("EInvoiceRecordCreatedBy")
 
   @@map("users")
 }
@@ -2159,45 +2170,45 @@ enum MaterialPurchaseType {
 }
 
 model OldGoldExchange {
-  id               String      @id @default(cuid())
+  id                    String                @id @default(cuid())
   // Denormalized from clientId (Client is company-owned) — Phase 2 of the multi-tenant
   // migration. Stamped from the authenticated tenant context, always cross-checked against
   // the resolved client's own companyId at write time (see sales.service.ts).
-  companyId        String
-  company          Company     @relation(fields: [companyId], references: [id])
-  exchangeNumber   String
-  client           Client      @relation(fields: [clientId, companyId], references: [id, companyId])
-  clientId         String
-  exchangeDate     DateTime    @default(now())
-  description      String
-  karat            String
-  grossWeight      Decimal     @db.Decimal(10, 4)
-  stoneWeight      Decimal     @default(0) @db.Decimal(10, 4)
-  netWeight        Decimal     @db.Decimal(10, 4)
+  companyId             String
+  company               Company               @relation(fields: [companyId], references: [id])
+  exchangeNumber        String
+  client                Client                @relation(fields: [clientId, companyId], references: [id, companyId])
+  clientId              String
+  exchangeDate          DateTime              @default(now())
+  description           String
+  karat                 String
+  grossWeight           Decimal               @db.Decimal(10, 4)
+  stoneWeight           Decimal               @default(0) @db.Decimal(10, 4)
+  netWeight             Decimal               @db.Decimal(10, 4)
   // MetalRate snapshot at exchangeDate — like costPrice on JewelryTag, a later rate change must
   // not silently reprice a past exchange.
-  ratePerGram      Decimal     @db.Decimal(12, 4)
-  deductionPercent Decimal     @default(0) @db.Decimal(5, 2)
-  valuedAmount     Decimal     @db.Decimal(12, 2)
-  metalStockId     String?     @unique
-  metalStock       MetalStock? @relation(fields: [metalStockId], references: [id])
+  ratePerGram           Decimal               @db.Decimal(12, 4)
+  deductionPercent      Decimal               @default(0) @db.Decimal(5, 2)
+  valuedAmount          Decimal               @db.Decimal(12, 2)
+  metalStockId          String?               @unique
+  metalStock            MetalStock?           @relation(fields: [metalStockId], references: [id])
   // Where the metal was taken in (null on rows from before this column).
-  branchId         String?
-  branch           Branch?     @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  branchId              String?
+  branch                Branch?               @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
   // Set when the customer handed over a TAGGED piece (a previously sold JewelryTag): the tag is RETIRED by this
   // exchange (never deleted, never re-sold) and its metal is what enters the vault.
-  tagId            String?
-  tag              JewelryTag? @relation(fields: [tagId, companyId], references: [id, companyId], onDelete: Restrict)
-  notes            String?
-  createdAt        DateTime    @default(now())
+  tagId                 String?
+  tag                   JewelryTag?           @relation(fields: [tagId, companyId], references: [id, companyId], onDelete: Restrict)
+  notes                 String?
+  createdAt             DateTime              @default(now())
   // J3 Decision 2: reversing an OLD_GOLD-settled InvoicePayment must reverse this exchange too, in
   // the same transaction (currentBalance credit, the Metal Vault addition, and the journal) — see
   // reverseInvoicePayment() in sales.service.ts. A reversed exchange can never fund a second
   // reversal (checked before either write).
-  reversedAt       DateTime?
-  reversedById     String?
-  reversedBy       User?       @relation("ExchangeReversedBy", fields: [reversedById], references: [id])
-  reversalReason   String?
+  reversedAt            DateTime?
+  reversedById          String?
+  reversedBy            User?                 @relation("ExchangeReversedBy", fields: [reversedById], references: [id])
+  reversalReason        String?
   // Material Purchase (non-tagged old gold bought over the counter at a TESTED purity, valued off the 24K Old Gold
   // rate). All null on a plain exchange; testedPurityPercent being set is what marks a row as a Material Purchase.
   // Snapshots — a later rate change never reprices a past purchase. ratePerGram above = effectivePurchaseRate and
@@ -2206,10 +2217,10 @@ model OldGoldExchange {
   // OLD (24K Old Gold rate family) | PURE (24K normal Gold rate family). NULL on every row written before this column
   // = OLD. baseRate24K snapshots whichever family's 24K rate was used.
   purchaseType          MaterialPurchaseType?
-  testedPurityPercent   Decimal? @db.Decimal(7, 4)
-  fineWeight            Decimal? @db.Decimal(12, 4)
-  baseRate24K           Decimal? @db.Decimal(12, 4)
-  effectivePurchaseRate Decimal? @db.Decimal(12, 4)
+  testedPurityPercent   Decimal?              @db.Decimal(7, 4)
+  fineWeight            Decimal?              @db.Decimal(12, 4)
+  baseRate24K           Decimal?              @db.Decimal(12, 4)
+  effectivePurchaseRate Decimal?              @db.Decimal(12, 4)
   createdById           String?
   // Replay guard: one dialog-open = one key; the same key can never book a second purchase.
   idempotencyKey        String?
@@ -2897,12 +2908,13 @@ model Branch {
   metalStockMovements MetalStockMovement[]
   customerAdvances    CustomerAdvance[]
   taxInvoiceTemplates TaxInvoiceTemplate[]
+  photographyStations PhotographyStation[]
   creditNoteTemplates CreditNoteTemplate[]
   debitNoteTemplates  DebitNoteTemplate[]
   salesDebitNotes     SalesDebitNote[]
   repairCasesOrigin   RepairCase[]
-  repairTransfersFrom RepairTransfer[] @relation("RepairTransferFrom")
-  repairTransfersTo   RepairTransfer[] @relation("RepairTransferTo")
+  repairTransfersFrom RepairTransfer[]     @relation("RepairTransferFrom")
+  repairTransfersTo   RepairTransfer[]     @relation("RepairTransferTo")
   tagRetags           TagRetag[]
 
   @@unique([companyId, branchCode])
@@ -3050,10 +3062,14 @@ model JewelryTag {
   stockAuditItems     StockAuditItem[]
   repairJobs          RepairJob[]
   repairCases         RepairCase[]
-  retaggedFrom        TagRetag?        @relation("RetagOld")
-  retaggedTo          TagRetag?        @relation("RetagNew")
+  retaggedFrom        TagRetag?                   @relation("RetagOld")
+  retaggedTo          TagRetag?                   @relation("RetagNew")
   hallmarkingItems    HallmarkingItem[]
   estimates           TagEstimate[]
+  // Photography state lives in its own table (tag_images), never as columns on this model: the tag-history trigger
+  // would record every photo as a tag change.
+  tagImages           TagImage[]
+  captureCommands     PhotographyCaptureCommand[]
 
   @@unique([companyId, tagNumber])
   // composite-FK target: lets the database refuse a child that points at another company's JewelryTag
@@ -3700,18 +3716,18 @@ model SalesInvoice {
   voidedBy       User?     @relation("InvoiceVoidedBy", fields: [voidedById], references: [id])
   voidReason     String?
 
-  items           InvoiceItem[]
-  taxDetails      TaxInvoice?
+  items               InvoiceItem[]
+  taxDetails          TaxInvoice?
   // Estimates that were billed on this invoice (TagEstimate.invoiceId).
-  billedEstimates TagEstimate[]
-  exportDocs      ExportDocument[]
-  payments        InvoicePayment[]
+  billedEstimates     TagEstimate[]
+  exportDocs          ExportDocument[]
+  payments            InvoicePayment[]
   advanceApplications CustomerAdvanceApplication[]
-  returns         SalesReturn[]
-  repairJob       RepairJob?
-  creditNotes     CreditNote[]
-  salesDebitNotes SalesDebitNote[]
-  eInvoiceRecords EInvoiceRecord[]
+  returns             SalesReturn[]
+  repairJob           RepairJob?
+  creditNotes         CreditNote[]
+  salesDebitNotes     SalesDebitNote[]
+  eInvoiceRecords     EInvoiceRecord[]
 
   @@unique([companyId, invoiceNumber])
   // composite-FK target: lets the database refuse a child that points at another company's SalesInvoice
@@ -3826,33 +3842,33 @@ model InvoiceItem {
 }
 
 model InvoicePayment {
-  id             String        @id @default(cuid())
+  id                  String                       @id @default(cuid())
   // Direct — Phase 2. Denormalized from clientId (always present, unlike invoiceId).
-  companyId      String
-  company        Company       @relation(fields: [companyId], references: [id])
-  paymentNumber  String
+  companyId           String
+  company             Company                      @relation(fields: [companyId], references: [id])
+  paymentNumber       String
   // Nullable (F2): a standalone/on-account payment isn't against any one invoice yet. clientId is
   // stored directly on every row (not just resolved through invoice.clientId) so both kinds query
   // uniformly for a client statement (F4) without a conditional join.
-  invoice        SalesInvoice? @relation(fields: [invoiceId, companyId], references: [id, companyId], onDelete: Restrict)
-  invoiceId      String?
-  client         Client        @relation(fields: [clientId, companyId], references: [id, companyId])
-  clientId       String
-  paymentDate    DateTime
-  amount         Decimal       @db.Decimal(12, 2)
-  mode           String
-  referenceNo    String?
-  forexRate      Decimal?      @db.Decimal(10, 4)
-  forexGainLoss  Decimal?      @db.Decimal(12, 2)
-  notes          String?
-  createdAt      DateTime      @default(now())
+  invoice             SalesInvoice?                @relation(fields: [invoiceId, companyId], references: [id, companyId], onDelete: Restrict)
+  invoiceId           String?
+  client              Client                       @relation(fields: [clientId, companyId], references: [id, companyId])
+  clientId            String
+  paymentDate         DateTime
+  amount              Decimal                      @db.Decimal(12, 2)
+  mode                String
+  referenceNo         String?
+  forexRate           Decimal?                     @db.Decimal(10, 4)
+  forexGainLoss       Decimal?                     @db.Decimal(12, 2)
+  notes               String?
+  createdAt           DateTime                     @default(now())
   // J3 Decision 1 (Option A — flag the original row, never edit/delete it): a reversed payment is
   // never money-real again. Every place that sums InvoicePayment as a receipt must add
   // `reversedAt: null` to its filter (see getClientLedger/getDayBook in finance.service.ts).
-  reversedAt     DateTime?
-  reversedById   String?
-  reversedBy     User?         @relation("PaymentReversedBy", fields: [reversedById], references: [id])
-  reversalReason String?
+  reversedAt          DateTime?
+  reversedById        String?
+  reversedBy          User?                        @relation("PaymentReversedBy", fields: [reversedById], references: [id])
+  reversalReason      String?
   // Customer Advances: set when this payment was settled from a customer advance.
   advanceApplications CustomerAdvanceApplication[] // at most one (invoicePaymentId is unique)
 
@@ -3895,6 +3911,8 @@ model CustomerAdvance {
   reversalReason String?
 
   applications CustomerAdvanceApplication[]
+  // How the money came in. One row per payment mode; `mode` above is that mode, or 'SPLIT' when there are several.
+  payments     CustomerAdvancePayment[]
 
   @@unique([companyId, advanceNumber])
   @@unique([companyId, idempotencyKey])
@@ -3905,6 +3923,23 @@ model CustomerAdvance {
   @@index([companyId, branchId])
   @@index([companyId, advanceDate])
   @@map("customer_advances")
+}
+
+// One payment-mode line of a customer advance (a split receipt has several, e.g. Cash + UPI). Sum = advance.amount.
+model CustomerAdvancePayment {
+  id          String          @id @default(cuid())
+  companyId   String
+  company     Company         @relation(fields: [companyId], references: [id])
+  advanceId   String
+  advance     CustomerAdvance @relation(fields: [advanceId, companyId], references: [id, companyId], onDelete: Restrict)
+  mode        String
+  amount      Decimal         @db.Decimal(12, 2)
+  referenceNo String?
+  createdAt   DateTime        @default(now())
+
+  @@index([companyId, advanceId])
+  @@index([companyId, mode])
+  @@map("customer_advance_payments")
 }
 
 // One use of a customer advance against an invoice. Always paired with an InvoicePayment row (invoicePaymentId is
@@ -3968,21 +4003,21 @@ model SalesReturn {
 }
 
 model SalesReturnItem {
-  id            String      @id @default(cuid())
-  companyId     String
-  company       Company     @relation(fields: [companyId], references: [id])
-  return        SalesReturn @relation(fields: [returnId, companyId], references: [id, companyId], onDelete: Cascade)
-  returnId      String
-  invoiceItem   InvoiceItem @relation(fields: [invoiceItemId, companyId], references: [id, companyId])
-  invoiceItemId String
+  id             String      @id @default(cuid())
+  companyId      String
+  company        Company     @relation(fields: [companyId], references: [id])
+  return         SalesReturn @relation(fields: [returnId, companyId], references: [id, companyId], onDelete: Cascade)
+  returnId       String
+  invoiceItem    InvoiceItem @relation(fields: [invoiceItemId, companyId], references: [id, companyId])
+  invoiceItemId  String
   // Set for a tagged line; null for a material (vault) line, which carries returnedWeight instead.
-  tag           JewelryTag? @relation(fields: [tagId, companyId], references: [id, companyId], onDelete: Restrict)
-  tagId         String?
+  tag            JewelryTag? @relation(fields: [tagId, companyId], references: [id, companyId], onDelete: Restrict)
+  tagId          String?
   // Grams of a material line given back (null on a tagged line). Summed per invoice line it can never exceed what was sold.
-  returnedWeight Decimal?   @db.Decimal(12, 4)
-  amount        Decimal     @db.Decimal(12, 2)
+  returnedWeight Decimal?    @db.Decimal(12, 4)
+  amount         Decimal     @db.Decimal(12, 2)
 
-  repairCase    RepairCase?
+  repairCase RepairCase?
 
   // composite-FK target for RepairCase
   @@unique([id, companyId])
@@ -4622,7 +4657,7 @@ model TagHistory {
   company       Company  @relation(fields: [companyId], references: [id])
   tagId         String
   tagNumber     String
-  event         String   // CREATED | BASELINE | STATUS_CHANGE | BRANCH_CHANGE | EDITED | DELETED
+  event         String // CREATED | BASELINE | STATUS_CHANGE | BRANCH_CHANGE | EDITED | DELETED
   branchId      String?
   status        String?
   changedFields String[] @default([])
@@ -4670,7 +4705,7 @@ model RepairCase {
   netWeight          Decimal          @db.Decimal(10, 4)
   hoReceivedById     String?
   hoReceivedAt       DateTime?
-  inspectionResult   String?          // PASS | REPAIR_REQUIRED | MELT
+  inspectionResult   String? // PASS | REPAIR_REQUIRED | MELT
   inspectedById      String?
   inspectedAt        DateTime?
   repairReason       String?
@@ -4778,4 +4813,143 @@ model TagRetag {
   @@unique([repairCaseId, companyId])
   @@index([companyId])
   @@map("tag_retags")
+}
+
+// ─── Photography (Phase 1 — schema only) ────────────────────────────────────────────────────────────────────────
+// A capture station: a place (a branch) where pieces are photographed. Owned by the company, not by a person.
+model PhotographyStation {
+  id             String    @id @default(cuid())
+  companyId      String
+  company        Company   @relation(fields: [companyId], references: [id])
+  branchId       String
+  branch         Branch    @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  name           String
+  isActive       Boolean   @default(true)
+  lastSeenAt     DateTime?
+  // What the station's Camera Bridge last REPORTED about its cameras (heartbeat) and which camera an ERP user last
+  // ASKED it to use. The bridge stays the authority on both: these are a mirror and a request, never a command log.
+  reportedCameras   Json?
+  camerasReportedAt DateTime?
+  requestedCameraId String?
+  cameraRequestedAt DateTime?
+  registeredById String
+  registeredBy   User      @relation("StationRegisteredBy", fields: [registeredById], references: [id])
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  credentials     StationCredential[]
+  images          TagImage[]
+  captureCommands PhotographyCaptureCommand[]
+
+  @@unique([companyId, name])
+  @@unique([id, companyId])
+  @@index([companyId, branchId])
+  @@map("photography_stations")
+}
+
+// Revocable credential for a future Camera Bridge. Only the SHA-256 of the secret is stored. Nothing issues or
+// verifies one yet.
+model StationCredential {
+  id          String             @id @default(cuid())
+  companyId   String
+  company     Company            @relation(fields: [companyId], references: [id])
+  stationId   String
+  station     PhotographyStation @relation(fields: [stationId, companyId], references: [id, companyId], onDelete: Restrict)
+  tokenHash   String             @unique
+  scopes      String[]
+  createdById String
+  createdBy   User               @relation("StationCredentialCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime           @default(now())
+  lastUsedAt  DateTime?
+  revokedAt   DateTime?
+  revokedById String?
+  revokedBy   User?              @relation("StationCredentialRevokedBy", fields: [revokedById], references: [id], onDelete: Restrict)
+  expiresAt   DateTime?
+
+  @@index([companyId, stationId])
+  @@map("station_credentials")
+}
+
+// One photograph of one tag. The photography queue is derived from these rows (no live PRIMARY => pending), never
+// stored on the tag. Soft-deleted via deletedAt; nothing cascades.
+model TagImage {
+  id                  String              @id @default(cuid())
+  companyId           String
+  company             Company             @relation(fields: [companyId], references: [id])
+  tagId               String
+  tag                 JewelryTag          @relation(fields: [tagId, companyId], references: [id, companyId], onDelete: Restrict)
+  // No branchId: a photo belongs to the tag (tag.branchId is its CURRENT branch); where it was captured is
+  // stationId -> PhotographyStation.branchId.
+  imageType           String
+  isPrimary           Boolean             @default(false)
+  reviewStatus        String              @default("CAPTURED")
+  uploadStatus        String              @default("PENDING")
+  processingStatus    String              @default("PENDING")
+  storageKeyOriginal  String?
+  storageKeyOptimized String?
+  storageKeyThumbnail String?
+  originalFilename    String?
+  mimeType            String
+  width               Int?
+  height              Int?
+  sizeBytes           BigInt?
+  sha256              String?
+  idempotencyKey      String
+  captureSource       String
+  cameraLabel         String?
+  stationId           String?
+  station             PhotographyStation? @relation(fields: [stationId, companyId], references: [id, companyId], onDelete: Restrict)
+  capturedById        String
+  capturedBy          User                @relation("TagImageCapturedBy", fields: [capturedById], references: [id])
+  capturedAt          DateTime
+  deletedAt           DateTime?
+  deletedById         String?
+  deletedBy           User?               @relation("TagImageDeletedBy", fields: [deletedById], references: [id], onDelete: Restrict)
+  deleteReason        String?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  captureCommands PhotographyCaptureCommand[]
+
+  @@unique([companyId, idempotencyKey])
+  @@unique([id, companyId])
+  @@index([companyId, tagId])
+  @@index([companyId, reviewStatus])
+  @@map("tag_images")
+}
+
+// One remote-capture request: a user's ERP capture session asking ONE station's Camera Bridge to take ONE photo.
+// This row is the server's record of how far it got (QUEUED -> ACCEPTED -> CAPTURING -> UPLOADED | FAILED | EXPIRED),
+// so the frontend never has to infer it from a timeout. It carries NO secret and NO ticket: the capture ticket is
+// minted fresh at delivery time from these columns. At most one live (QUEUED/ACCEPTED/CAPTURING) command per
+// station (partial unique index in the migration; Prisma cannot express it).
+model PhotographyCaptureCommand {
+  id             String             @id @default(cuid())
+  companyId      String
+  company        Company            @relation(fields: [companyId], references: [id])
+  stationId      String
+  station        PhotographyStation @relation(fields: [stationId, companyId], references: [id, companyId], onDelete: Restrict)
+  tagId          String
+  tag            JewelryTag         @relation(fields: [tagId, companyId], references: [id, companyId], onDelete: Restrict)
+  requestedById  String
+  requestedBy    User               @relation("CaptureCommandRequestedBy", fields: [requestedById], references: [id])
+  sessionId      String
+  correlationId  String
+  imageType      String
+  status         String             @default("QUEUED")
+  failureCode    String?
+  failureDetail  String?
+  idempotencyKey String?
+  tagImageId     String?
+  tagImage       TagImage?          @relation(fields: [tagImageId, companyId], references: [id, companyId], onDelete: Restrict)
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  @@unique([id, companyId])
+  @@index([companyId, stationId, status])
+  @@index([companyId, requestedById])
+  @@map("photography_capture_commands")
 }

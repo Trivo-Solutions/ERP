@@ -5,11 +5,14 @@ import { logger } from '../config/logger';
 export class AppError extends Error {
   statusCode: number;
   isOperational: boolean;
+  /** Optional stable machine-readable code (e.g. for the Camera Bridge, which must not parse messages). */
+  code?: string;
 
-  constructor(message: string, statusCode = 500, isOperational = true) {
+  constructor(message: string, statusCode = 500, isOperational = true, code?: string) {
     super(message);
     this.statusCode = statusCode;
     this.isOperational = isOperational;
+    this.code = code;
     Error.captureStackTrace(this, this.constructor);
   }
 }
@@ -29,6 +32,7 @@ export function errorHandler(
     return res.status(err.statusCode).json({
       success: false,
       error: err.message,
+      ...(err.code && { code: err.code }),
       ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
     });
   }

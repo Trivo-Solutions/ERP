@@ -39,6 +39,7 @@ import { estimationRouter } from './modules/tagging/estimation.router';
 import { mastersRouter } from './modules/masters/masters.router';
 import { gstRouter } from './modules/gst/gst.router';
 import { gstIntegrationRouter } from './modules/gst/integration/gstIntegration.router';
+import { photographyRouter } from './modules/photography/photography.router';
 import { companyRouter } from './modules/company/company.router';
 import { platformRouter } from './modules/platform/platform.router';
 
@@ -108,6 +109,7 @@ app.use(`${API}/company`, companyRouter);
 // TRIVO operator API (company provisioning) — separate operator key, no tenant auth; disabled unless configured.
 app.use(`${API}/platform`, platformRouter);
 app.use(`${API}/hardware`, hardwareRouter);
+app.use(`${API}/photography`, photographyRouter);
 app.use(`${API}/reports`, reportsRouter);
 app.use(`${API}/tagging`, taggingRouter);
 app.use(`${API}/estimation`, estimationRouter);

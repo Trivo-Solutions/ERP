@@ -35,6 +35,8 @@ const ACTION_LABELS: Record<string, string> = {
   // Returned-jewellery pipeline: a branch sends a returned piece to HO; HO receives, inspects/repairs, retags.
   send: 'Send to HO', receive: 'Receive at HO', work: 'Repair Work', reprint: 'Reprint Tag',
   integration_view: 'View', integration_manage: 'Manage (Configure/Credentials)', integration_test: 'Test Connection',
+  // Photography (Phase 2: routes in modules/photography enforce view/capture/delete; review/restore/manage_* are not yet used). Same underscore-action shape as above.
+  capture: 'Capture', review: 'Review/Approve', restore: 'Restore', manage_stations: 'Manage Stations', manage_cameras: 'Manage Cameras', manage_settings: 'Manage Settings',
 };
 
 function cap(permission: string): PermissionCapability {
@@ -241,6 +243,16 @@ export const PERMISSION_CATALOG: PermissionCatalogGroup[] = [
   {
     label: 'Hardware', items: [
       { key: 'hardware', label: 'Hardware Devices', capabilities: [cap('hardware:manage')] },
+    ],
+  },
+  {
+    label: 'Photography', items: [
+      {
+        key: 'photography', label: 'Tag Photography',
+        capabilities: [cap('photography:view'), cap('photography:capture'), cap('photography:review'),
+          cap('photography:delete'), cap('photography:restore'),
+          cap('photography:manage_stations'), cap('photography:manage_cameras'), cap('photography:manage_settings')],
+      },
     ],
   },
   {

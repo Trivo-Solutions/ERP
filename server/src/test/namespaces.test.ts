@@ -97,7 +97,7 @@ describe('Object storage key: companies/<companyId>/…', () => {
     const offenders: string[] = [];
     for (const f of sourceFiles(SRC)) {
       const rel = path.relative(SRC, f).replace(/\\/g, '/');
-      if (rel === 'shared/objectKey.ts' || rel === 'config/env.ts') continue;
+      if (rel === 'shared/objectKey.ts' || rel === 'config/env.ts' || rel === 'shared/storage/minioProvider.ts') continue;
       const text = fs.readFileSync(f, 'utf8');
       if (/from ['"]minio['"]|@aws-sdk\/client-s3|['"]uploads\//.test(text)) offenders.push(`${rel}: storage access / bare uploads path — use shared/objectKey.ts`);
     }
