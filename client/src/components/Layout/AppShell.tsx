@@ -1,5 +1,5 @@
 import React from 'react';
-import { Box, AppBar, Toolbar, IconButton, Typography, Badge, Tooltip, Chip, TextField, InputAdornment } from '@mui/material';
+import { Box, AppBar, Toolbar, IconButton, Typography, Badge, Tooltip, Chip, TextField, InputAdornment, Drawer, useMediaQuery, useTheme } from '@mui/material';
 import { Notifications, Scale, WifiOff, DarkMode, LightMode, Search, KeyboardOutlined } from '@mui/icons-material';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
@@ -24,6 +24,12 @@ export function AppShell() {
   const { sidebarPinned, toggleSidebarPinned, pageTitle, pageTitleKey, darkMode, toggleDarkMode } = useUiStore();
   const { socket } = useSocket();
   const [wsConnected, setWsConnected] = useState(false);
+
+  // Phones / small tablets: no hover, no room for a docked sidebar — it becomes an overlay drawer
+  // opened from the toolbar button, and closes again once a page is picked.
+  const isMobile = useMediaQuery(useTheme().breakpoints.down('md'));
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  useEffect(() => { if (!isMobile) setDrawerOpen(false); }, [isMobile]);
 
   // Auto-hide mode: the sidebar slides over the page (no reflow) while the pointer is at the left
   // edge or on the sidebar, and hides again after a page is picked or the pointer leaves.
@@ -97,10 +103,20 @@ export function AppShell() {
   }, [socket]);
 
   return (
-    <Box sx={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
+    <Box sx={{ display: 'flex', height: '100dvh', overflow: 'hidden' }}>
       <KeyboardShortcuts />
+      {isMobile && (
+        <Drawer
+          open={drawerOpen}
+          onClose={() => setDrawerOpen(false)}
+          ModalProps={{ keepMounted: true }}
+          PaperProps={{ sx: { width: SIDEBAR_WIDTH, maxWidth: '85vw', background: 'linear-gradient(180deg, #0D1B4B 0%, #070D2A 100%)', overflow: 'hidden' } }}
+        >
+          <Sidebar onNavigate={() => setDrawerOpen(false)} />
+        </Drawer>
+      )}
       {/* Sidebar — pinned: beside the page. Auto-hide: hidden, revealed from the left edge. */}
-      {!sidebarPinned && (
+      {!isMobile && !sidebarPinned && (
         <Box
           aria-hidden
           onMouseEnter={(e) => { if (e.buttons === 0) later(true, REVEAL_DELAY_MS); }}
@@ -108,6 +124,7 @@ export function AppShell() {
           sx={{ position: 'fixed', top: 0, left: 0, bottom: 0, width: EDGE_WIDTH, zIndex: 1250 }}
         />
       )}
+      {!isMobile && (
       <Box
         onMouseEnter={() => { if (!sidebarPinned) window.clearTimeout(timer.current); }}
         onMouseLeave={() => { if (!sidebarPinned) later(false, HIDE_DELAY_MS); }}
@@ -128,6 +145,7 @@ export function AppShell() {
       >
         <Sidebar onNavigate={hideNow} />
       </Box>
+      )}
 
       {/* Main content */}
       <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
@@ -137,18 +155,18 @@ export function AppShell() {
           elevation={0}
           sx={{ bgcolor: 'background.paper', borderBottom: '1px solid', borderColor: 'divider', color: 'text.primary' }}
         >
-          <Toolbar disableGutters sx={{ gap: 0.75, px: 1.5, minHeight: '40px !important' }}>
-            <Tooltip title={sidebarPinned ? 'Sidebar pinned — click to auto-hide' : 'Sidebar auto-hides — click to pin it open'}>
+          <Toolbar disableGutters sx={{ gap: 0.75, px: { xs: 1, md: 1.5 }, minHeight: '40px !important' }}>
+            <Tooltip title={isMobile ? 'Menu' : sidebarPinned ? 'Sidebar pinned — click to auto-hide' : 'Sidebar auto-hides — click to pin it open'}>
               <IconButton
-                onClick={toggleSidebarPinned}
+                onClick={isMobile ? () => setDrawerOpen(true) : toggleSidebarPinned}
                 size="small"
                 edge="start"
                 sx={{ p: 0.5 }}
-                aria-label="Pin sidebar"
-                aria-pressed={sidebarPinned}
-                color={sidebarPinned ? 'primary' : 'default'}
+                aria-label={isMobile ? 'Open menu' : 'Pin sidebar'}
+                aria-pressed={isMobile ? undefined : sidebarPinned}
+                color={!isMobile && sidebarPinned ? 'primary' : 'default'}
               >
-                <SidebarToggleIcon filled={sidebarPinned} sx={{ fontSize: 20 }} />
+                <SidebarToggleIcon filled={!isMobile && sidebarPinned} sx={{ fontSize: 20 }} />
               </IconButton>
             </Tooltip>
 
@@ -163,10 +181,10 @@ export function AppShell() {
                 value={jewelQuery}
                 onChange={(e) => setJewelQuery(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); openJewelHistory(); } }}
-                placeholder="Jewel history — tag no. ↵"
+                placeholder={isMobile ? 'Tag no. ↵' : 'Jewel history — tag no. ↵'}
                 inputProps={{ id: JEWEL_SEARCH_INPUT_ID, 'aria-label': 'Jewel transaction history search', style: { padding: '3px 6px', fontSize: 12.5 } }}
                 InputProps={{ startAdornment: <InputAdornment position="start" sx={{ mr: 0.25 }}><Search sx={{ fontSize: 16 }} /></InputAdornment> }}
-                sx={{ width: 210, '& .MuiOutlinedInput-root': { pl: 0.75 } }}
+                sx={{ width: { xs: 130, sm: 210 }, flexShrink: 1, minWidth: 0, '& .MuiOutlinedInput-root': { pl: 0.75 } }}
               />
             )}
 
@@ -178,12 +196,12 @@ export function AppShell() {
                 size="small"
                 color={wsConnected ? 'success' : 'error'}
                 variant="outlined"
-                sx={{ fontSize: 9.5, height: 20, '& .MuiChip-label': { px: 0.75 } }}
+                sx={{ fontSize: 9.5, height: 20, display: { xs: 'none', sm: 'inline-flex' }, '& .MuiChip-label': { px: 0.75 } }}
               />
             </Tooltip>
 
             <Tooltip title="Keyboard shortcuts (Ctrl+/) · Command palette (Ctrl+K)">
-              <IconButton size="small" onClick={() => window.dispatchEvent(new Event(OPEN_SHORTCUT_HELP_EVENT))} sx={{ p: 0.5 }} aria-label="Keyboard shortcuts">
+              <IconButton size="small" onClick={() => window.dispatchEvent(new Event(OPEN_SHORTCUT_HELP_EVENT))} sx={{ p: 0.5, display: { xs: 'none', md: 'inline-flex' } }} aria-label="Keyboard shortcuts">
                 <KeyboardOutlined sx={{ fontSize: 18 }} />
               </IconButton>
             </Tooltip>

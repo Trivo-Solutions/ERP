@@ -231,7 +231,7 @@ describe('Phase 4 Part M: two-company end-to-end acceptance', () => {
       .set('Authorization', `Bearer ${companies.A.adminToken}`)
       .send({
         branchId: companies.A.branch.id, name: 'E2E Ring A', metalType: 'GOLD', metalKarat: '22K',
-        grossWeight: 5, netWeight: 5, ...masterIds.A, sellingPrice: 30000,
+        grossWeight: 5, netWeight: 5, ...masterIds.A, sellingPrice: 30000, saleMcRate: 0, saleVaPercent: 0,
       });
     expect(res.status).toBe(201);
     companies.A.tagId = res.body.data.id;
@@ -259,13 +259,13 @@ describe('Phase 4 Part M: two-company end-to-end acceptance', () => {
   it('Company A\'s branch-restricted user can create a tag in its granted branch but not the other', async () => {
     const ok = await request(app).post('/api/v1/tagging/tags')
       .set('Authorization', `Bearer ${companies.A.restrictedToken}`)
-      .send({ branchId: companies.A.branch.id, name: 'E2E Ring Restricted', metalType: 'GOLD', grossWeight: 2, netWeight: 2, ...masterIds.A });
+      .send({ branchId: companies.A.branch.id, name: 'E2E Ring Restricted', metalType: 'GOLD', grossWeight: 2, netWeight: 2, saleMcRate: 0, saleVaPercent: 0, ...masterIds.A });
     expect(ok.status).toBe(201);
     await prisma.jewelryTag.deleteMany({ where: { id: ok.body.data.id } });
 
     const denied = await request(app).post('/api/v1/tagging/tags')
       .set('Authorization', `Bearer ${companies.A.restrictedToken}`)
-      .send({ branchId: companies.A.branch2.id, name: 'E2E Ring Should Fail', metalType: 'GOLD', grossWeight: 2, netWeight: 2, ...masterIds.A });
+      .send({ branchId: companies.A.branch2.id, name: 'E2E Ring Should Fail', metalType: 'GOLD', grossWeight: 2, netWeight: 2, saleMcRate: 0, saleVaPercent: 0, ...masterIds.A });
     expect(denied.status).toBeGreaterThanOrEqual(400);
     expect(denied.status).toBeLessThan(500);
   });
@@ -284,7 +284,7 @@ describe('Phase 4 Part M: two-company end-to-end acceptance', () => {
     companies.B.clientId = client.body.data.id;
 
     const tag = await request(app).post('/api/v1/tagging/tags').set('Authorization', `Bearer ${companies.B.adminToken}`)
-      .send({ branchId: companies.B.branch.id, name: 'E2E Ring B', metalType: 'GOLD', metalKarat: '18K', grossWeight: 4, netWeight: 4, ...masterIds.B, sellingPrice: 20000 });
+      .send({ branchId: companies.B.branch.id, name: 'E2E Ring B', metalType: 'GOLD', metalKarat: '18K', grossWeight: 4, netWeight: 4, ...masterIds.B, sellingPrice: 20000, saleMcRate: 0, saleVaPercent: 0, });
     expect(tag.status).toBe(201);
     companies.B.tagId = tag.body.data.id;
 

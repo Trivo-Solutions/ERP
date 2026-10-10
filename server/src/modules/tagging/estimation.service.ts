@@ -4,6 +4,14 @@ import { nextDocumentNumber } from '../../shared/numberSequence';
 import {TenantContext, tenantTransaction, tenantQuery } from '../../shared/tenantContext';
 import { Prisma } from '@prisma/client';
 import { normalizePan } from '../../shared/compliance';
+import { computeRowsPricing } from '../../shared/pricingEngine';
+import { resolveLiveMetalRate } from '../../shared/metalRate';
+import { assertTagPriceable } from '../../shared/tagPriceability';
+import { startOfLocalDay, endOfLocalDay, isEstimateExpired } from '../../shared/estimateExpiry';
+import { createAuditEntry } from '../../middleware/audit';
+import { DEFAULT_HSN_CODE } from '../../shared/constants';
+import { resolveOfferForTag } from '../offers/offer.service';
+import { estimateBelowOffer, requireApprovalReason, createEstimateApproval, auditEstimateApprovalRequested } from '../offers/offerApproval.service';
 
 // Estimation is a sales/counter-staff feature — every read path below deliberately selects only
 // the sale-side columns, never costRate/costAmount/costMcRate/costVaPercent/totalCostAmount, so
@@ -11,12 +19,13 @@ import { normalizePan } from '../../shared/compliance';
 // more privileged view (CLAUDE.md's "controlled later with role setups").
 const ESTIMATE_ITEM_SALE_SELECT = {
   id: true, code: true, materialType: true, name: true, weight: true, unit: true,
-  saleRate: true, saleAmount: true,
+  saleRate: true, saleAmount: true, baseSaleRate: true, materialId: true,
 } as const;
 
 const ESTIMATE_SALE_SELECT = {
   id: true, tagId: true, estimateNumber: true,
   saleMcRate: true, saleVaPercent: true, totalSaleAmount: true,
+  offerId: true, offerName: true, baseSaleMcRate: true, baseSaleVaPercent: true,
   taxRate: true, gstAmount: true, netPayableAmount: true,
   currency: true, validUntil: true, notes: true, createdAt: true,
   status: true, sentToBillingAt: true, invoiceId: true,
@@ -67,10 +76,23 @@ export async function getTagForEstimation(ctx: TenantContext, tagId: string) {
     },
   }));
   if (!tag || tag.companyId !== ctx.companyId) throw new AppError('Tag not found', 404);
-  return tag;
+  // Gold is live: a METAL row is shown at the day's metal rate for the piece's karat, not the rate it was tagged with. The
+  // rate's own date rides along so the screen can say "today's rate not entered yet - using <date>'s".
+  assertTagPriceable(tag); // 409 when the tag is missing MC / VA / a stone's sale rate - never quoted at 0
+  const needsMetal = tag.materials.some((m) => m.materialType === 'METAL');
+  const goldRate = needsMetal && tag.metalKarat ? await resolveLiveMetalRate(ctx.companyId, tag.metalKarat) : null;
+  if (needsMetal && !goldRate) throw new AppError(`No metal rate has been entered for ${tag.metalKarat ?? 'this piece'} - enter it under Metal Rates first`, 409);
+  return {
+    ...tag,
+    materials: tag.materials.map((m) => (m.materialType === 'METAL' && goldRate ? { ...m, saleRate: goldRate.ratePerGram } : m)),
+    goldRate: goldRate ? { karat: tag.metalKarat, ...goldRate } : null,
+    defaultGstRate: await defaultGstRate(),
+  };
 }
 
 interface EstimateItemInput {
+  /** The tag's own material row this line came from — lets the server find its pre-offer rate. Optional. */
+  materialId?: string;
   code: string;
   materialType: string;
   name?: string;
@@ -81,8 +103,12 @@ interface EstimateItemInput {
 }
 
 interface CreateTagEstimateInput {
-  /** Hand the estimate straight to the billing counter as it is saved (same as calling sendEstimateToBilling). */
+  /** Work the estimate up with the offer that applies to this piece today (rates submitted are the offered rates). */
+  applyOffer?: boolean;
+  /** Hand the estimate straight to the billing counter as it is saved (same as calling sendEstimateToBilling). When it is
+   *  priced below the offer it goes for a store manager's approval instead, and `approvalReason` is required. */
   sendToBilling?: boolean;
+  approvalReason?: string;
   customerName?: string;
   customerPhone?: string;
   customerDob?: string | Date | null;
@@ -105,25 +131,10 @@ interface CreateTagEstimateInput {
 // metal weight, plus a %-of-metal-value wastage/VA charge, applied once against the materials
 // totals rather than per line.
 function computeTotals(items: Array<EstimateItemInput & { costAmount: number; saleAmount: number }>, input: CreateTagEstimateInput) {
-  const metalWeight = items.filter((i) => i.materialType === 'METAL').reduce((s, i) => s + i.weight, 0);
-  const metalCostAmt = items.filter((i) => i.materialType === 'METAL').reduce((s, i) => s + i.costAmount, 0);
-  const metalSaleAmt = items.filter((i) => i.materialType === 'METAL').reduce((s, i) => s + i.saleAmount, 0);
-
-  const costMcRate = input.costMcRate ?? 0;
-  const costVaPercent = input.costVaPercent ?? 0;
-  const saleMcRate = input.saleMcRate ?? 0;
-  const saleVaPercent = input.saleVaPercent ?? 0;
-
-  const makingCostAmount = metalWeight * costMcRate + (metalCostAmt * costVaPercent) / 100;
-  const makingSaleAmount = metalWeight * saleMcRate + (metalSaleAmt * saleVaPercent) / 100;
-
-  const materialsCostAmt = items.reduce((s, i) => s + i.costAmount, 0);
-  const materialsSaleAmt = items.reduce((s, i) => s + i.saleAmount, 0);
-
-  return {
-    totalCostAmount: materialsCostAmt + makingCostAmount,
-    totalSaleAmount: materialsSaleAmt + makingSaleAmount,
-  };
+  // The one shared formula (shared/pricingEngine.ts); each side prices the same rows at its own rates.
+  const cost = computeRowsPricing(items.map((i) => ({ materialType: i.materialType, weight: i.weight, rate: i.costRate ?? 0 })), input.costMcRate ?? 0, input.costVaPercent ?? 0);
+  const sale = computeRowsPricing(items.map((i) => ({ materialType: i.materialType, weight: i.weight, rate: i.saleRate ?? 0 })), input.saleMcRate ?? 0, input.saleVaPercent ?? 0);
+  return { totalCostAmount: cost.total, totalSaleAmount: sale.total };
 }
 
 // ─── Customer details taken at the billing hand-off ───────────────────────────
@@ -134,6 +145,8 @@ function computeTotals(items: Array<EstimateItemInput & { costAmount: number; sa
 // enforces that). Whatever is given is validated either way.
 
 interface CustomerDetailsInput {
+  /** Required when the estimate is priced below its offer (it is then sent for approval, not to billing). */
+  approvalReason?: string;
   customerName?: string;
   customerPhone?: string;
   customerDob?: string | Date | null;
@@ -208,15 +221,36 @@ async function assertReadyForBilling(
   if (!member) throw new AppError('Sales employee not found', 404);
 }
 
+/** The GST rate of the default HSN (jewellery) from the HSN master - the rate an estimate's indicative GST uses. */
+export async function defaultGstRate(): Promise<number> {
+  const hsn = await prisma.hsnCode.findFirst({ where: { code: DEFAULT_HSN_CODE, isActive: true } });
+  if (!hsn) throw new AppError(`Default HSN ${DEFAULT_HSN_CODE} is missing from the HSN master`, 500);
+  return Number(hsn.gstRate);
+}
+
 export async function createTagEstimate(tagId: string, input: CreateTagEstimateInput, ctx: TenantContext, userId: string) {
-  const tag = await tenantQuery(ctx.companyId, (_tx) => _tx.jewelryTag.findUnique({ where: { id: tagId }, select: { id: true, companyId: true, status: true, tagNumber: true } }));
+  const tag = await tenantQuery(ctx.companyId, (_tx) => _tx.jewelryTag.findUnique({
+    where: { id: tagId },
+    select: { id: true, companyId: true, status: true, tagNumber: true, saleMcRate: true, saleVaPercent: true, materials: { select: { code: true, materialType: true, saleRate: true } } },
+  }));
   if (!tag || tag.companyId !== ctx.companyId) throw new AppError('Tag not found', 404);
+  assertTagPriceable(tag);
   const customer = cleanCustomerFields(input);
   if (input.sendToBilling) {
     assertBillable(tag);
     await assertReadyForBilling(ctx, customer);
   }
   if (!input.items || input.items.length === 0) throw new AppError('At least one material item is required', 400);
+
+  // "Apply offer": the offer is picked by the server from today's date, never named by the client. The submitted rates are
+  // the offered ones; what we record is which offer it was and the tagged rates they were lowered from, so a later edit to
+  // (or deletion of) the offer cannot reprice this quote. If nothing applies any more the save is refused rather than
+  // silently saving an un-offered quote the customer was told was discounted.
+  const offerApplied = input.applyOffer ? await resolveOfferForTag(ctx, tagId) : null;
+  if (offerApplied && !offerApplied.resolution.offer) {
+    throw new AppError('No offer applies to this piece today — remove "Apply offer" and try again', 409);
+  }
+  const baseRateOf = new Map((offerApplied?.base.rows ?? []).map((r) => [r.key, r.rate]));
 
   const items = input.items.map((i) => ({
     ...i,
@@ -226,11 +260,20 @@ export async function createTagEstimate(tagId: string, input: CreateTagEstimateI
 
   const { totalCostAmount, totalSaleAmount } = computeTotals(items, input);
 
-  // Indicative GST — same flat 3%-for-INR convention already hardcoded for actual sales
-  // (NewSalePage.tsx: `currency === 'INR' ? 0.03 : 0`), snapshotted onto the estimate so a later
-  // rate change never silently reprices a past quote (same principle as InvoiceItem.taxRate).
+  // Priced below the offer in force today -> it does not go to billing; it goes to a store manager, who releases it.
+  const gate = input.sendToBilling
+    ? await estimateBelowOffer(ctx, tagId, {
+        mcRate: input.saleMcRate ?? Number.POSITIVE_INFINITY, vaPercent: input.saleVaPercent ?? Number.POSITIVE_INFINITY,
+        rows: items.map((i) => ({ materialId: i.materialId, rate: i.saleRate ?? 0, code: i.code })),
+      })
+    : null;
+  const approvalReason = gate ? requireApprovalReason(input.approvalReason) : null;
+
+  // Indicative GST at the default HSN's rate from the HSN master (what a sale line without its own HSN is taxed at),
+  // snapshotted onto the estimate so a later rate change never silently reprices a past quote (same principle as
+  // InvoiceItem.taxRate). Never a hardcoded rate.
   const currency = input.currency ?? 'INR';
-  const taxRate = currency === 'INR' ? 0.03 : 0;
+  const taxRate = currency === 'INR' ? await defaultGstRate() : 0;
   const gstAmount = Math.round(totalSaleAmount * taxRate * 100) / 100;
   const netPayableAmount = totalSaleAmount + gstAmount;
 
@@ -245,15 +288,19 @@ export async function createTagEstimate(tagId: string, input: CreateTagEstimateI
         costVaPercent: input.costVaPercent,
         saleMcRate: input.saleMcRate,
         saleVaPercent: input.saleVaPercent,
+        ...(offerApplied && {
+          offerId: offerApplied.resolution.offer!.id, offerName: offerApplied.resolution.offer!.name,
+          baseSaleMcRate: offerApplied.base.mcRate, baseSaleVaPercent: offerApplied.base.vaPercent,
+        }),
         totalCostAmount,
         totalSaleAmount,
         taxRate, gstAmount, netPayableAmount,
         currency,
-        validUntil: input.validUntil ? new Date(input.validUntil) : undefined,
+        validUntil: endOfLocalDay(), // a quote is good for the day it was made - never longer, whatever the client sends
         notes: input.notes,
         createdById: userId,
         ...customer,
-        ...(input.sendToBilling && { status: 'SENT', sentToBillingAt: new Date(), sentById: userId }),
+        ...(input.sendToBilling && (gate ? { status: 'AWAITING_APPROVAL' } : { status: 'SENT', sentToBillingAt: new Date(), sentById: userId })),
       },
     });
 
@@ -270,10 +317,17 @@ export async function createTagEstimate(tagId: string, input: CreateTagEstimateI
         costAmount: i.costAmount,
         saleRate: i.saleRate,
         saleAmount: i.saleAmount,
+        baseSaleRate: offerApplied && i.materialId ? baseRateOf.get(i.materialId) : undefined,
+        materialId: i.materialId ? String(i.materialId).slice(0, 40) : undefined,
       })),
     });
 
-    return tx.tagEstimate.findUniqueOrThrow({ where: { id: estimate.id }, select: ESTIMATE_SALE_SELECT });
+    const approval = gate ? await createEstimateApproval(tx, ctx, { estimateId: estimate.id, tagId, ...gate, reason: approvalReason!, userId }) : null;
+    const saved = await tx.tagEstimate.findUniqueOrThrow({ where: { id: estimate.id }, select: ESTIMATE_SALE_SELECT });
+    return { saved, approval };
+  }).then(async ({ saved, approval }) => {
+    if (approval && gate) await auditEstimateApprovalRequested(ctx, userId, approval.id, gate.below, tagId, saved.id);
+    return saved;
   });
 }
 
@@ -296,11 +350,14 @@ export async function sendEstimateToBilling(
     where: { id: estimateId },
     select: {
       id: true, companyId: true, status: true, estimateNumber: true, tag: { select: { status: true, tagNumber: true } },
-      customerName: true, customerPhone: true, salesPersonId: true,
+      customerName: true, customerPhone: true, salesPersonId: true, tagId: true, saleMcRate: true, saleVaPercent: true, createdAt: true,
+      items: { select: { materialId: true, saleRate: true, code: true } },
     },
   }));
   if (!estimate || estimate.companyId !== ctx.companyId) throw new AppError('Estimate not found', 404);
+  if (estimate.status === 'AWAITING_APPROVAL') throw new AppError(`Estimate ${estimate.estimateNumber} is already waiting for a store manager's approval`, 409);
   if (estimate.status === 'INVOICED') throw new AppError(`Estimate ${estimate.estimateNumber} has already been billed`, 409);
+  if (isEstimateExpired(estimate.createdAt)) throw new AppError(`Estimate ${estimate.estimateNumber} was made on an earlier day and has expired - make a new estimate at today's rate`, 409);
   assertBillable(estimate.tag);
 
   // Re-sending may correct the customer's details; a field left out keeps what the estimate already holds,
@@ -313,11 +370,25 @@ export async function sendEstimateToBilling(
   };
   await assertReadyForBilling(ctx, merged);
 
-  return tenantQuery(ctx.companyId, (_tx) => _tx.tagEstimate.update({
-    where: { id: estimateId },
-    data: { ...customer, ...merged, status: 'SENT', sentToBillingAt: new Date(), sentById: userId },
-    select: ESTIMATE_SALE_SELECT,
-  }));
+  // Priced below the offer in force today -> goes to a store manager instead of billing.
+  const gate = await estimateBelowOffer(ctx, estimate.tagId, {
+    mcRate: estimate.saleMcRate != null ? Number(estimate.saleMcRate) : Number.POSITIVE_INFINITY,
+    vaPercent: estimate.saleVaPercent != null ? Number(estimate.saleVaPercent) : Number.POSITIVE_INFINITY,
+    rows: estimate.items.map((i) => ({ materialId: i.materialId, rate: Number(i.saleRate ?? 0), code: i.code })),
+  });
+  const approvalReason = gate ? requireApprovalReason(input.approvalReason) : null;
+
+  const { saved, approval } = await tenantTransaction(ctx.companyId, async (tx) => {
+    const saved = await tx.tagEstimate.update({
+      where: { id: estimateId },
+      data: gate ? { ...customer, ...merged, status: 'AWAITING_APPROVAL' } : { ...customer, ...merged, status: 'SENT', sentToBillingAt: new Date(), sentById: userId },
+      select: ESTIMATE_SALE_SELECT,
+    });
+    const approval = gate ? await createEstimateApproval(tx, ctx, { estimateId, tagId: estimate.tagId, ...gate, reason: approvalReason!, userId }) : null;
+    return { saved, approval };
+  });
+  if (approval && gate) await auditEstimateApprovalRequested(ctx, userId, approval.id, gate.below, estimate.tagId, estimateId);
+  return saved;
 }
 
 // Everything the billing screen needs to turn an estimate into a line — sale-side data only, exactly like the
@@ -327,6 +398,7 @@ const BILLABLE_ESTIMATE_SELECT = {
   customerDob: true, customerAddress: true, customerPan: true, salesPersonId: true,
   salesPerson: { select: { id: true, name: true } },
   saleMcRate: true, saleVaPercent: true, totalSaleAmount: true,
+  offerId: true, offerName: true, baseSaleMcRate: true, baseSaleVaPercent: true,
   taxRate: true, gstAmount: true, netPayableAmount: true,
   currency: true, validUntil: true, notes: true, createdAt: true, sentToBillingAt: true,
   createdBy: { select: { id: true, name: true } },
@@ -347,6 +419,7 @@ export async function searchBillableEstimates(ctx: TenantContext, q?: string) {
   const where: Prisma.TagEstimateWhereInput = {
     companyId: ctx.companyId,
     status: 'SENT',
+    createdAt: { gte: startOfLocalDay() }, // yesterday's quotes are expired: not offered to billing
     // A piece that has since been sold or reserved can no longer be billed off this estimate.
     tag: { status: 'IN_STOCK' },
     ...(term && {
@@ -363,8 +436,7 @@ export async function searchBillableEstimates(ctx: TenantContext, q?: string) {
   const rows = await tenantQuery(ctx.companyId, (_tx) => _tx.tagEstimate.findMany({
     where, orderBy: { sentToBillingAt: 'desc' }, take: 20, select: BILLABLE_ESTIMATE_SELECT,
   }));
-  const now = Date.now();
-  return rows.map((r) => ({ ...r, expired: !!r.validUntil && new Date(r.validUntil).getTime() < now }));
+  return withEstimateFlags(ctx, rows);
 }
 
 export async function getTagEstimate(ctx: TenantContext, id: string) {
@@ -381,9 +453,73 @@ export async function listTagEstimatesForTag(ctx: TenantContext, tagId: string) 
   // which would let a caller probe whether another company's tag id exists.
   const tag = await tenantQuery(ctx.companyId, (_tx) => _tx.jewelryTag.findUnique({ where: { id: tagId }, select: { companyId: true } }));
   if (!tag || tag.companyId !== ctx.companyId) throw new AppError('Tag not found', 404);
-  return tenantQuery(ctx.companyId, (_tx) => _tx.tagEstimate.findMany({
+  const rows = await tenantQuery(ctx.companyId, (_tx) => _tx.tagEstimate.findMany({
     where: { tagId, companyId: ctx.companyId },
     orderBy: { createdAt: 'desc' },
     select: ESTIMATE_SALE_SELECT,
   }));
+  const karat = (await tenantQuery(ctx.companyId, (_tx) => _tx.jewelryTag.findUnique({ where: { id: tagId }, select: { metalKarat: true } })))?.metalKarat;
+  return withEstimateFlags(ctx, rows, () => karat);
+}
+
+// ─── Recall / return to estimation ────────────────────────────────────────────
+
+/**
+ * Pulls an estimate that was sent to billing (or is waiting for a store manager's approval) back to OPEN, before it has been
+ * billed. Two doors, same rule and no extra permission: the estimator recalls it from the estimation page, or the biller returns
+ * it from the billing screen. Count-checked on the status, so a recall racing a bill cannot both win (the loser is told why);
+ * a BILLED estimate can never be recalled. Any approval request tied to it is withdrawn in the same transaction, so a stale
+ * approval can never ride a later bill.
+ */
+export async function recallEstimate(ctx: TenantContext, estimateId: string, userId: string, via: 'ESTIMATOR' | 'BILLING', reason?: unknown) {
+  const note = typeof reason === 'string' && reason.trim() ? reason.trim().slice(0, 300) : undefined;
+  const before = await tenantQuery(ctx.companyId, (_tx) => _tx.tagEstimate.findUnique({
+    where: { id: estimateId }, select: { id: true, companyId: true, status: true, estimateNumber: true },
+  }));
+  if (!before || before.companyId !== ctx.companyId) throw new AppError('Estimate not found', 404);
+  if (before.status === 'INVOICED') throw new AppError(`Estimate ${before.estimateNumber} has already been billed and cannot be recalled`, 409);
+  if (before.status === 'OPEN') throw new AppError(`Estimate ${before.estimateNumber} is not with billing`, 409);
+
+  const done = await tenantTransaction(ctx.companyId, async (tx) => {
+    const r = await tx.tagEstimate.updateMany({
+      where: { id: estimateId, companyId: ctx.companyId, status: { in: ['SENT', 'AWAITING_APPROVAL'] } },
+      data: { status: 'OPEN', sentToBillingAt: null, sentById: null },
+    });
+    if (r.count === 1) {
+      await tx.discountApproval.updateMany({
+        where: { estimateId, companyId: ctx.companyId, status: { in: ['PENDING', 'APPROVED'] } },
+        data: { status: 'CANCELLED' },
+      });
+    }
+    return r;
+  });
+  if (done.count !== 1) {
+    const now = await tenantQuery(ctx.companyId, (_tx) => _tx.tagEstimate.findUnique({ where: { id: estimateId }, select: { status: true } }));
+    throw new AppError(`Estimate ${before.estimateNumber} can no longer be recalled (${now?.status ?? 'unknown'})`, 409);
+  }
+  await createAuditEntry('tag_estimates', estimateId, userId, 'RECALL', { status: before.status }, { status: 'OPEN', via, ...(note && { reason: note }) }, ctx.companyId);
+  return tenantQuery(ctx.companyId, (_tx) => _tx.tagEstimate.findUniqueOrThrow({ where: { id: estimateId }, select: ESTIMATE_SALE_SELECT }));
+}
+
+/**
+ * "The gold rate has moved since this estimate": compares the metal rate the estimate froze with the live one for the piece's
+ * karat. An indicator only - nothing is repriced by it. `expired` is the same-day rule.
+ */
+async function withEstimateFlags<T extends { createdAt: Date; items: Array<{ materialType: string; saleRate: unknown }>; tag?: { metalKarat: string | null } | null }>(
+  ctx: TenantContext, rows: T[], karatByRow?: (r: T) => string | null | undefined,
+) {
+  const liveByKarat = new Map<string, number | null>();
+  const out = [];
+  for (const r of rows) {
+    const karat = karatByRow ? karatByRow(r) : r.tag?.metalKarat;
+    let now: number | null = null;
+    if (karat) {
+      if (!liveByKarat.has(karat)) liveByKarat.set(karat, (await resolveLiveMetalRate(ctx.companyId, karat))?.ratePerGram ?? null);
+      now = liveByKarat.get(karat) ?? null;
+    }
+    const metal = r.items.find((i) => i.materialType === 'METAL');
+    const at = metal && metal.saleRate != null ? Number(metal.saleRate) : null;
+    out.push({ ...r, expired: isEstimateExpired(r.createdAt), goldRateAtEstimate: at, goldRateNow: now, goldRateChanged: at != null && now != null && Math.abs(at - now) > 0.005 });
+  }
+  return out;
 }

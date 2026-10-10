@@ -6,8 +6,8 @@ import {
   Checkbox, FormControlLabel, Dialog, DialogTitle, DialogContent, DialogActions, Alert, Switch,
   ToggleButton, ToggleButtonGroup, Tooltip, Badge,
 } from '@mui/material';
-import { Add, Delete, Print, AddCircleOutline, CheckCircle, ArrowBack, PersonAdd, Tune } from '@mui/icons-material';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Add, Delete, Print, AddCircleOutline, CheckCircle, ArrowBack, PersonAdd, Tune, Undo } from '@mui/icons-material';
+import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm, Controller } from 'react-hook-form';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost, apiPatch, apiPut } from '../../api/client';
@@ -15,16 +15,18 @@ import { PageHeader } from '../../components/common/PageHeader';
 import { ClientKycDialog } from '../../components/common/ClientKycDialog';
 import { SelectField } from '../../components/fields/SelectField';
 import { printInvoice } from '../../utils/printInvoice';
-import { findMakingCharge } from '../../utils/estimateCalc';
+import { findMakingCharge, computeMakingAmount } from '../../utils/estimateCalc';
 import { EstimateBreakdown, estimateTotals, newRowKey } from './EstimateBreakdown';
 import { CustomerMismatchDialog } from './CustomerMismatchDialog';
 import { isEstimateCustomerMismatch } from '../../utils/estimateCustomer';
 import { MaterialSaleDialog } from './MaterialSaleDialog';
 import { MaterialPurchaseDialog } from './MaterialPurchaseDialog';
-import { MaterialPricingDialog, MaterialPricingEntry } from './MaterialPricingDialog';
+import { MaterialPricingDialog, MaterialPricingEntry, applyOfferToBreakdown, removeOfferFromBreakdown } from './MaterialPricingDialog';
+import { BelowOfferApprovalDialog, ApprovalNeed } from './BelowOfferApprovalDialog';
 import { SaleSummary, SaleFigures } from './SaleSummary';
 import { useAuthStore } from '../../store/auth.store';
 import { usePageShortcuts, focusFirstField } from '../../hooks/usePageShortcuts';
+import { DataTable, DataTableColumn } from '../../components/common/DataTable';
 
 // Statutory limits the server enforces (shared/compliance.ts) — mirrored here only to warn before submitting.
 const PAN_REQUIRED_ABOVE = 200000;   // Rule 114B: PAN / Form 60 on a sale above this
@@ -61,7 +63,14 @@ interface LineItem {
   estimateId?: string;
   estimateNumber?: string;
   quotedTotal?: number;
+  // Set when the estimate was loaded: the gold rate moved after it was made (an indicator only - the bill keeps the estimate's rate).
+  goldRateChanged?: boolean; goldRateAtEstimate?: number; goldRateNow?: number;
   estimate?: EstimateBreakdown;
+  // Offers: this line's rates were lowered by an offer ("Apply offer"). The server re-picks the offer by invoice date and
+  // stamps it on the stored breakdown. `offerFromPlain`: the line was a plain tag line before, so Remove puts it back that way.
+  offerApplied?: boolean;
+  offerName?: string;
+  offerFromPlain?: boolean;
   // Edit mode only: the stored InvoiceItem this row came from (sent back so it is updated in place), and how it was priced —
   // a FIXED line's goldRate is its flat price, not a per-gram rate.
   invoiceItemId?: string;
@@ -73,8 +82,9 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 function lineTotal(l: LineItem) {
   if (l.estimate) return round2(estimateTotals(l.estimate).total);
   if (l.rateType === 'FIXED') return Number(l.goldRate) * Number(l.quantity || 1);
-  const effectiveMaking = Number(l.makingCharge) * (1 + Number(l.wastagePercent || 0) / 100);
-  const unit = Number(l.netGoldWeight) * Number(l.goldRate) + effectiveMaking + Number(l.stoneValue);
+  // VA is a % of the metal's value (the one pricing rule - same as the tag, estimate and F4); MC is the making amount itself.
+  const metalValue = Number(l.netGoldWeight) * Number(l.goldRate);
+  const unit = metalValue + Number(l.makingCharge) + computeMakingAmount(0, metalValue, 0, Number(l.wastagePercent || 0)) + Number(l.stoneValue);
   return unit * Number(l.quantity || 1);
 }
 
@@ -98,11 +108,12 @@ function estimateInvoiceLine(l: LineItem) {
     stoneValue: round2(t.otherMaterials),
     // The bill's own copy of the material rows + MC/VA — stored on the invoice line, never written back to the tag.
     materialBreakdown: {
-      rows: l.estimate!.rows.map(({ code, materialType, name, weight, unit, rate }) => ({
-        code, materialType, name, weight: Number(weight) || 0, unit, rate: Number(rate) || 0,
+      rows: l.estimate!.rows.map(({ code, materialType, name, weight, unit, rate, materialId }) => ({
+        code, materialType, name, weight: Number(weight) || 0, unit, rate: Number(rate) || 0, ...(materialId && { materialId }),
       })),
       mcRate: Number(l.estimate!.mcRate) || 0,
       vaPercent: Number(l.estimate!.vaPercent) || 0,
+      ...(l.offerApplied && { offerApplied: true }),
     },
     tagId: l.tagId,
     categoryId: l.categoryId || undefined,
@@ -225,6 +236,7 @@ export function NewSalePage() {
   const [pendingStaffId, setPendingStaffId] = useState('');
   const [matSession, setMatSession] = useState<{ entries: MaterialPricingEntry[]; startKey: string } | null>(null);
   const [matLoading, setMatLoading] = useState(false);
+  const [customEditKey, setCustomEditKey] = useState<string | null>(null);
   const [kycOpen, setKycOpen] = useState(false);
   // Bill adjustments the biller can edit: discount as a flat amount or a % of the gross, and the round-off — automatic
   // to the nearest rupee, or keyed by hand.
@@ -363,6 +375,10 @@ export function NewSalePage() {
   const editPaid = isEdit ? Number(editInvoice?.paidAmount) || 0 : 0;
   const editLocksClient = isEdit && ((editInvoice?.payments?.length ?? 0) > 0 || (editReturnsData?.length ?? 0) > 0);
   const [editReason, setEditReason] = useState('');
+  // Offers step 3: the server listed what on this bill is below an offered rate; the dialog gets a store manager's approval
+  // for each (need.rateHash -> the approval request made for it) and the bill is saved again with those ids.
+  const [approvalNeeds, setApprovalNeeds] = useState<ApprovalNeed[] | null>(null);
+  const [approvalIds, setApprovalIds] = useState<Record<string, string>>({});
   const editLoaded = useRef(false);
   useEffect(() => {
     if (!isEdit || !editInvoice || editLoaded.current) return;
@@ -389,8 +405,12 @@ export function NewSalePage() {
         estimate: {
           rows: (it.materialBreakdown.rows ?? []).map((r: any) => ({ ...r, key: newRowKey() })),
           mcRate: Number(it.materialBreakdown.mcRate) || 0, vaPercent: Number(it.materialBreakdown.vaPercent) || 0,
+          ...(it.materialBreakdown.offer && {
+            baseMcRate: Number(it.materialBreakdown.offer.baseMcRate), baseVaPercent: Number(it.materialBreakdown.offer.baseVaPercent),
+          }),
         } as EstimateBreakdown,
         quotedTotal: Number(it.totalPrice),
+        ...(it.materialBreakdown.offer && { offerApplied: true, offerName: it.materialBreakdown.offer.name }),
       }),
     })));
     // Keep the round-off as it was: automatic if that is what the bill had (nearest rupee), else the figure that was keyed.
@@ -401,7 +421,7 @@ export function NewSalePage() {
     else { setRoundMode('MANUAL'); setRoundManual(stored); }
   }, [isEdit, editInvoice]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const addTagLine = (tag: any) => {
+  const addTagLine = async (tag: any) => {
     const netGoldWeight = Number(tag.netWeight ?? 0);
     // Prefer whatever MC rate/VA% was actually decided for this piece at tagging time (see
     // JewelryTag's schema comment) over a fresh master lookup — only a tag that predates that
@@ -422,7 +442,7 @@ export function NewSalePage() {
     const wastagePercent = tagVaPercent !== undefined
       ? tagVaPercent
       : masterCharge ? Number(masterCharge.saleWastagePercent) : 0;
-    setLines((p) => [...p, {
+    const line: LineItem = {
       key: nextKey(),
       tagId: tag.id,
       tagNumber: tag.tagNumber,
@@ -440,7 +460,18 @@ export function NewSalePage() {
       stoneValue: 0,
       categoryId: tag.category?.id ?? undefined,
       categoryName: tag.category?.name ?? undefined,
-    }]);
+    };
+    // One pricing engine: a tagged piece is priced from its own stored material rows and MC / VA rates (weight x rate,
+    // MC x metal weight, VA % of metal value) - exactly what the tag, the estimate and F4 use - never from a separate
+    // per-gram shortcut. Only a non-INR bill (no material pricing there) keeps the plain per-gram line.
+    let estimate: EstimateBreakdown | undefined;
+    if (currency === 'INR') {
+      try { estimate = await buildTagBreakdown(line); } catch (e: any) {
+        enqueueSnackbar(e?.message?.startsWith('Tag ') || e?.message?.startsWith('No metal rate') ? e.message : 'Could not load the materials of this piece', { variant: 'error' });
+        return;
+      }
+    }
+    setLines((p) => [...p, estimate ? { ...line, goldRate: 0, makingCharge: 0, wastagePercent: 0, estimate } : line]);
     setTagSearch('');
   };
 
@@ -449,7 +480,7 @@ export function NewSalePage() {
     const breakdown: EstimateBreakdown = {
       rows: (est.items ?? []).map((i: any) => ({
         key: newRowKey(), code: i.code, materialType: i.materialType, name: i.name || i.code,
-        weight: Number(i.weight), unit: i.unit, rate: Number(i.saleRate ?? 0),
+        weight: Number(i.weight), unit: i.unit, rate: Number(i.saleRate ?? 0), ...(i.materialId && { materialId: i.materialId }),
       })),
       mcRate: Number(est.saleMcRate ?? 0),
       vaPercent: Number(est.saleVaPercent ?? 0),
@@ -463,9 +494,16 @@ export function NewSalePage() {
       goldRate: 0, makingCharge: 0, wastagePercent: 0, stoneValue: 0,
       categoryId: tag.category?.id ?? undefined, categoryName: tag.category?.name ?? undefined,
       estimateId: est.id, estimateNumber: est.estimateNumber, quotedTotal: Number(est.totalSaleAmount),
-      estimate: breakdown, salesPersonId,
+      goldRateChanged: !!est.goldRateChanged, goldRateAtEstimate: est.goldRateAtEstimate ?? undefined, goldRateNow: est.goldRateNow ?? undefined,
+      estimate: breakdown, salesPersonId, offerName: est.offerName ?? undefined,
     }]);
     setEstimateSearch('');
+    // An estimate that was priced below its offer was released to billing by a store manager's approval; carry that approval
+    // onto this bill (the server uses it only if its exact figures still match what is billed).
+    void apiGet<any>('/offers/approvals', { estimateId: est.id, status: 'APPROVED' }).then((res) => {
+      const list: any[] = res?.data ?? res ?? [];
+      if (list.length) setApprovalIds((p) => ({ ...p, ...Object.fromEntries(list.map((a) => [a.id, a.id])) }));
+    }).catch(() => undefined);
   };
 
   // Material Pricing (shortcut F4 / the row buttons): one session over every eligible tagged line — tagged, not locked by
@@ -476,21 +514,80 @@ export function NewSalePage() {
 
   const buildTagBreakdown = async (l: LineItem): Promise<EstimateBreakdown> => {
     const tag = await apiGet<any>(`/tagging/tags/${l.tagId}`);
-    const todaysRate = (l.karat && latestRateByKarat[l.karat]) || Number(l.goldRate) || 0;
+    // Gold is live: a METAL row is priced at the day's rate for the piece's karat, never the rate stored on the tag (the
+    // server prices it the same way). No rate at all -> stop here rather than quote the metal at a stale or zero rate.
+    const todaysRate = (l.karat && latestRateByKarat[l.karat]) || 0;
+    const needsMetal = (tag.materials ?? []).length === 0 || (tag.materials ?? []).some((m: any) => m.materialType === 'METAL');
+    if (needsMetal && !todaysRate) throw new Error(`No metal rate entered for ${l.karat ?? 'this piece'}`);
     let rows: EstimateBreakdown['rows'] = (tag.materials ?? []).map((m: any) => ({
-      key: newRowKey(), code: m.code, materialType: m.materialType, name: m.code,
+      key: newRowKey(), materialId: m.id, code: m.code, materialType: m.materialType, name: m.code,
       weight: Number(m.weight), unit: m.unit,
-      rate: m.saleRate != null ? Number(m.saleRate) : m.materialType === 'METAL' ? todaysRate : 0,
+      rate: m.materialType === 'METAL' ? todaysRate : m.saleRate != null ? Number(m.saleRate) : 0,
     }));
     if (rows.length === 0) {
       rows = [{ key: newRowKey(), code: l.karat ?? 'METAL', materialType: 'METAL', name: l.karat ?? 'Metal', weight: Number(l.netGoldWeight) || 0, unit: 'GM', rate: todaysRate }];
     }
-    const net = Number(l.netGoldWeight) || 0;
+    // A missing sale rate is never read as 0 or filled from a default: the piece is refused until the tag is fixed.
+    const missing: string[] = [];
+    if (tag.saleMcRate == null) missing.push('making charge rate');
+    if (tag.saleVaPercent == null) missing.push('VA %');
+    (tag.materials ?? []).forEach((m: any) => { if (m.materialType !== 'METAL' && m.saleRate == null) missing.push(`${m.code} sale rate`); });
+    if (missing.length > 0) throw new Error(`Tag ${tag.tagNumber ?? ''} cannot be priced - missing: ${missing.join(', ')}. Set them on the tag first.`);
     return {
       rows,
-      mcRate: tag.saleMcRate != null ? Number(tag.saleMcRate) : net > 0 ? round2(Number(l.makingCharge) / net) : 0,
-      vaPercent: tag.saleVaPercent != null ? Number(tag.saleVaPercent) : Number(l.wastagePercent) || 0,
+      mcRate: Number(tag.saleMcRate),
+      vaPercent: Number(tag.saleVaPercent),
     };
+  };
+
+  // ── Offers on a tagged line ────────────────────────────────────────────────────────────────────────────────────────
+  // What the winning offer (if any) would do to each tagged piece on the bill, as of the invoice date. A read-only preview:
+  // nothing changes until the user presses "Apply offer" on that line. One offer wins per piece (no stacking) and an
+  // offer only ever lowers a rate - both enforced by the server's resolver.
+  const invoiceDateStr = watch('invoiceDate');
+  const offerTagIds = Array.from(new Set(lines.filter((l) => l.tagId && !l.estimateId && !isLocked(l)).map((l) => l.tagId!)));
+  const offerResults = useQueries({
+    queries: offerTagIds.map((tagId) => ({
+      queryKey: ['sale-offer', tagId, invoiceDateStr],
+      queryFn: () => apiGet<any>('/offers/resolve', { tagId, date: invoiceDateStr || undefined }),
+      retry: false,
+      staleTime: 60_000,
+    })),
+  });
+  const offerByTag = new Map<string, any>();
+  offerTagIds.forEach((id, i) => {
+    const d: any = offerResults[i]?.data;
+    const res = d?.data ?? d;
+    if (res?.resolution?.offer) offerByTag.set(id, res.resolution);
+  });
+
+  const applyOfferToLine = async (l: LineItem) => {
+    const res = l.tagId ? offerByTag.get(l.tagId) : undefined;
+    if (!res || matLoading) return;
+    if (currency !== 'INR') { enqueueSnackbar('Offers are priced in INR — set the invoice currency to INR first', { variant: 'warning' }); return; }
+    setMatLoading(true);
+    try {
+      const before = l.estimate ?? await buildTagBreakdown(l);
+      const breakdown = applyOfferToBreakdown(before, res);
+      setLines((p) => p.map((x) => x.key !== l.key ? x : {
+        ...x, estimate: breakdown, offerApplied: true, offerName: res.offer.name, offerFromPlain: !l.estimate,
+        quotedTotal: l.estimate ? x.quotedTotal : round2(lineTotal(l)),
+      }));
+    } catch {
+      enqueueSnackbar('Could not load the materials of this piece to apply the offer', { variant: 'error' });
+    } finally {
+      setMatLoading(false);
+    }
+  };
+
+  const removeOfferFromLine = (l: LineItem) => {
+    setLines((p) => p.map((x) => {
+      if (x.key !== l.key) return x;
+      const { estimate, ...rest } = x;
+      const plain = { ...rest, offerApplied: false, offerName: undefined, offerFromPlain: false };
+      if (x.offerFromPlain || !estimate) return { ...plain, quotedTotal: undefined };
+      return { ...plain, estimate: removeOfferFromBreakdown(estimate) };
+    }));
   };
 
   const openMaterials = async (startKey: string) => {
@@ -504,6 +601,7 @@ export function NewSalePage() {
         key: l.key, tagNumber: l.tagNumber ?? l.productCode, description: l.description,
         initial: l.estimate ?? await buildTagBreakdown(l),
         currentLineTotal: round2(lineTotal(l)),
+        offer: offerByTag.get(l.tagId!), offerName: l.offerName, offerLocked: !!l.estimateId,
       })));
       setMatSession({ entries, startKey });
     } catch {
@@ -513,12 +611,15 @@ export function NewSalePage() {
     }
   };
 
-  const applyMaterials = (changed: Array<{ key: string; breakdown: EstimateBreakdown; quotedTotal: number }>) => {
+  const applyMaterials = (changed: Array<{ key: string; breakdown: EstimateBreakdown; quotedTotal: number; offerName?: string }>) => {
     const byKey = new Map(changed.map((c) => [c.key, c]));
     setLines((p) => p.map((x) => {
       const c = byKey.get(x.key);
       // An estimate line keeps what the estimate quoted; any other line is compared with what the grid showed before.
-      return c ? { ...x, estimate: c.breakdown, quotedTotal: x.estimateId ? x.quotedTotal : c.quotedTotal } : x;
+      return c ? {
+        ...x, estimate: c.breakdown, quotedTotal: x.estimateId ? x.quotedTotal : c.quotedTotal,
+        ...(x.estimateId ? {} : { offerApplied: !!c.offerName, offerName: c.offerName }),
+      } : x;
     }));
     setMatSession(null);
   };
@@ -628,6 +729,108 @@ export function NewSalePage() {
 
   const removeLine = (key: string) => setLines((p) => p.filter((l) => l.key !== key || isLocked(l)));
 
+  // "Return to estimation": sends the estimate back to the estimator (SENT -> OPEN, audited) and takes it off this bill.
+  // Only possible before it is billed; the server refuses once an invoice exists for it.
+  const returnToEstimation = async (l: LineItem) => {
+    if (!l.estimateId) return;
+    try {
+      await apiPost(`/estimation/estimates/${l.estimateId}/return-from-billing`, {});
+      setLines((p) => p.filter((x) => x.key !== l.key));
+      enqueueSnackbar(`Estimate ${l.estimateNumber} returned to estimation`, { variant: 'success' });
+      qc.invalidateQueries({ queryKey: ['billable-estimates'] });
+    } catch (e: any) {
+      enqueueSnackbar(e.response?.data?.error ?? 'Could not return the estimate', { variant: 'error' });
+    }
+  };
+
+  // Gold is priced at the day's rate. If a piece's karat has no rate for TODAY yet, the latest earlier one is being used -
+  // say so, and (for whoever may) link to the rates page. Never silent.
+  const canUpdateRates = useAuthStore((s) => s.hasPermission('rate:update'));
+  const todayIso = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })();
+  const staleRates = Array.from(new Set(lines.filter((l) => l.tagId && !l.estimateId && l.karat).map((l) => l.karat!)))
+    .map((k) => ({ karat: k, row: (metalRates ?? []).find((r: any) => r.karat === k) }))
+    .filter((x) => x.row && String(x.row.date).slice(0, 10) < todayIso);
+
+  // ── Items table: DataTable (drag headers to reorder, right-click a header to show/hide columns) ─────────────────────
+  // Rates are not editable in the grid. A tagged / estimate line is re-priced through Edit (F4) → Material Pricing; a custom
+  // or material line through the small Edit dialog. Rate columns exist for those who want to see them, hidden by default.
+  const wt = (v: number) => <Typography component="span" variant="body2" sx={{ fontFamily: 'monospace' }}>{Number(v || 0).toFixed(3)}</Typography>;
+  const editLine = (l: LineItem) => (l.tagId || l.estimate ? void openMaterials(l.key) : setCustomEditKey(l.key));
+  const itemColumns: DataTableColumn[] = [
+    {
+      key: 'item', label: 'Item', width: 260, hideable: false, filterValue: (l: LineItem) => l.tagNumber ?? l.description ?? '',
+      render: (l: LineItem) => (l.tagId ? (
+        <Box>
+          <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
+            <Typography sx={{ fontFamily: 'monospace', fontSize: 12, color: '#44C47A', fontWeight: 700 }}>{l.tagNumber}</Typography>
+            {isLocked(l) && <Chip size="small" color="warning" label="Returned — locked" sx={{ height: 18, fontSize: 10 }} />}
+            {l.rateType === 'FIXED' && <Chip size="small" variant="outlined" label="Flat price" sx={{ height: 18, fontSize: 10 }} title="Rate is this line's flat price, not ₹/g" />}
+            {l.estimateNumber && <Chip size="small" color="info" variant="outlined" label={l.estimateNumber} sx={{ height: 18, fontSize: 10, fontFamily: 'monospace' }} />}
+            {l.estimateId && l.goldRateChanged && (
+              <Chip size="small" color="warning" variant="outlined" sx={{ height: 18, fontSize: 10 }}
+                title="The gold rate has changed since this estimate. The bill keeps the estimate's rate unless you edit it."
+                label={`Gold rate updated: ₹${Number(l.goldRateAtEstimate).toLocaleString('en-IN')} → ₹${Number(l.goldRateNow).toLocaleString('en-IN')}/g`} />
+            )}
+            {(l.offerApplied || l.offerName) && <Chip size="small" color="success" label={`Offer: ${l.offerName}`} sx={{ height: 18, fontSize: 10 }} title="Rates on this line were lowered by an offer" />}
+          </Stack>
+          <Typography variant="body2" color="text.secondary" noWrap title={l.description}>{l.description}</Typography>
+          {!isLocked(l) && !l.estimateId && (l.offerApplied ? (
+            <Button size="small" color="warning" sx={{ p: 0, minWidth: 0, fontSize: 11 }} onClick={() => removeOfferFromLine(l)}>Remove offer</Button>
+          ) : offerByTag.get(l.tagId) ? (
+            <Button size="small" color="success" sx={{ p: 0, minWidth: 0, fontSize: 11 }} disabled={matLoading}
+              title="Lower this piece's making charge / VA / stone rates by the running offer"
+              onClick={() => void applyOfferToLine(l)}>Apply offer: {offerByTag.get(l.tagId)!.offer.name}</Button>
+          ) : null)}
+        </Box>
+      ) : (
+        <Box>
+          {l.materialSale && <Chip size="small" color="info" label="Material" sx={{ height: 18, fontSize: 10 }} />}
+          <Typography variant="body2" color={l.materialSale ? 'text.secondary' : undefined} noWrap title={l.description}>{l.description || '—'}</Typography>
+        </Box>
+      )),
+    },
+    { key: 'tagNumber', label: 'Tag No', width: 120, defaultHidden: true, filterValue: (l: LineItem) => l.tagNumber ?? '', render: (l: LineItem) => l.tagNumber ?? '—' },
+    { key: 'category', label: 'Category', width: 130, filterValue: (l: LineItem) => l.categoryName ?? '', render: (l: LineItem) => l.categoryName ?? '—' },
+    { key: 'karat', label: 'Karat', width: 80, defaultHidden: true, filterValue: (l: LineItem) => l.karat ?? '', render: (l: LineItem) => l.karat ?? '—' },
+    { key: 'huid', label: 'HUID', width: 120, defaultHidden: true, filterValue: (l: LineItem) => l.huid ?? '', render: (l: LineItem) => l.huid ?? '—' },
+    { key: 'hsnCode', label: 'HSN', width: 90, defaultHidden: true, filterValue: (l: LineItem) => l.hsnCode ?? '', render: (l: LineItem) => l.hsnCode ?? 'Default' },
+    { key: 'grossWeight', label: 'Gross Wt (g)', align: 'right', width: 110, filterable: false, render: (l: LineItem) => wt(l.grossWeight) },
+    { key: 'netGoldWeight', label: 'Net Wt (g)', align: 'right', width: 100, filterable: false, render: (l: LineItem) => wt(l.netGoldWeight) },
+    { key: 'stoneWeight', label: 'Stone Wt (g)', align: 'right', width: 110, filterable: false, render: (l: LineItem) => wt(l.stoneWeight) },
+    { key: 'quantity', label: 'Qty', align: 'right', width: 60, filterable: false, render: (l: LineItem) => l.quantity },
+    {
+      key: 'goldRate', label: 'Rate (₹/g)', align: 'right', width: 100, defaultHidden: true, filterable: false,
+      render: (l: LineItem) => (l.estimate ? '—' : l.rateType === 'FIXED' ? `${fmt(l.goldRate)} flat` : fmt(l.goldRate)),
+    },
+    { key: 'makingCharge', label: 'Making (₹)', align: 'right', width: 100, defaultHidden: true, filterable: false,
+      render: (l: LineItem) => (l.estimate ? `₹${l.estimate.mcRate}/g` : l.rateType === 'FIXED' ? '—' : fmt(l.makingCharge)) },
+    { key: 'wastagePercent', label: 'VA %', align: 'right', width: 70, defaultHidden: true, filterable: false,
+      render: (l: LineItem) => (l.estimate ? `${l.estimate.vaPercent}%` : l.rateType === 'FIXED' ? '—' : `${Number(l.wastagePercent)}%`) },
+    { key: 'stoneValue', label: 'Stones (₹)', align: 'right', width: 100, defaultHidden: true, filterable: false,
+      render: (l: LineItem) => (l.estimate || l.rateType === 'FIXED' ? '—' : fmt(l.stoneValue)) },
+    { key: 'unitPrice', label: 'Price / pc', align: 'right', width: 110, defaultHidden: true, filterable: false,
+      render: (l: LineItem) => fmt(lineTotal(l) / (Number(l.quantity) || 1)) },
+    {
+      key: 'lineTotal', label: 'Line Total', align: 'right', width: 120, filterable: false, sortValue: (l: LineItem) => lineTotal(l),
+      render: (l: LineItem) => <Typography component="span" sx={{ fontFamily: 'monospace', fontWeight: 700, whiteSpace: 'nowrap' }}>{fmt(lineTotal(l))}</Typography>,
+    },
+    {
+      key: 'actions', label: '', width: 160, hideable: false, filterable: false,
+      render: (l: LineItem) => (
+        <Stack direction="row" spacing={0.5} alignItems="center" data-line-key={l.key}>
+          <Button size="small" variant="outlined" sx={{ whiteSpace: 'nowrap' }} disabled={isLocked(l) || matLoading} onClick={() => editLine(l)}>
+            {l.tagId || l.estimate ? 'Edit (F4)' : 'Edit'}
+          </Button>
+          {l.estimateId && !l.invoiceItemId && (
+            <IconButton size="small" title="Return to estimation" onClick={() => void returnToEstimation(l)}><Undo fontSize="small" /></IconButton>
+          )}
+          <IconButton size="small" color="error" disabled={isLocked(l)} onClick={() => removeLine(l.key)}><Delete fontSize="small" /></IconButton>
+        </Stack>
+      ),
+    },
+  ];
+  const customEditLine = lines.find((l) => l.key === customEditKey);
+
   // All of this mirrors createInvoice (sales.service.ts), which recomputes it authoritatively at save time.
   const subtotal = lines.reduce((s, l) => s + lineTotal(l), 0);
   // Discount: a flat amount, or a % of the gross — never more than the gross.
@@ -671,9 +874,9 @@ export function NewSalePage() {
       } else {
         gold += Number(l.netGoldWeight) * Number(l.goldRate) * q;
         stone += Number(l.stoneValue) * q;
-        // On a plain line VA marks up the making charge (as createInvoice prices it): MC is the charge itself.
+        // On a plain line MC is the making amount itself and VA is a % of the metal's value (as createInvoice prices it).
         mc += Number(l.makingCharge) * q;
-        va += Number(l.makingCharge) * (Number(l.wastagePercent || 0) / 100) * q;
+        va += Number(l.netGoldWeight) * Number(l.goldRate) * (Number(l.wastagePercent || 0) / 100) * q;
         grossWeight += (Number(l.grossWeight) || 0) * q;
       }
     }
@@ -863,10 +1066,17 @@ export function NewSalePage() {
       qc.invalidateQueries({ queryKey: ['client-credit'] });
       qc.invalidateQueries({ queryKey: ['client-advances'] });
       qc.invalidateQueries({ queryKey: ['clients-list'] });
+      setApprovalIds({});
       setCreatedInvoice(inv);
       enqueueSnackbar(`Invoice ${inv?.invoiceNumber ?? ''} ${isEdit ? 'updated' : 'created'}`, { variant: 'success' });
     },
-    onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? (isEdit ? 'Failed to update invoice' : 'Failed to create invoice'), { variant: 'error' }),
+    onError: (e: any) => {
+      if (e.response?.data?.code === 'DISCOUNT_APPROVAL_REQUIRED' && Array.isArray(e.response.data.details?.needs)) {
+        setApprovalNeeds(e.response.data.details.needs);
+        return;
+      }
+      enqueueSnackbar(e.response?.data?.error ?? (isEdit ? 'Failed to update invoice' : 'Failed to create invoice'), { variant: 'error' });
+    },
   });
 
   // The invoice as the server takes it (POST to create; PUT to amend sends the same bill plus each line's `id`).
@@ -883,6 +1093,8 @@ export function NewSalePage() {
       terms: data.terms || (isEdit ? null : undefined),
       notes: isEdit ? (data.notes || null) : data.notes,
       estimateIds: lines.filter((l) => l.estimateId).map((l) => l.estimateId),
+      // Approved below-offer requests this bill relies on; the server uses only those whose exact figures match.
+      approvalIds: Object.values(approvalIds),
       payments: collectPayment && paymentSplits.length > 0
         ? paymentSplits
             .filter((p) => p.mode === 'OLD_GOLD' || Number(p.amount) > 0)
@@ -1186,7 +1398,7 @@ export function NewSalePage() {
                           filterOptions={(x) => x}
                           inputValue={tagSearch}
                           onInputChange={(_, v) => setTagSearch(v)}
-                          onChange={(_, val) => { if (val) addTagLine(val); }}
+                          onChange={(_, val) => { if (val) void addTagLine(val); }}
                           renderInput={(params) => (
                             <TextField {...params} label="Add IN_STOCK piece (search by tag number, name or HUID)" />
                           )}
@@ -1199,133 +1411,24 @@ export function NewSalePage() {
                       </Grid>
 
 
+                      {staleRates.length > 0 && (
+                        <Grid item xs={12}>
+                          <Alert severity="warning" action={canUpdateRates ? <Button color="inherit" size="small" onClick={() => navigate('/designs/rates')}>Update rate</Button> : undefined}>
+                            {staleRates.map((x) => `Today's ${x.karat} rate has not been entered - using the ${new Date(`${String(x.row.date).slice(0, 10)}T00:00:00`).toLocaleDateString('en-IN')} rate (₹${Number(x.row.ratePerGram).toLocaleString('en-IN')}/g)`).join('. ')}.
+                          </Alert>
+                        </Grid>
+                      )}
+
                       {lines.length > 0 && (
                         <Grid item xs={12}>
-                          <Box sx={{ overflowX: 'auto' }}>
-                            <Table size="small" sx={{ tableLayout: 'fixed', minWidth: 940, '& .MuiTableCell-root': { px: 1, py: 1, verticalAlign: 'middle' }, '& .MuiTableCell-head': { whiteSpace: 'nowrap' } }}>
-                              <TableHead>
-                                <TableRow>
-                                  <TableCell sx={{ width: '22%' }}>Item</TableCell>
-                                  <TableCell sx={{ width: '11%' }}>Category</TableCell>
-                                  <TableCell align="right" sx={{ width: '9%' }}>Net Wt (g)</TableCell>
-                                  <TableCell align="right" sx={{ width: '11%' }}>Gold Rate (₹/g)</TableCell>
-                                  <TableCell align="right" sx={{ width: '10%' }}>Making (₹)</TableCell>
-                                  <TableCell align="right" sx={{ width: '7%' }}>VA %</TableCell>
-                                  <TableCell align="right" sx={{ width: '10%' }}>Stones (₹)</TableCell>
-                                  <TableCell align="right" sx={{ width: '6%' }}>Qty</TableCell>
-                                  <TableCell align="right" sx={{ width: '12%' }}>Line Total</TableCell>
-                                  <TableCell sx={{ width: 48 }} />
-                                </TableRow>
-                              </TableHead>
-                              <TableBody>
-                                {lines.map((l) => (
-                                  <TableRow key={l.key} data-line-key={l.key} sx={isLocked(l) ? { opacity: 0.6 } : undefined}>
-                                    <TableCell>
-                                      {l.tagId ? (
-                                        <Box>
-                                          <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
-                                            <Typography sx={{ fontFamily: 'monospace', fontSize: 12, color: '#44C47A', fontWeight: 700 }}>
-                                              {l.tagNumber}
-                                            </Typography>
-                                            {isLocked(l) && <Chip size="small" color="warning" label="Returned — locked" sx={{ height: 18, fontSize: 10 }} />}
-                                            {l.rateType === 'FIXED' && <Chip size="small" variant="outlined" label="Flat price" sx={{ height: 18, fontSize: 10 }} title="Rate column is this line's flat price, not ₹/g" />}
-                                            {l.estimateNumber && (
-                                              <Chip size="small" color="info" variant="outlined" label={l.estimateNumber} sx={{ height: 18, fontSize: 10, fontFamily: 'monospace' }} />
-                                            )}
-                                          </Stack>
-                                          <Typography variant="body2" color="text.secondary" noWrap title={l.description}>{l.description}</Typography>
-                                          {!l.estimate && !isLocked(l) && (
-                                            <Button size="small" sx={{ p: 0, minWidth: 0, fontSize: 11 }} disabled={matLoading} onClick={() => void openMaterials(l.key)}>Materials (F4)</Button>
-                                          )}
-                                        </Box>
-                                      ) : l.materialSale ? (
-                                        <Box>
-                                          <Chip size="small" color="info" label="Material" sx={{ height: 18, fontSize: 10 }} />
-                                          <Typography variant="body2" color="text.secondary" noWrap title={l.description}>{l.description}</Typography>
-                                        </Box>
-                                      ) : (
-                                        <TextField size="small" fullWidth placeholder="Description" value={l.description} disabled={isLocked(l)}
-                                          onChange={(e) => updateLine(l.key, 'description', e.target.value)} />
-                                      )}
-                                    </TableCell>
-                                    <TableCell>
-                                      {l.tagId || l.materialSale ? (
-                                        <Typography variant="body2">{l.categoryName ?? '—'}</Typography>
-                                      ) : (
-                                        <TextField size="small" select fullWidth value={l.categoryId ?? ''} disabled={isLocked(l)}
-                                          onChange={(e) => {
-                                            const cat = categoryList.find((c: any) => c.id === e.target.value);
-                                            updateLine(l.key, 'categoryId', e.target.value);
-                                            updateLine(l.key, 'categoryName', cat?.name);
-                                          }}>
-                                          <MenuItem value="">—</MenuItem>
-                                          {categoryList.map((c: any) => (
-                                            <MenuItem key={c.id} value={c.id}>{c.name}</MenuItem>
-                                          ))}
-                                        </TextField>
-                                      )}
-                                    </TableCell>
-                                    <TableCell align="right">
-                                      {l.tagId || l.materialSale ? <Typography component="span" variant="body2" sx={{ fontFamily: 'monospace' }}>{Number(l.netGoldWeight).toFixed(3)}</Typography> : (
-                                        <TextField size="small" fullWidth type="number" value={l.netGoldWeight} disabled={isLocked(l)}
-                                          inputProps={{ step: 0.001, min: 0, style: { textAlign: 'right', width: 50 } }}
-                                          onChange={(e) => updateLine(l.key, 'netGoldWeight', Number(e.target.value))} />
-                                      )}
-                                    </TableCell>
-                                    {l.estimate ? (
-                                      <TableCell colSpan={4}>
-                                        <Stack direction="row" spacing={1.5} justifyContent="space-between" alignItems="center"
-                                          sx={{ bgcolor: 'action.hover', borderRadius: 1.5, px: 1.5, py: 0.75 }}>
-                                          <Box sx={{ minWidth: 0 }}>
-                                            <Typography variant="caption" fontWeight={700} display="block">{l.estimateNumber ? 'Priced from estimate' : 'Priced from material rows'}</Typography>
-                                            <Typography variant="caption" color="text.secondary" display="block">
-                                              {l.estimate.rows.length} row{l.estimate.rows.length === 1 ? '' : 's'} · MC ₹{l.estimate.mcRate}/g · VA {l.estimate.vaPercent}%
-                                              {Math.abs(lineTotal(l) - (l.quotedTotal ?? 0)) > 0.005 ? ` · quoted ₹${Number(l.quotedTotal).toLocaleString('en-IN')}` : ''}
-                                            </Typography>
-                                          </Box>
-                                          <Button size="small" variant="outlined" sx={{ whiteSpace: 'nowrap', flexShrink: 0 }} disabled={isLocked(l) || matLoading} onClick={() => void openMaterials(l.key)}>Edit rates / rows (F4)</Button>
-                                        </Stack>
-                                      </TableCell>
-                                    ) : (<>
-                                    <TableCell align="right">
-                                      <TextField size="small" fullWidth type="number" value={l.goldRate} disabled={isLocked(l)}
-                                        inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right' } }}
-                                        onChange={(e) => updateLine(l.key, 'goldRate', Number(e.target.value))} />
-                                    </TableCell>
-                                    <TableCell align="right">
-                                      <TextField size="small" fullWidth type="number" value={l.makingCharge} disabled={isLocked(l) || l.rateType === 'FIXED' || !!l.materialSale}
-                                        inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right' } }}
-                                        onChange={(e) => updateLine(l.key, 'makingCharge', Number(e.target.value))} />
-                                    </TableCell>
-                                    <TableCell align="right">
-                                      <TextField size="small" fullWidth type="number" value={l.wastagePercent} disabled={isLocked(l) || l.rateType === 'FIXED' || !!l.materialSale}
-                                        inputProps={{ step: 0.1, min: 0, style: { textAlign: 'right' } }}
-                                        onChange={(e) => updateLine(l.key, 'wastagePercent', Number(e.target.value))} />
-                                    </TableCell>
-                                    <TableCell align="right">
-                                      <TextField size="small" fullWidth type="number" value={l.stoneValue} disabled={isLocked(l) || l.rateType === 'FIXED' || !!l.materialSale}
-                                        inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right' } }}
-                                        onChange={(e) => updateLine(l.key, 'stoneValue', Number(e.target.value))} />
-                                    </TableCell>
-                                    </>)}
-                                    <TableCell align="right">
-                                      <TextField size="small" fullWidth type="number" value={l.quantity} disabled={!!l.estimate || !!l.materialSale || isLocked(l)}
-                                        inputProps={{ step: 1, min: 1, style: { textAlign: 'right' } }}
-                                        onChange={(e) => updateLine(l.key, 'quantity', Number(e.target.value))} />
-                                    </TableCell>
-                                    <TableCell align="right" sx={{ fontFamily: 'monospace', fontWeight: 700, whiteSpace: 'nowrap' }}>
-                                      {fmt(lineTotal(l))}
-                                    </TableCell>
-                                    <TableCell>
-                                      <IconButton size="small" color="error" disabled={isLocked(l)} onClick={() => removeLine(l.key)}>
-                                        <Delete fontSize="small" />
-                                      </IconButton>
-                                    </TableCell>
-                                  </TableRow>
-                                ))}
-                              </TableBody>
-                            </Table>
-                          </Box>
+                          <DataTable
+                            tableId="new-sale-items"
+                            rows={lines}
+                            isLoading={false}
+                            getRowId={(l: LineItem) => l.key}
+                            emptyLabel="No items"
+                            columns={itemColumns}
+                          />
 
                           {categoryRows.length > 0 && (
                             <Box sx={{ mt: 2.5, ml: 'auto', maxWidth: 460 }}>
@@ -1860,8 +1963,68 @@ export function NewSalePage() {
       <MaterialPurchaseDialog open={materialPurchase.open} clientId={selectedClientId} branchId={branchId}
         onClose={() => setMaterialPurchase((m) => ({ ...m, open: false }))}
         onCompleted={() => void onMaterialPurchased(materialPurchase.splitKey)} />
+      <Dialog open={!!customEditLine} onClose={() => setCustomEditKey(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>{customEditLine?.materialSale ? 'Edit material line' : 'Edit line'}</DialogTitle>
+        <DialogContent>
+          {customEditLine && (() => {
+            const l = customEditLine;
+            const num = (field: keyof LineItem, label: string, step: number, disabled = false) => (
+              <Grid item xs={6} sm={4} key={field}>
+                <TextField size="small" fullWidth type="number" label={label} value={l[field] as number} disabled={disabled}
+                  inputProps={{ step, min: 0 }} onChange={(e) => updateLine(l.key, field, Number(e.target.value))} />
+              </Grid>
+            );
+            const flat = l.rateType === 'FIXED' || !!l.materialSale;
+            return (
+              <Grid container spacing={1.5} sx={{ pt: 1 }}>
+                {!l.materialSale && (
+                  <Grid item xs={12} sm={8}>
+                    <TextField size="small" fullWidth label="Description" value={l.description} onChange={(e) => updateLine(l.key, 'description', e.target.value)} />
+                  </Grid>
+                )}
+                {!l.materialSale && (
+                  <Grid item xs={12} sm={4}>
+                    <TextField size="small" select fullWidth label="Category" value={l.categoryId ?? ''}
+                      onChange={(e) => {
+                        const cat = categoryList.find((c: any) => c.id === e.target.value);
+                        updateLine(l.key, 'categoryId', e.target.value);
+                        updateLine(l.key, 'categoryName', cat?.name);
+                      }}>
+                      <MenuItem value="">—</MenuItem>
+                      {categoryList.map((c: any) => <MenuItem key={c.id} value={c.id}>{c.name}</MenuItem>)}
+                    </TextField>
+                  </Grid>
+                )}
+                {num('grossWeight', 'Gross Wt (g)', 0.001, !!l.materialSale)}
+                {num('netGoldWeight', 'Net Wt (g)', 0.001, !!l.materialSale)}
+                {num('stoneWeight', 'Stone Wt (g)', 0.001, !!l.materialSale)}
+                {num('goldRate', l.rateType === 'FIXED' ? 'Flat price (₹)' : 'Gold rate (₹/g)', 0.01)}
+                {num('makingCharge', 'Making (₹)', 0.01, flat)}
+                {num('wastagePercent', 'VA %', 0.1, flat)}
+                {num('stoneValue', 'Stones (₹)', 0.01, flat)}
+                {num('quantity', 'Qty', 1, !!l.materialSale)}
+                <Grid item xs={12}><Typography variant="body2" fontWeight={700} align="right">Line total {fmt(lineTotal(l))}</Typography></Grid>
+              </Grid>
+            );
+          })()}
+        </DialogContent>
+        <DialogActions><Button variant="contained" onClick={() => setCustomEditKey(null)}>Done</Button></DialogActions>
+      </Dialog>
       <MaterialSaleDialog open={materialSaleOpen} karats={karatList} rateByKarat={latestRateByKarat} inCartByKarat={materialInCartByKarat}
         onClose={() => setMaterialSaleOpen(false)} onAdd={addMaterialLine} />
+      <BelowOfferApprovalDialog
+        open={!!approvalNeeds} needs={approvalNeeds ?? []} ids={approvalIds} setIds={setApprovalIds}
+        labelFor={(n) => { const l = lines.find((x) => x.tagId === n.tagId); return l ? `${l.tagNumber ?? l.productCode} — ${l.description}` : 'A piece on this bill'; }}
+        requestBody={(n, reason) => {
+          if (n.scope === 'DISCOUNT') return { scope: 'DISCOUNT', discountAmount: n.amount, reason };
+          const l = lines.find((x) => x.tagId === n.tagId);
+          if (!l?.estimate) return null;
+          return { scope: 'LINE', tagId: n.tagId, materialBreakdown: estimateInvoiceLine(l).materialBreakdown, invoiceDate: String(getValues('invoiceDate') ?? ''), reason };
+        }}
+        onClose={() => setApprovalNeeds(null)}
+        saving={mutation.isPending}
+        onSave={() => { setApprovalNeeds(null); void handleSubmit((d) => mutation.mutate(d))(); }}
+      />
       <CustomerMismatchDialog open={mismatchOpen && !!pendingEstimate} onCancel={() => setMismatchOpen(false)} onConfirm={() => void confirmEstimate()} />
 
       {matSession && (

@@ -126,20 +126,20 @@ describe('HTTP: J4 authorization gating', () => {
 
   // ─── J4-D1: sensitive financial reports vs operational reports ────────────
 
-  const sensitiveReportRoutes: Array<{ name: string; path: (clientId: string, supplierId: string) => string }> = [
-    { name: 'trial-balance', path: () => '/finance/reports/trial-balance' },
-    { name: 'pnl', path: () => '/finance/reports/pnl' },
-    { name: 'balance-sheet', path: () => '/finance/reports/balance-sheet' },
-    { name: 'dealer-aging', path: () => '/finance/reports/dealer-aging' },
-    { name: 'client-ledger', path: (clientId) => `/finance/reports/client-ledger/${clientId}` },
-    { name: 'day-book', path: () => '/finance/reports/day-book' },
-    { name: 'gst-summary', path: () => '/finance/reports/gst-summary' },
-    { name: 'supplier-ledger', path: (_c, supplierId) => `/finance/reports/supplier-ledger/${supplierId}` },
-    { name: 'purchase-gst-summary', path: () => '/finance/reports/purchase-gst-summary' },
-    { name: 'aging-receivables', path: () => '/reports/aging-receivables' },
+  const sensitiveReportRoutes: Array<{ name: string; perm: string; path: (clientId: string, supplierId: string) => string }> = [
+    { name: 'trial-balance', perm: 'report:trial_balance', path: () => '/finance/reports/trial-balance' },
+    { name: 'pnl', perm: 'report:pnl', path: () => '/finance/reports/pnl' },
+    { name: 'balance-sheet', perm: 'report:balance_sheet', path: () => '/finance/reports/balance-sheet' },
+    { name: 'dealer-aging', perm: 'report:dealer_aging', path: () => '/finance/reports/dealer-aging' },
+    { name: 'client-ledger', perm: 'report:client_ledger', path: (clientId) => `/finance/reports/client-ledger/${clientId}` },
+    { name: 'day-book', perm: 'report:day_book', path: () => '/finance/reports/day-book' },
+    { name: 'gst-summary', perm: 'report:financial_view', path: () => '/finance/reports/gst-summary' },
+    { name: 'supplier-ledger', perm: 'report:supplier_ledger', path: (_c, supplierId) => `/finance/reports/supplier-ledger/${supplierId}` },
+    { name: 'purchase-gst-summary', perm: 'report:financial_view', path: () => '/finance/reports/purchase-gst-summary' },
+    { name: 'aging-receivables', perm: 'report:aging_receivables', path: () => '/reports/aging-receivables' },
   ];
 
-  it.each(sensitiveReportRoutes)('$name — report:view alone is 403, report:financial_view succeeds', async ({ name, path }) => {
+  it.each(sensitiveReportRoutes)('$name — report:view alone is 403, its own report permission succeeds', async ({ name, perm, path }) => {
     const tag = name.slice(0, 6).toUpperCase();
     const reportViewOnly = await tenantWith(`${tag}V`, ['report:view']);
     const clientId = await makeClient(reportViewOnly.t.company.id, 'rpt');
@@ -147,21 +147,29 @@ describe('HTTP: J4 authorization gating', () => {
     const denied = await reportViewOnly.api.get(path(clientId, supplierId));
     expect(denied.status).toBe(403);
 
-    const financialView = await tenantWith(`${tag}F`, ['report:financial_view']);
-    const clientId2 = await makeClient(financialView.t.company.id, 'rpt2');
-    const supplierId2 = await makeSupplier(financialView.t.company.id, 'rpt2');
-    const ok = await financialView.api.get(path(clientId2, supplierId2));
+    const granted = await tenantWith(`${tag}F`, [perm]);
+    const clientId2 = await makeClient(granted.t.company.id, 'rpt2');
+    const supplierId2 = await makeSupplier(granted.t.company.id, 'rpt2');
+    const ok = await granted.api.get(path(clientId2, supplierId2));
     expect(ok.status).toBe(200);
   });
 
-  it('operational reports remain on report:view — unaffected by the financial-detail split', async () => {
-    const t = await tenantWith('ROP', ['report:view']);
-    const wip = await t.api.get('/reports/wip-summary');
-    expect(wip.status).toBe(200);
-    const stock = await t.api.get('/reports/stock-summary');
-    expect(stock.status).toBe(200);
-    const register = await t.api.get('/sales/reports/register');
-    expect(register.status).toBe(200);
+  it('each report is granted on its own — report:view (dashboard) opens none of the individual reports', async () => {
+    const dash = await tenantWith('RDASH', ['report:view']);
+    expect((await dash.api.get('/reports/dashboard')).status).toBe(200);
+    expect((await dash.api.get('/reports/wip-summary')).status).toBe(200); // the dashboard's own widget
+    expect((await dash.api.get('/reports/stock-summary')).status).toBe(403);
+    expect((await dash.api.get('/sales/reports/register')).status).toBe(403);
+    expect((await dash.api.get('/finance/reports/cost-centers')).status).toBe(403);
+
+    const stockOnly = await tenantWith('RSTK', ['report:stock_summary']);
+    expect((await stockOnly.api.get('/reports/stock-summary')).status).toBe(200);
+    expect((await stockOnly.api.get('/sales/reports/register')).status).toBe(403);
+    expect((await stockOnly.api.get('/reports/dashboard')).status).toBe(403);
+
+    const register = await tenantWith('RREG', ['report:sales_register']);
+    expect((await register.api.get('/sales/reports/register')).status).toBe(200);
+    expect((await register.api.get('/sales/reports/sales-summary')).status).toBe(403);
   });
 
   it('SUPER_ADMIN wildcard (*) reaches every J4-gated route', async () => {

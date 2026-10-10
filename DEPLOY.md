@@ -145,6 +145,27 @@ BACKUP_DATABASE_URL='postgresql://trivo_backup:<BACKUP_PW>@<host>:5432/trivo?ssl
 5. Smoke: log in to two companies and open Sales / Tagging / Finance. A migration that adds a company-owned table must
    include its RLS policy (see the latest migrations); `db-secure.sql` then FORCEs it and grants the runtime role.
 
+### 9a. Release notes — offers, live pricing, per-report permissions (migrations 20261012100000 → 20261014120000)
+
+Six migrations, applied in name order by `prisma migrate deploy` (all additive; none drops or rewrites business data):
+`20261012100000_offers`, `20261012120000_estimate_offer_snapshot`, `20261013100000_discount_approvals`,
+`20261013120000_estimate_approval`, `20261014100000_split_report_permissions` (data-only: adds the per-report
+strings to every role that held `report:view` / `report:financial_view`; FORCE RLS lifted around the UPDATE and restored),
+`20261014120000_supplier_payment_reversal`. The two new tables (`offers`/`offer_rules`, `discount_approvals`) are only
+reachable by the API after `db-secure.sql` has run — always run it right after `migrate deploy` (the `migrate` service in step 3 runs both).
+
+**Check what is pending without applying anything** (read-only; never use `prisma migrate dev` or `migrate reset`):
+`DATABASE_URL=<owner url> npx prisma migrate status` from `server/` (Prisma never overrides an already-set `DATABASE_URL`
+with `server/.env`). Under Compose: `docker compose -f docker-compose.prod.yml --profile deploy run --rm --no-deps migrate npx prisma migrate status`.
+
+**Permissions** (Starter Package v1 only reaches companies provisioned from now on; existing roles are never rewritten):
+- *New company:* nothing to do. Its roles already carry `rate:update`, `discount:approve` (store manager) and the per-report strings.
+  `offer:*` and `payment:reverse` are SUPER_ADMIN-only until that company grants them in the Role Editor.
+- *Existing company:* (1) the report split is handled by the migration; (2) run the `rate:update` backfill from a repo checkout
+  with `PLATFORM_DATABASE_URL` set: `cd server && npx ts-node scripts/backfillRateUpdatePermission.ts` (dry run), then add `--apply`;
+  (3) grant `discount:approve` to the store-manager role and `offer:view/create/edit/delete` to whoever manages offers, in the
+  Role Editor (no script). Every affected user must log in again to pick up a changed role.
+
 ## 10. Suspending / offboarding a company
 
 `PATCH /api/v1/platform/companies/:id/status {"isActive": false}` (on loopback). Logins fail, existing tokens stop working

@@ -2,7 +2,16 @@ import { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { prisma } from '../../config/database';
 import { AppError } from '../../middleware/error';
-import { priceMaterialBreakdown } from '../../shared/materialBreakdown';
+import { computeMakingAmount } from '../../shared/pricingEngine';
+import { pickMakingCharge } from '../../shared/makingChargeLookup';
+import { isEstimateExpired } from '../../shared/estimateExpiry';
+import { assertTagPriceable } from '../../shared/tagPriceability';
+import { priceMaterialBreakdown, attachOfferSnapshot, MaterialBreakdown } from '../../shared/materialBreakdown';
+import { resolveOfferForTag, todayString } from '../offers/offer.service';
+import { settleApprovals } from '../offers/offerApproval.service';
+import {
+  ApprovalNeed, OfferFloor, belowOffer, discountRateHash, floorFromResolution, floorFromSnapshot, lineRateHash,
+} from '../offers/offerApproval';
 import { createAuditEntry } from '../../middleware/audit';
 import { emit } from '../../shared/websocket';
 import {
@@ -14,7 +23,7 @@ import { resolveStateCode } from '../../shared/stateMaster';
 import { splitGst } from '../../shared/gstSplit';
 import { normalizeGstUqc } from '../../shared/gstUqc';
 import { createCreditNoteForReturn } from './creditNote.service';
-import { resolveMetalRate, GOLD_BASE_KARAT, SILVER_BASE_KARAT, BENCHMARK_PURITY } from '../../shared/metalRate';
+import { resolveMetalRate, resolveLiveMetalRate, GOLD_BASE_KARAT, SILVER_BASE_KARAT, BENCHMARK_PURITY } from '../../shared/metalRate';
 import { isValidKarat } from '../../shared/karatMaster';
 import { addMetalStock } from '../inventory/inventory.service';
 import { METAL_MOVEMENT, MetalMovementType, consumeVaultMetal, restoreVaultMetal, insertMetalMovement } from '../../shared/metalMovement';
@@ -281,6 +290,9 @@ export async function createInvoice(data: {
   /** Estimates (TagEstimate, status SENT) this invoice bills. Each must be for a tag that is on this invoice; they are
    *  marked INVOICED against it in the same transaction, so an estimate can never be billed twice. */
   estimateIds?: string[];
+  /** Below-offer approvals (DiscountApproval ids) this bill relies on. The server works out what needs approving; these
+   *  are consumed only where their exact figures match, inside this bill's transaction. Extra ids are ignored. */
+  approvalIds?: string[];
   // Optional bill-and-collect-in-one-screen payment, split across any number of modes (e.g. part
   // cash, part UPI) in one screen. Each split is applied via the same applyPayment() the
   // standalone recordPayment endpoint uses — see the note on that function.
@@ -295,7 +307,7 @@ export async function createInvoice(data: {
   await assertBranchAccessible(data.branchId, ctx);
   await assertSalesPeopleInCompany(ctx, [data.salesPersonId, ...data.items.map((i) => i.salesPersonId)]);
 
-  const { currency, tagIds, items, subtotal, discount, otherCharges, taxableAmount, taxAmount, roundOffExact, totalAmount, discountScale } =
+  const { currency, tagIds, items, subtotal, discount, otherCharges, taxableAmount, taxAmount, roundOffExact, totalAmount, discountScale, approvalNeeds } =
     await priceInvoice(data, ctx);
 
   // Estimates being billed: each must exist in this company, still be awaiting billing, and be for a piece
@@ -305,9 +317,10 @@ export async function createInvoice(data: {
     await assertAllOwned('tagEstimate', estimateIds, ctx.companyId, 'Estimate');
     const estimates = await tenantQuery(ctx.companyId, (tx) => tx.tagEstimate.findMany({
       where: { id: { in: estimateIds }, companyId: ctx.companyId },
-      select: { estimateNumber: true, status: true, tagId: true },
+      select: { estimateNumber: true, status: true, tagId: true, createdAt: true },
     }));
     for (const e of estimates) {
+      if (isEstimateExpired(e.createdAt)) throw new AppError(`Estimate ${e.estimateNumber} was made on an earlier day and has expired - make a new estimate at today's rate`, 409);
       if (e.status !== 'SENT') throw new AppError(`Estimate ${e.estimateNumber} is not awaiting billing (${e.status})`, 409);
       if (!tagIds.includes(e.tagId)) throw new AppError(`Estimate ${e.estimateNumber} is for a piece that is not on this invoice`, 400);
     }
@@ -539,6 +552,10 @@ export async function createInvoice(data: {
       ],
     });
 
+    // Offers step 3: anything on this bill priced below an offered rate (or an extra discount on an offer bill) must be
+    // covered by an exact-match manager approval, consumed here so a rollback of the bill releases it.
+    await settleApprovals(tx, ctx, { invoiceId: inv.id, needs: approvalNeeds, approvalIds: data.approvalIds });
+
     // Debit client account for the sale
     await tx.client.update({
       where: { id: data.clientId },
@@ -609,6 +626,9 @@ export async function createInvoice(data: {
 async function priceInvoice(
   data: { invoiceDate: Date; currency?: string; discountAmount?: number; otherCharges?: number; roundOff?: number; items: InvoiceItemInput[] },
   ctx: TenantContext,
+  // amendInvoice only: the stored material breakdown of each existing line (by invoice-item id), so a line that already
+  // carries an offer snapshot keeps it even if that offer has since ended or been switched off.
+  previousBreakdowns?: Map<string, MaterialBreakdown | null>,
 ) {
   // Layer 2: a line's categoryId is a company-owned master id supplied by the client and stored on
   // the InvoiceItem — a Company-B category must 404, never attach to this invoice.
@@ -639,10 +659,14 @@ async function priceInvoice(
           // saleMcRate/saleVaPercent: whatever was actually decided for this piece at tagging time
           // (see JewelryTag's schema comment) — preferred below over a fresh MakingCharge master
           // lookup, so a later master-rate change never silently re-prices an already-tagged piece.
-          select: { id: true, categoryId: true, makeType: true, metalKarat: true, saleMcRate: true, saleVaPercent: true },
+          select: {
+            id: true, tagNumber: true, categoryId: true, makeType: true, metalKarat: true, saleMcRate: true, saleVaPercent: true,
+            // The piece's own material rows + sale rates: what a tagged line with no rates of its own is priced from.
+            materials: { select: { id: true, code: true, materialType: true, weight: true, unit: true, saleRate: true } },
+          },
         }))).map((t) => [t.id, t])
       )
-    : new Map<string, { categoryId: string | null; makeType: string; metalKarat: string | null; saleMcRate: any; saleVaPercent: any }>();
+    : new Map<string, { tagNumber: string; categoryId: string | null; makeType: string; metalKarat: string | null; saleMcRate: any; saleVaPercent: any; materials: any[] }>();
 
   // Per-line GST (B1): each line's HSN determines its own rate. Resolved once, up front, and the
   // rate is copied onto the row (like costPrice on JewelryTag) — a later change to the HSN master
@@ -690,30 +714,102 @@ async function priceInvoice(
     where: { companyId: ctx.companyId, isActive: true },
     orderBy: { effectiveDate: 'desc' },
   }));
-  // Most-specific-match-wins across three independent dimensions: a row only matches when every
-  // field IT has pinned (non-null) agrees with the line — a null field on the row means "any" for
-  // that dimension. Among matches, the row pinning the most dimensions wins (e.g. karat+category
-  // beats category-only), and effectiveDate desc (the query's own order) breaks ties.
-  function findMakingCharge(
-    categoryId: string | null | undefined,
-    karat: string | null | undefined,
-    makeType: string | null | undefined,
-  ) {
-    const eligible = makingChargeRows.filter((m) =>
-      (m.categoryId == null || m.categoryId === categoryId) &&
-      (m.karat == null || m.karat === karat) &&
-      (m.makeType == null || m.makeType === makeType)
-    );
-    if (eligible.length === 0) return undefined;
-    const specificity = (m: typeof eligible[number]) =>
-      (m.categoryId != null ? 1 : 0) + (m.karat != null ? 1 : 0) + (m.makeType != null ? 1 : 0);
-    const bestScore = Math.max(...eligible.map(specificity));
-    return eligible.find((m) => specificity(m) === bestScore);
-  }
+  // Most-specific-match-wins across category + karat + make type (shared/makingChargeLookup.ts).
+  const findMakingCharge = (
+    categoryId: string | null | undefined, karat: string | null | undefined, makeType: string | null | undefined,
+  ) => pickMakingCharge(makingChargeRows, categoryId, karat, makeType);
 
-  const items = data.items.map((line) => {
+  // "Apply offer" on a tagged line (New Sale): the client only asks (materialBreakdown.offerApplied); the SERVER picks the
+  // offer from the invoice date - or keeps the snapshot the line already had when amending - and stamps it on the stored
+  // breakdown. The line's price is still just its breakdown (like any edited material line); this only records which
+  // offer it was and the tagged rates it lowered. Refused (409) if nothing applies, so a bill never claims an offer it
+  // cannot show.
+  // One pricing engine: a tagged line that arrives with NO rates of its own (no breakdown, no goldRate / making / VA /
+  // stones) is priced exactly like the tag, an estimate and F4 - from the piece's stored material rows (weight x rate),
+  // MC x metal weight, and VA as a % of metal value - by building that breakdown here. A line that names its own rates
+  // (an explicit per-gram line, a FIXED price) is the caller's decision and is left alone. (A METAL row with no stored
+  // rate falls back to today's rate for the karat, as F4 does.)
+  // Gold is the one LIVE element of a sale price: the metal rows of an auto-priced tagged line take the invoice date's metal
+  // rate for the piece's karat (resolveLiveMetalRate), never the rate the piece was tagged with. MC, VA and stone rates stay
+  // the tag's own columns. A karat with no rate at all refuses the bill rather than guessing.
+  const autoPriced = (line: InvoiceItemInput) => {
+    const tag = line.tagId ? tagInfoById.get(line.tagId) : undefined;
+    const noRates = line.goldRate == null && line.makingCharge == null && line.wastagePercent == null && line.stoneValue == null;
+    if (!tag || !noRates || line.materialBreakdown != null || line.materialSale || line.rateType === 'FIXED') return undefined;
+    // The line relies on the tag's own rates: a tag missing any is refused (409), never priced at 0 or from a master default.
+    assertTagPriceable({ ...tag, tagNumber: tag.tagNumber });
+    if (tag.materials.length === 0) return undefined; // no material rows (e.g. a bought-in piece): priced per gram on the line's karat
+    return tag;
+  };
+  const liveByKarat = new Map<string, number>();
+  for (const karat of new Set(data.items.map((l) => autoPriced(l)).filter((t) => t && t.materials.some((m: any) => m.materialType === 'METAL')).map((t) => t!.metalKarat))) {
+    if (!karat) throw new AppError('A tagged piece with metal has no karat - set its karat before billing it', 400);
+    const live = await resolveLiveMetalRate(ctx.companyId, karat, data.invoiceDate, currency);
+    if (!live) throw new AppError(`No metal rate found for ${karat} - enter it under Metal Rates first`, 409);
+    liveByKarat.set(karat, live.ratePerGram);
+  }
+  data = {
+    ...data,
+    items: data.items.map((line) => {
+      const tag = autoPriced(line);
+      if (!tag) return line;
+      const rows = tag.materials.map((m: any) => ({
+        code: m.code, materialType: m.materialType, name: m.code, weight: Number(m.weight), unit: m.unit, materialId: m.id,
+        rate: m.materialType === 'METAL' ? liveByKarat.get(tag.metalKarat!) : m.saleRate != null ? Number(m.saleRate) : undefined,
+      }));
+      if (rows.some((r) => r.rate === undefined)) return line; // a stone row with no rate: left to the existing path (and its error)
+      return { ...line, materialBreakdown: { rows, mcRate: Number(tag.saleMcRate), vaPercent: Number(tag.saleVaPercent) } };
+    }),
+  };
+
+  const offerSnapshotByLine = new Map<number, Parameters<typeof attachOfferSnapshot>[1]>();
+  // Step 3: the rates each tagged line's offer gave (its "floor"). Selling a component below it needs a manager's approval,
+  // whether or not the biller pressed "Apply offer" - an offer applies to the piece, and undercutting it is what is gated.
+  const floorByLine = new Map<number, OfferFloor>();
+  await Promise.all(data.items.map(async (line, idx) => {
+    if (line.materialBreakdown == null) return;
+    const applied = (line.materialBreakdown as { offerApplied?: unknown }).offerApplied === true;
+    if (applied && !line.tagId) throw new AppError('An offer can only be applied to a tagged piece', 400);
+    if (!line.tagId) return;
+    const prev = applied && line.id ? previousBreakdowns?.get(line.id) : undefined;
+    if (prev?.offer) {
+      offerSnapshotByLine.set(idx, {
+        offer: prev.offer, baseMcRate: prev.offer.baseMcRate, baseVaPercent: prev.offer.baseVaPercent,
+        baseRateByMaterialId: new Map(prev.rows.filter((r) => r.materialId && r.baseRate !== undefined).map((r) => [r.materialId!, r.baseRate!])),
+        offerMcRate: prev.offer.mcRate, offerVaPercent: prev.offer.vaPercent,
+        offerRateByMaterialId: new Map(prev.rows.filter((r) => r.materialId && r.offerRate !== undefined).map((r) => [r.materialId!, r.offerRate!])),
+      });
+      const stored = floorFromSnapshot(prev);
+      if (stored) { floorByLine.set(idx, stored); return; }
+      // A snapshot taken before offered rates were recorded: fall through to the offer in force today, if it is the same one.
+    }
+    const r = await resolveOfferForTag(ctx, line.tagId, todayString(data.invoiceDate));
+    if (applied && !prev?.offer) {
+      if (!r.resolution.offer) throw new AppError('No offer applies to one of the pieces on this bill - remove "Apply offer" from it', 409);
+      offerSnapshotByLine.set(idx, {
+        offer: r.resolution.offer, baseMcRate: r.base.mcRate, baseVaPercent: r.base.vaPercent,
+        baseRateByMaterialId: new Map(r.base.rows.map((row) => [row.key, row.rate])),
+        offerMcRate: r.resolution.mc?.offerRate, offerVaPercent: r.resolution.va?.offerRate,
+        offerRateByMaterialId: new Map(Object.entries(r.resolution.rows).map(([k, v]) => [k, v.offerRate])),
+      });
+    }
+    const floor = floorFromResolution(r.resolution);
+    if (floor && (!prev?.offer || floor.offerId === prev.offer.id)) floorByLine.set(idx, floor);
+  }));
+  const approvalNeeds: ApprovalNeed[] = [];
+
+  const items = data.items.map((line, lineIdx) => {
     // A line carrying a material breakdown is priced from it, as a flat amount, whatever else the client sent.
     const bd = line.materialBreakdown != null ? priceMaterialBreakdown(line.materialBreakdown) : null;
+    if (bd && offerSnapshotByLine.has(lineIdx)) bd.normalized = attachOfferSnapshot(bd.normalized, offerSnapshotByLine.get(lineIdx)!);
+    const floor = floorByLine.get(lineIdx);
+    const below = bd && floor && line.tagId ? belowOffer(floor, bd.normalized) : null;
+    if (below && floor && line.tagId) {
+      approvalNeeds.push({
+        scope: 'LINE', tagId: line.tagId, offerId: floor.offerId, offerName: floor.offerName,
+        requested: below.requested, offered: below.offered, rateHash: lineRateHash(line.tagId, below.requested),
+      });
+    }
     const i: InvoiceItemInput = bd
       ? { ...line, rateType: 'FIXED', goldRate: bd.total, makingCharge: bd.making, wastagePercent: 0, stoneValue: bd.otherMaterials }
       : line;
@@ -764,10 +860,11 @@ async function priceInvoice(
       ? tagSaleVaPercent
       : masterCharge ? Number(masterCharge.saleWastagePercent) : 0);
 
-    const effectiveMakingCharge = makingCharge * (1 + wastagePercent / 100);
+    // One formula everywhere: VA is a % of the METAL's value (never of the making charge), MC is the making amount itself.
+    const metalValue = i.netGoldWeight * goldRate;
     const unitPrice = i.rateType === 'FIXED'
       ? goldRate
-      : i.netGoldWeight * goldRate + effectiveMakingCharge + (i.stoneValue ?? 0);
+      : metalValue + makingCharge + computeMakingAmount(0, metalValue, 0, wastagePercent) + (i.stoneValue ?? 0);
     const totalPrice = unitPrice * i.quantity;
     const hsn = hsnByCode.get(hsnCode ?? DEFAULT_HSN_CODE)!;
     // G2g-3a: an explicit line uqc is validated (case-insensitive) against the GST UQC catalog and
@@ -797,6 +894,10 @@ async function priceInvoice(
   // otherCharges (shipping/packing/misc — GATI's "Add & Less") is taxable base like the lines
   // themselves, not tied to any one line: Gross (subtotal) + otherCharges - discount = taxable.
   const taxableAmount = subtotal + otherCharges - discount;
+  // Step 3: an extra discount on a bill that carries an applied offer is itself below the offered price.
+  if (discount > 0 && offerSnapshotByLine.size > 0) {
+    approvalNeeds.push({ scope: 'DISCOUNT', amount: Math.round(discount * 100) / 100, rateHash: discountRateHash(discount) });
+  }
   // Each line is taxed at its own HSN rate; a discount is spread proportionally across lines by
   // value (reduces to the old taxableAmount * flatRate exactly when every line shares one rate).
   // otherCharges is taxed separately at the default HSN rate — it isn't tied to any line, so it
@@ -822,7 +923,7 @@ async function priceInvoice(
 
   return {
     currency, tagIds, items, lineIds: data.items.map((i) => i.id), subtotal, discount, otherCharges, taxableAmount, taxAmount,
-    roundOffExact, totalAmount, discountScale,
+    roundOffExact, totalAmount, discountScale, approvalNeeds,
   };
 }
 
@@ -913,6 +1014,8 @@ export async function amendInvoice(invoiceId: string, data: {
   discountAmount?: number; otherCharges?: number; roundOff?: number;
   salesPersonId?: string | null; terms?: string | null; notes?: string | null;
   reason?: string;
+  /** Below-offer approvals this edit relies on (see createInvoice). Rates already approved on this invoice need none. */
+  approvalIds?: string[];
   items: InvoiceItemInput[];
 }, ctx: TenantContext, userId: string) {
   if (!Array.isArray(data.items) || data.items.length === 0) throw new AppError('An invoice needs at least one line', 400);
@@ -936,11 +1039,16 @@ export async function amendInvoice(invoiceId: string, data: {
   if (new Set(lineIdsIn).size !== lineIdsIn.length) throw new AppError('The same invoice line appears twice', 400);
 
   const invoiceDate = data.invoiceDate ?? head.invoiceDate;
+  const storedBreakdowns = lineIdsIn.length
+    ? await tenantQuery(ctx.companyId, (tx) => tx.invoiceItem.findMany({
+        where: { invoiceId, companyId: ctx.companyId, id: { in: lineIdsIn } }, select: { id: true, materialBreakdown: true },
+      }))
+    : [];
   const priced = await priceInvoice({
     invoiceDate, currency: head.currency, discountAmount: data.discountAmount, otherCharges: data.otherCharges,
     roundOff: data.roundOff, items: data.items,
-  }, ctx);
-  const { currency, tagIds: newTagIds, items, lineIds, subtotal, discount, otherCharges, taxableAmount, taxAmount, roundOffExact, discountScale } = priced;
+  }, ctx, new Map(storedBreakdowns.map((r) => [r.id, (r.materialBreakdown as unknown as MaterialBreakdown | null)])));
+  const { currency, tagIds: newTagIds, items, lineIds, subtotal, discount, otherCharges, taxableAmount, taxAmount, roundOffExact, discountScale, approvalNeeds } = priced;
   const newTotal = round2(priced.totalAmount);
 
   const snapshot = (inv: any) => JSON.parse(JSON.stringify({
@@ -1109,6 +1217,9 @@ export async function amendInvoice(invoiceId: string, data: {
       else toCreate.push(itemsWithTax[i]);
     }
     if (toCreate.length > 0) await tx.invoiceItem.createMany({ data: toCreate.map((i) => ({ ...i, invoiceId, companyId: ctx.companyId })) });
+
+    // Offers step 3: same gate as createInvoice - rates this invoice already had approved carry over untouched.
+    await settleApprovals(tx, ctx, { invoiceId, needs: approvalNeeds, approvalIds: data.approvalIds });
 
     // Header. Payments are untouched, so paid / due / status are re-derived from what has actually been received.
     const paid = Number(inv.paidAmount);

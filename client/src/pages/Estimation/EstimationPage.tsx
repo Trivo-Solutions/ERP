@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Box, Card, CardContent, Grid, Typography, Button, Stack, Divider, Table, TableHead,
   TableBody, TableRow, TableCell, CircularProgress, Chip, TextField, InputAdornment, IconButton,
-  Alert, Dialog, DialogTitle, DialogContent, DialogActions,
+  Alert, Dialog, DialogTitle, DialogContent, DialogActions, Switch, FormControlLabel,
 } from '@mui/material';
-import { Edit, Save, Close, QrCodeScanner, Print, Send } from '@mui/icons-material';
+import { Edit, Save, Close, QrCodeScanner, Print, Send, Undo } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost } from '../../api/client';
 import { PageHeader } from '../../components/common/PageHeader';
 import { StatusChip } from '../../components/common/StatusChip';
+import { useAuthStore } from '../../store/auth.store';
 import { NumberField } from '../../components/fields/NumberField';
 import { SelectField } from '../../components/fields/SelectField';
 import { findMakingCharge, computeLineAmount, computeMakingAmount } from '../../utils/estimateCalc';
@@ -54,6 +56,9 @@ interface EditableLine {
   weight: number;
   unit: string;
   saleRate: number;
+  /** The tag's own material row, and its rate before any offer (for Apply offer + the server's snapshot). */
+  materialId?: string;
+  baseRate?: number;
 }
 
 // Estimation shows the material's short code (e.g. "GOLD-22K"), not its full descriptive name —
@@ -72,6 +77,9 @@ export function EstimationPage() {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
   const inputRef = useRef<HTMLInputElement>(null);
+  const navigate = useNavigate();
+  // Entering the daily rate is its own grant; the warning below links to the rates page only for people who hold it.
+  const canUpdateRates = useAuthStore((s) => s.hasPermission('rate:update'));
 
   const [query, setQuery] = useState('');
   const [selectedTagId, setSelectedTagId] = useState('');
@@ -80,6 +88,9 @@ export function EstimationPage() {
   const [saleMcRate, setSaleMcRate] = useState(0);
   const [saleVaPercent, setSaleVaPercent] = useState(0);
   const [notes, setNotes] = useState('');
+  // "Apply offer": the piece's MC/VA as tagged (the offer lowers these), and whether the offer is switched on for this work-up.
+  const [applyOffer, setApplyOffer] = useState(false);
+  const [baseMcVa, setBaseMcVa] = useState({ mc: 0, va: 0 });
 
   // Hand-off to the billing counter. `sendTarget`: an already-saved estimate to send, or 'new' to save the
   // current work-up and send that in one go.
@@ -87,6 +98,11 @@ export function EstimationPage() {
   const [customer, setCustomer] = useState<CustomerForm>(EMPTY_CUSTOMER);
   const setCust = (patch: Partial<CustomerForm>) => setCustomer((c) => ({ ...c, ...patch }));
   const custErrors = validateCustomer(customer);
+  // Priced below the offer -> the hand-off goes to a store manager for approval instead of to billing. `serverAsked`: the
+  // server decided that for an already-saved estimate (we cannot tell from here what it was saved at).
+  const [approvalReason, setApprovalReason] = useState('');
+  const [serverAsked, setServerAsked] = useState(false);
+  useEffect(() => { setApprovalReason(''); setServerAsked(false); }, [sendTarget]);
   const [showCustErrors, setShowCustErrors] = useState(false);
 
   const staffQuery = useQuery({ queryKey: ['estimation-staff'], queryFn: () => apiGet<any[]>('/estimation/staff') });
@@ -122,6 +138,17 @@ export function EstimationPage() {
   });
   const pastEstimates: any[] = estimatesQuery.data ?? [];
 
+  // What the winning offer (if any) does to this piece's sale rates today. The server picks it by date - no stacking,
+  // only ever lowers a rate. It is a read-only preview here; nothing is applied until the user switches it on.
+  const offerQuery = useQuery({
+    queryKey: ['estimation-offer', selectedTagId],
+    queryFn: () => apiGet<any>('/offers/resolve', { tagId: selectedTagId }),
+    enabled: !!selectedTagId,
+    retry: false,
+  });
+  const offerRes = (offerQuery.data as any)?.data ?? offerQuery.data;
+  const offer = offerRes?.resolution?.offer ? offerRes.resolution : null;
+
   const { data: makingChargesData } = useQuery({
     queryKey: ['master-making-charges'],
     queryFn: () => apiGet<any>('/masters/making-charges'),
@@ -145,7 +172,9 @@ export function EstimationPage() {
     if (!tag) return;
     setEditing(false);
     setNotes('');
+    setApplyOffer(false);
     setLines((tag.materials ?? []).map((m: any) => ({
+      materialId: m.id, baseRate: Number(m.saleRate ?? 0),
       code: m.code, materialType: m.materialType, name: materialLabel(m),
       weight: Number(m.weight), unit: m.unit, saleRate: Number(m.saleRate ?? 0),
     })));
@@ -156,10 +185,12 @@ export function EstimationPage() {
     if (tag.saleMcRate != null && tag.saleVaPercent != null) {
       setSaleMcRate(Number(tag.saleMcRate));
       setSaleVaPercent(Number(tag.saleVaPercent));
+      setBaseMcVa({ mc: Number(tag.saleMcRate), va: Number(tag.saleVaPercent) });
     } else {
       const charge = findMakingCharge(makingCharges, tag.metalKarat, tag.categoryId, tag.makeType);
       setSaleMcRate(charge ? Number(charge.makingCharge) : 0);
       setSaleVaPercent(charge ? Number(charge.saleWastagePercent) : 0);
+      setBaseMcVa({ mc: charge ? Number(charge.makingCharge) : 0, va: charge ? Number(charge.saleWastagePercent) : 0 });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tag, makingCharges.length]);
@@ -170,11 +201,37 @@ export function EstimationPage() {
   const materialsSaleAmt = items.reduce((s, i) => s + i.saleAmount, 0);
   const makingSaleAmount = computeMakingAmount(metalWeight, metalSaleAmt, saleMcRate, saleVaPercent);
   const totalSaleAmount = materialsSaleAmt + makingSaleAmount;
-  // Indicative GST only — same flat 3% (INR) convention as NewSalePage.tsx / the server default;
+  // Indicative GST only — at the default HSN's rate from the HSN master (sent with the tag);
   // the saved TagEstimate snapshots its own taxRate/gstAmount at save time (see estimation.service.ts),
   // this is just the live preview shown before that save happens.
-  const gstAmount = Math.round(totalSaleAmount * 0.03 * 100) / 100;
+  const gstAmount = Math.round(totalSaleAmount * Number(tag?.defaultGstRate ?? 0) * 100) / 100;
   const netPayableAmount = totalSaleAmount + gstAmount;
+
+  // Switching the offer on/off resets the rates to the offered / tagged ones (any hand edit made before is replaced).
+  const toggleOffer = (on: boolean) => {
+    if (on && !offer) return;
+    setApplyOffer(on);
+    setLines((ls) => ls.map((l) => {
+      const base = l.baseRate ?? l.saleRate;
+      const adj = on && l.materialId ? offer?.rows?.[l.materialId] : undefined;
+      return { ...l, saleRate: adj ? Number(adj.offerRate) : base };
+    }));
+    setSaleMcRate(on && offer?.mc ? Number(offer.mc.offerRate) : baseMcVa.mc);
+    setSaleVaPercent(on && offer?.va ? Number(offer.va.offerRate) : baseMcVa.va);
+  };
+  // What the same piece would cost at the tagged rates, to show the customer's saving (before GST).
+  const baseMetalAmt = lines.filter((l) => l.materialType === 'METAL').reduce((s, l) => s + computeLineAmount(l.weight, l.baseRate ?? l.saleRate), 0);
+  const baseTotal = lines.reduce((s, l) => s + computeLineAmount(l.weight, l.baseRate ?? l.saleRate), 0)
+    + computeMakingAmount(metalWeight, baseMetalAmt, baseMcVa.mc, baseMcVa.va);
+  const offerSaving = applyOffer ? Math.max(0, baseTotal - totalSaleAmount) : 0;
+
+  // Is the work-up on screen priced below the offered rates (zero tolerance)? Mirrors the server's own check, which decides.
+  const belowOfferNow = !!offer && (
+    (!!offer.mc && saleMcRate < Number(offer.mc.offerRate))
+    || (!!offer.va && saleVaPercent < Number(offer.va.offerRate))
+    || lines.some((l) => !!l.materialId && !!offer.rows?.[l.materialId] && Number(l.saleRate) < Number(offer.rows[l.materialId].offerRate))
+  );
+  const approvalMode = (sendTarget === 'new' && belowOfferNow) || serverAsked;
 
   const updateLine = (idx: number, patch: Partial<EditableLine>) => {
     setLines((ls) => ls.map((l, i) => (i === idx ? { ...l, ...patch } : l)));
@@ -184,8 +241,9 @@ export function EstimationPage() {
   // price (auto-filled from the tag + MakingCharge master on load) is a perfectly valid estimate
   // to save or print as-is; "Edit" is only for when the customer needs a different number.
   const buildEstimatePayload = () => ({
-    items: lines.map((l) => ({ code: l.code, materialType: l.materialType, name: l.name, weight: l.weight, unit: l.unit, saleRate: l.saleRate })),
+    items: lines.map((l) => ({ materialId: l.materialId, code: l.code, materialType: l.materialType, name: l.name, weight: l.weight, unit: l.unit, saleRate: l.saleRate })),
     saleMcRate, saleVaPercent,
+    applyOffer: applyOffer || undefined,
     notes: notes.trim() || undefined,
   });
 
@@ -219,17 +277,33 @@ export function EstimationPage() {
         customerName: customer.name.trim(), customerPhone: customer.phone.trim(), customerDob: customer.dob || undefined,
         customerAddress: customer.address.trim() || undefined, customerPan: customer.pan.trim().toUpperCase() || undefined,
         salesPersonId: customer.salesPersonId,
+        ...(approvalMode && { approvalReason: approvalReason.trim() }),
       };
       return sendTarget === 'new'
         ? apiPost<any>(`/estimation/tags/${selectedTagId}/estimates`, { ...buildEstimatePayload(), sendToBilling: true, ...details })
         : apiPost<any>(`/estimation/estimates/${(sendTarget as { id: string }).id}/send-to-billing`, details);
     },
     onSuccess: (saved) => {
-      enqueueSnackbar(`Estimate ${saved.estimateNumber} sent to billing`, { variant: 'success' });
+      enqueueSnackbar(saved.status === 'AWAITING_APPROVAL'
+        ? `Estimate ${saved.estimateNumber} sent to a store manager for approval - it goes to billing once approved`
+        : `Estimate ${saved.estimateNumber} sent to billing`, { variant: 'success' });
       qc.invalidateQueries({ queryKey: ['estimation-past', selectedTagId] });
       setSendTarget(null); setCustomer(EMPTY_CUSTOMER); setShowCustErrors(false); setEditing(false);
     },
-    onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed to send to billing', { variant: 'error' }),
+    onError: (e: any) => {
+      if (e.response?.data?.code === 'APPROVAL_REASON_REQUIRED') { setServerAsked(true); setShowCustErrors(true); }
+      enqueueSnackbar(e.response?.data?.error ?? 'Failed to send to billing', { variant: e.response?.data?.code === 'APPROVAL_REASON_REQUIRED' ? 'warning' : 'error' });
+    },
+  });
+
+  // Pull a sent estimate back to OPEN before it is billed (the biller can do the same from the billing screen).
+  const recallMutation = useMutation({
+    mutationFn: (id: string) => apiPost<any>(`/estimation/estimates/${id}/recall`, {}),
+    onSuccess: (saved) => {
+      enqueueSnackbar(`Estimate ${saved.estimateNumber} recalled from billing`, { variant: 'success' });
+      qc.invalidateQueries({ queryKey: ['estimation-past', selectedTagId] });
+    },
+    onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Could not recall the estimate', { variant: 'error' }),
   });
 
   const printSavedEstimate = (estimate: any) => {
@@ -295,18 +369,49 @@ export function EstimationPage() {
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 6 }}><CircularProgress /></Box>
       )}
 
+      {/* The piece cannot be priced (a rate is missing on the tag, or no metal rate exists): say exactly why. */}
+      {tagQuery.isError && (
+        <Alert severity="error" sx={{ mb: 2 }}>{(tagQuery.error as any)?.response?.data?.error ?? 'This piece could not be loaded for estimation.'}</Alert>
+      )}
+
       {tag && !tagQuery.isLoading && (
         <Grid container spacing={2}>
           <Grid item xs={12} md={8}>
+            {tag.goldRate && !tag.goldRate.isToday && (
+              <Alert severity="warning" sx={{ mb: 2, alignItems: 'center' }}
+                action={canUpdateRates ? <Button color="inherit" size="small" onClick={() => navigate('/designs/rates')}>Update rate</Button> : undefined}>
+                Today's {tag.goldRate.karat} rate has not been entered yet - this estimate uses the {new Date(`${tag.goldRate.rateDate}T00:00:00`).toLocaleDateString('en-IN')} rate
+                (₹{Number(tag.goldRate.ratePerGram).toLocaleString('en-IN')}/g).
+              </Alert>
+            )}
+            {offer && (
+              <Alert severity={applyOffer ? 'success' : 'info'} sx={{ mb: 2, alignItems: 'center' }}
+                action={
+                  <FormControlLabel sx={{ mr: 1 }} label="Apply offer"
+                    control={<Switch checked={applyOffer} onChange={(e) => toggleOffer(e.target.checked)} inputProps={{ 'aria-label': 'Apply offer' }} />} />
+                }>
+                <Typography fontWeight={700}>Offer available: {offer.offer.name}</Typography>
+                <Typography variant="body2">
+                  {[
+                    offer.mc && `Making charge ${fmt(Number(offer.mc.baseRate))} \u2192 ${fmt(Number(offer.mc.offerRate))}/g`,
+                    offer.va && `VA ${Number(offer.va.baseRate)}% \u2192 ${Number(offer.va.offerRate)}%`,
+                    ...lines.filter((l) => l.materialId && offer.rows?.[l.materialId]).map((l) => `${l.name} ${fmt(Number(offer.rows[l.materialId!].baseRate))} \u2192 ${fmt(Number(offer.rows[l.materialId!].offerRate))}`),
+                  ].filter(Boolean).join('  \u00b7  ')}
+                </Typography>
+              </Alert>
+            )}
+            {!offer && offerRes && (
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>No offer applies to this piece today.</Typography>
+            )}
             <Card sx={{ p: 2, mb: 2 }}>
-              <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
-                <Box>
+              <Stack direction="row" justifyContent="space-between" alignItems="center" useFlexGap sx={{ mb: 1, flexWrap: 'wrap', gap: 1 }}>
+                <Box sx={{ minWidth: 0 }}>
                   <Typography variant="h6" fontWeight={900} sx={{ fontFamily: 'monospace', color: '#44C47A' }}>
                     {tag.tagNumber}
                   </Typography>
                   <Typography variant="body2" color="text.secondary">{tag.name} — {tag.branch?.name}</Typography>
                 </Box>
-                <Stack direction="row" spacing={1} alignItems="center">
+                <Stack direction="row" useFlexGap sx={{ flexWrap: 'wrap', gap: 1 }} alignItems="center">
                   <StatusChip status={tag.status} />
                   <Chip label={editing ? 'Editing' : 'Read-only'} color={editing ? 'warning' : 'default'} size="small" />
                   {editing ? (
@@ -319,7 +424,8 @@ export function EstimationPage() {
 
               <Divider sx={{ my: 1.5 }} />
               <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1 }}>Materials</Typography>
-              <Table size="small">
+              <Box sx={{ overflowX: 'auto' }}>
+              <Table size="small" sx={{ '& .MuiTableCell-root': { px: { xs: 0.5, sm: 2 }, fontSize: { xs: 11.5, sm: 'inherit' } }, '& .MuiTableCell-head': { fontSize: { xs: 10, sm: '0.75rem' }, letterSpacing: { xs: 0, sm: '0.05em' } } }}>
                 <TableHead>
                   <TableRow>
                     <TableCell>Material</TableCell>
@@ -333,12 +439,17 @@ export function EstimationPage() {
                   {items.map((l, idx) => (
                     <TableRow key={`${l.code}-${idx}`}>
                       <TableCell>{l.name}</TableCell>
-                      <TableCell align="right">{l.weight.toFixed(4)}</TableCell>
+                      <TableCell align="right">{l.weight.toFixed(3)}</TableCell>
                       <TableCell>{l.unit}</TableCell>
                       <TableCell align="right">
                         {editing ? (
                           <NumberField size="small" value={l.saleRate}
                             onChange={(e) => updateLine(idx, { saleRate: Number(e.target.value) })} />
+                        ) : applyOffer && l.baseRate != null && l.baseRate !== l.saleRate ? (
+                          <>
+                            <Typography component="span" variant="caption" color="text.secondary" sx={{ textDecoration: 'line-through', mr: 0.75 }}>{fmt(l.baseRate)}</Typography>
+                            <Typography component="span" fontWeight={700} color="success.main">{fmt(l.saleRate)}</Typography>
+                          </>
                         ) : fmt(l.saleRate)}
                       </TableCell>
                       <TableCell align="right">{fmt(l.saleAmount)}</TableCell>
@@ -349,6 +460,7 @@ export function EstimationPage() {
                   )}
                 </TableBody>
               </Table>
+              </Box>
             </Card>
 
             <Card sx={{ p: 2 }}>
@@ -356,11 +468,13 @@ export function EstimationPage() {
               <Grid container spacing={2}>
                 <Grid item xs={6} sm={4}>
                   <NumberField label="MC Rate (₹/g)" size="small" disabled={!editing} value={saleMcRate}
-                    onChange={(e) => setSaleMcRate(Number(e.target.value))} />
+                    onChange={(e) => setSaleMcRate(Number(e.target.value))}
+                    helperText={applyOffer && saleMcRate !== baseMcVa.mc ? `Offer - tagged ${fmt(baseMcVa.mc)}/g` : undefined} />
                 </Grid>
                 <Grid item xs={6} sm={4}>
                   <NumberField label="VA %" size="small" disabled={!editing} value={saleVaPercent}
-                    onChange={(e) => setSaleVaPercent(Number(e.target.value))} />
+                    onChange={(e) => setSaleVaPercent(Number(e.target.value))}
+                    helperText={applyOffer && saleVaPercent !== baseMcVa.va ? `Offer - tagged ${baseMcVa.va}%` : undefined} />
                 </Grid>
               </Grid>
             </Card>
@@ -374,7 +488,7 @@ export function EstimationPage() {
           </Grid>
 
           <Grid item xs={12} md={4}>
-            <Card sx={{ p: 2, mb: 2, position: 'sticky', top: 16 }}>
+            <Card sx={{ p: 2, mb: 2, position: { md: 'sticky' }, top: 16 }}>
               <Typography variant="h6" fontWeight={700} sx={{ mb: 2 }}>Totals</Typography>
               <Stack spacing={1}>
                 <Stack direction="row" justifyContent="space-between">
@@ -385,6 +499,12 @@ export function EstimationPage() {
                   <Typography color="text.secondary">Making Charge</Typography>
                   <Typography fontFamily="monospace">{fmt(makingSaleAmount)}</Typography>
                 </Stack>
+                {applyOffer && offerSaving > 0 && (
+                  <Stack direction="row" justifyContent="space-between">
+                    <Typography color="success.main">Offer saving ({offer?.offer?.name})</Typography>
+                    <Typography fontFamily="monospace" color="success.main">-{fmt(offerSaving)}</Typography>
+                  </Stack>
+                )}
                 <Divider />
                 <Stack direction="row" justifyContent="space-between">
                   <Typography fontWeight={700}>Total Estimate</Typography>
@@ -415,9 +535,9 @@ export function EstimationPage() {
               )}
               <Button fullWidth variant="contained" color="secondary" startIcon={<Send />} sx={{ mt: 2 }}
                 disabled={items.length === 0 || tag.status !== 'IN_STOCK'}
-                title={tag.status !== 'IN_STOCK' ? 'Only a piece that is in stock can be sent to billing' : 'Save this estimate and send it to the billing counter'}
+                title={tag.status !== 'IN_STOCK' ? 'Only a piece that is in stock can be sent to billing' : belowOfferNow ? 'Priced below the offer - a store manager has to approve it before it goes to billing' : 'Save this estimate and send it to the billing counter'}
                 onClick={() => { setCustomer(EMPTY_CUSTOMER); setShowCustErrors(false); setSendTarget('new'); }}>
-                Send to Billing
+                {belowOfferNow ? 'Send for Approval' : 'Send to Billing'}
               </Button>
               <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
                 <Button fullWidth variant="outlined" startIcon={<Save />}
@@ -441,17 +561,31 @@ export function EstimationPage() {
               <Stack spacing={1}>
                 {pastEstimates.map((e) => (
                   <Box key={e.id} sx={{ p: 1.5, bgcolor: 'action.hover', borderRadius: 1 }}>
-                    <Stack direction="row" justifyContent="space-between" alignItems="center">
-                      <Stack direction="row" spacing={0.75} alignItems="center">
+                    <Stack direction="row" justifyContent="space-between" alignItems="center" useFlexGap sx={{ flexWrap: 'wrap', gap: 0.5 }}>
+                      <Stack direction="row" useFlexGap alignItems="center" sx={{ flexWrap: 'wrap', gap: 0.75 }}>
                         <Typography variant="body2" fontWeight={700} fontFamily="monospace">{e.estimateNumber}</Typography>
+                        {e.offerName && <Chip size="small" label={`Offer: ${e.offerName}`} color="success" variant="outlined" sx={{ height: 18, fontSize: 10 }} />}
+                        {e.expired && e.status !== 'INVOICED' && (
+                          <Chip size="small" label="Expired - make a new estimate" color="default" variant="outlined" sx={{ height: 18, fontSize: 10 }} />
+                        )}
+                        {e.goldRateChanged && e.status !== 'INVOICED' && !e.expired && (
+                          <Chip size="small" color="warning" variant="outlined" sx={{ height: 18, fontSize: 10 }}
+                            label={`Gold rate updated: ₹${Number(e.goldRateAtEstimate).toLocaleString('en-IN')} -> ₹${Number(e.goldRateNow).toLocaleString('en-IN')}/g`} />
+                        )}
                         {e.status && e.status !== 'OPEN' && (
-                          <Chip size="small" label={e.status === 'SENT' ? 'At billing' : e.status === 'INVOICED' ? 'Billed' : e.status}
-                            color={e.status === 'INVOICED' ? 'success' : 'info'} variant="outlined" sx={{ height: 18, fontSize: 10 }} />
+                          <Chip size="small" label={e.status === 'SENT' ? 'At billing' : e.status === 'INVOICED' ? 'Billed' : e.status === 'AWAITING_APPROVAL' ? 'Awaiting approval' : e.status}
+                            color={e.status === 'INVOICED' ? 'success' : e.status === 'AWAITING_APPROVAL' ? 'warning' : 'info'} variant="outlined" sx={{ height: 18, fontSize: 10 }} />
                         )}
                       </Stack>
                       <Stack direction="row" spacing={0.5} alignItems="center">
                         <Typography variant="body2" fontWeight={700}>{fmt(Number(e.netPayableAmount))}</Typography>
-                        {e.status === 'OPEN' && (
+                        {(e.status === 'SENT' || e.status === 'AWAITING_APPROVAL') && (
+                          <IconButton size="small" title="Recall from billing" disabled={recallMutation.isPending}
+                            onClick={() => recallMutation.mutate(e.id)}>
+                            <Undo fontSize="small" />
+                          </IconButton>
+                        )}
+                        {e.status === 'OPEN' && !e.expired && (
                           <IconButton size="small" title="Send to billing" disabled={tag.status !== 'IN_STOCK'}
                             onClick={() => { setCustomer(customerFromEstimate(e)); setShowCustErrors(false); setSendTarget({ id: e.id, number: e.estimateNumber }); }}>
                             <Send fontSize="small" />
@@ -480,7 +614,7 @@ export function EstimationPage() {
           sendMutation.mutate();
         }}>
           <DialogTitle fontWeight={700}>
-            Send to billing
+            {approvalMode ? 'Send for approval' : 'Send to billing'}
             <Typography variant="caption" display="block" color="text.secondary">
               {sendTarget === 'new' ? 'Saves this estimate and hands it to the billing counter' : `Hands ${(sendTarget as any)?.number ?? 'this estimate'} to the billing counter`}
               {' '}with the customer's details, so billing does not ask again.
@@ -523,12 +657,22 @@ export function EstimationPage() {
                   onChange={(e) => setCust({ salesPersonId: e.target.value })}
                   options={staffList.map((s) => ({ value: s.id, label: `${s.name}${s.employeeId ? ` (${s.employeeId})` : ''}` }))} />
               </Grid>
+              {approvalMode && (
+                <Grid item xs={12}>
+                  <Alert severity="warning" sx={{ mb: 1 }}>
+                    This estimate is priced below the offered rate, so it goes to a store manager first. Once approved it appears at the billing counter.
+                  </Alert>
+                  <TextField fullWidth size="small" required label="Why is the price lower? (the manager sees this)" value={approvalReason}
+                    inputProps={{ maxLength: 500 }} error={showCustErrors && !approvalReason.trim()}
+                    onChange={(e) => setApprovalReason(e.target.value)} />
+                </Grid>
+              )}
             </Grid>
           </DialogContent>
           <DialogActions sx={{ p: 2 }}>
             <Button onClick={() => setSendTarget(null)}>Cancel</Button>
-            <Button type="submit" variant="contained" startIcon={<Send />} disabled={sendMutation.isPending}>
-              {sendMutation.isPending ? 'Sending…' : 'Send'}
+            <Button type="submit" variant="contained" startIcon={<Send />} disabled={sendMutation.isPending || (approvalMode && !approvalReason.trim())}>
+              {sendMutation.isPending ? 'Sending…' : approvalMode ? 'Send for approval' : 'Send'}
             </Button>
           </DialogActions>
         </form>

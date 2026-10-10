@@ -26,7 +26,7 @@ describe('estimate -> invoice hand-off', () => {
       data: {
         tagNumber: `EST-TAG-${suffix}-${tagIds.length}`, companyId: tenant.company.id, branchId, name,
         metalType: 'GOLD', metalKarat: '22K', grossWeight: 10, netWeight: 10, huid: `HUID${suffix}${tagIds.length}`.toUpperCase().slice(0, 12),
-        costPrice: 40000, sellingPrice: 70000, status, createdById: userId,
+        costPrice: 40000, sellingPrice: 70000, status, createdById: userId, saleMcRate: 0, saleVaPercent: 0,
       },
     });
     tagIds.push(tag.id);

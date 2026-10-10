@@ -17,6 +17,17 @@ export function requirePermission(...permissions: string[]) {
   };
 }
 
+/** Passes when the caller holds AT LEAST ONE of `permissions` (used when a route gained a more specific permission but must keep honouring the older one). */
+export function requireAnyPermission(...permissions: string[]) {
+  return (req: Request, _res: Response, next: NextFunction) => {
+    if (!req.user) throw new AppError('Authentication required', 401);
+    if (!permissions.some((p) => hasPermission(req.user!.permissions, p))) {
+      throw new AppError(`Access denied. Required one of: ${permissions.join(', ')}`, 403);
+    }
+    next();
+  };
+}
+
 export function requireRole(...roles: string[]) {
   return (req: Request, _res: Response, next: NextFunction) => {
     if (!req.user) throw new AppError('Authentication required', 401);

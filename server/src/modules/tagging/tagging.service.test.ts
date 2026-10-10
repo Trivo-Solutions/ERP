@@ -10,7 +10,7 @@ import {
 } from './tagging.service';
 import { LEDGER_ACCOUNT } from '../../shared/ledgerAccounts';
 import { cleanupJournalEntries, getJournalEntry, lineAmount } from '../../test/ledger';
-import { createTestTenant, cleanupTestTenant, TestTenant } from '../../test/fixtures';
+import { seedMetalRate, createTestTenant, cleanupTestTenant, TestTenant } from '../../test/fixtures';
 
 describe('createTagFromGrnItem (finished-goods intake)', () => {
   const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -172,6 +172,9 @@ describe('createTagFromGrnItem (finished-goods intake)', () => {
     expect(Number(tag.stoneWeight)).toBeCloseTo(0.4);
     expect(Number(tag.netWeight)).toBeCloseTo(8.0);      // gross - stone, never gross === net here
     expect(tag.metalKarat).toBe('22K');                  // falls back to PoItem.karat
+    // No MakingCharge master row matches: the SALE making charge / VA stay unset (never the PO's cost figures, never 0).
+    expect(tag.saleMcRate).toBeNull();
+    expect(tag.saleVaPercent).toBeNull();
 
     const auditEntry = await prisma.auditLog.findFirst({
       where: { tableName: 'jewelry_tags', recordId: tag.id, action: 'CREATE' },
@@ -185,6 +188,25 @@ describe('createTagFromGrnItem (finished-goods intake)', () => {
     expect(entry!.referenceType).toBe('JewelryTag');
     expect(lineAmount(entry!, LEDGER_ACCOUNT.INVENTORY).debit).toBeCloseTo(45000);
     expect(lineAmount(entry!, LEDGER_ACCOUNT.ACCOUNTS_PAYABLE).credit).toBeCloseTo(45000);
+  });
+
+  it('fills the SALE making charge + VA from the MakingCharge master (most specific row), never from the PO cost side', async () => {
+    const first = await prisma.grnItem.findUniqueOrThrow({ where: { id: finishedGrnItemId } });
+    const item2 = await prisma.grnItem.create({
+      data: { companyId: tenant.company.id, grnId, poItemId: first.poItemId, invoiceQty: 1, invoiceWeight: 8.5, scaleWeight: 8.4, acceptedWeight: 8.4, variance: -0.1, variancePercent: -1.18, isVerified: true },
+    });
+    const master = await prisma.makingCharge.create({
+      data: { companyId: tenant.company.id, karat: '22K', categoryId, saleWastagePercent: 7, makingCharge: 350, makingChargeType: 'PER_GRAM' },
+    });
+    try {
+      const tag = await createTagFromGrnItem({ grnItemId: item2.id, branchId, stockTypeId, categoryId, name: 'Gold Ring 22K', metalType: 'GOLD', stoneWeight: 0.4 }, userId);
+      createdTagIds.push(tag.id);
+      expect(Number(tag.saleMcRate)).toBe(350);
+      expect(Number(tag.saleVaPercent)).toBe(7);
+      expect(Number(tag.costPrice)).toBe(45000); // cost untouched
+    } finally {
+      await prisma.makingCharge.delete({ where: { id: master.id } });
+    }
   });
 
   it('rejects a second tag for the same GRN item (no double-tagging)', async () => {
@@ -579,9 +601,13 @@ describe('createTagFromGrnItem (finished-goods intake)', () => {
       const branchB = await prisma.branch.create({ data: { companyId: tenant.company.id, branchCode: `TSTBR-E2B-${suffix}`, name: 'Test Branch E2-B' } });
       branchBId = branchB.id;
 
+      // Sale value in the reports is LIVE (gold at today's rate on the piece's own rates), not the stored sellingPrice: a bought-in
+      // piece (no material rows, MC 0 / VA 0) is worth net weight x the day's 22K rate - 5000 here, so 10 g = 50000 and 6 g = 30000.
+      await seedMetalRate(tenant.company.id, '22K', 5000);
       async function makeSummaryTag(branchId: string, status: string, sellingPrice: number, costPrice: number, grossWeight: number) {
         const tag = await prisma.jewelryTag.create({
           data: {
+            metalKarat: '22K', saleMcRate: 0, saleVaPercent: 0,
             tagNumber: `TSTTAG-E2-${suffix}-${summaryTagIds.length}`,
             companyId: tenant.company.id,
             branchId, name: 'Summary Test Tag', metalType: 'GOLD',

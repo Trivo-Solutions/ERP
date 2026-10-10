@@ -91,7 +91,7 @@ export function StockLookupPage() {
                     <Typography variant="body2">{m.name}</Typography>
                   </Stack>
                   <Stack direction="row" spacing={1.5} alignItems="center">
-                    <Typography sx={{ fontFamily: 'monospace', fontWeight: 700 }}>{fmt(m.sellingPrice)}</Typography>
+                    <Typography sx={{ fontFamily: 'monospace', fontWeight: 700 }}>{(m.liveSellingPrice != null ? fmt(m.liveSellingPrice) : 'Rates missing')}</Typography>
                     <StatusChip status={m.status} />
                   </Stack>
                 </Stack>
@@ -124,7 +124,7 @@ export function StockLookupPage() {
 
               <Grid item xs={6} sm={4}>
                 <Typography variant="caption" color="text.secondary">Selling Price</Typography>
-                <Typography variant="h5" fontWeight={900} color="primary.main">{fmt(tag.sellingPrice)}</Typography>
+                <Typography variant="h5" fontWeight={900} color="primary.main">{(tag.liveSellingPrice != null ? fmt(tag.liveSellingPrice) : 'Rates missing')}</Typography>
               </Grid>
               <Grid item xs={6} sm={4}>
                 <Typography variant="caption" color="text.secondary">Branch</Typography>

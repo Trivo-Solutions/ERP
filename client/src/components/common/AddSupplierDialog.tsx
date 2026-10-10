@@ -2,7 +2,7 @@ import { Button, Dialog, DialogActions, DialogContent, DialogTitle, Grid, TextFi
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm, Controller } from 'react-hook-form';
 import { useSnackbar } from 'notistack';
-import { apiPost } from '../../api/client';
+import { apiPost, apiPatch } from '../../api/client';
 import { SelectField } from '../fields/SelectField';
 
 export const SUPPLIER_TYPES = ['METAL_REFINER', 'STONE_DEALER', 'FINDINGS_VENDOR', 'KARIGAR', 'OTHER'];
@@ -14,12 +14,32 @@ const BLANK = {
 
 // The one Add Supplier form — used by the Suppliers page and by the PO screen's "+" beside the Supplier field.
 // `onCreated` gets the saved supplier so a caller (the PO form) can select it straight away.
-export function AddSupplierDialog({ open, onClose, onCreated }: {
+export function AddSupplierDialog({ open, onClose, onCreated, supplier }: {
   open: boolean; onClose: () => void; onCreated?: (supplier: any) => void;
+  /** When given, the dialog edits this supplier (PATCH) instead of creating one. */
+  supplier?: any;
 }) {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
-  const { control, handleSubmit, reset } = useForm({ defaultValues: BLANK });
+  const isEdit = !!supplier;
+  const { control, handleSubmit, reset } = useForm({
+    defaultValues: BLANK,
+    values: supplier ? Object.fromEntries(Object.keys(BLANK).map((k) => [k, supplier[k] ?? ''])) as typeof BLANK : undefined,
+  });
+
+  const editMutation = useMutation({
+    // On edit a cleared field is sent as null so it can actually be blanked.
+    mutationFn: (data: typeof BLANK) => apiPatch<any>(
+      `/procurement/suppliers/${supplier.id}`,
+      Object.fromEntries(Object.entries(data).map(([k, v]) => [k, v.trim() === '' && k !== 'name' && k !== 'type' ? null : v.trim()])),
+    ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['suppliers'] });
+      onClose();
+      enqueueSnackbar('Supplier updated', { variant: 'success' });
+    },
+    onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' }),
+  });
 
   const mutation = useMutation({
     // Blank optional fields are left out rather than saved as empty strings.
@@ -40,14 +60,14 @@ export function AddSupplierDialog({ open, onClose, onCreated }: {
     onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' }),
   });
 
-  const handleClose = () => { reset(); onClose(); };
+  const handleClose = () => { if (!isEdit) reset(); onClose(); };
 
   return (
     <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
       {/* stopPropagation: React bubbles a portal's events to its React parent, so without it Save here would also
           submit a PO form this dialog is opened from. */}
-      <form onSubmit={(e) => { e.stopPropagation(); handleSubmit((d) => mutation.mutate(d))(e); }}>
-        <DialogTitle fontWeight={700}>Add Supplier</DialogTitle>
+      <form onSubmit={(e) => { e.stopPropagation(); handleSubmit((d) => (isEdit ? editMutation : mutation).mutate(d))(e); }}>
+        <DialogTitle fontWeight={700}>{isEdit ? 'Edit Supplier' : 'Add Supplier'}</DialogTitle>
         <DialogContent sx={{ pt: 2 }}>
           <Grid container spacing={2} sx={{ pt: 1 }}>
             <Grid item xs={8}>
@@ -102,7 +122,7 @@ export function AddSupplierDialog({ open, onClose, onCreated }: {
         </DialogContent>
         <DialogActions sx={{ p: 2.5 }}>
           <Button onClick={handleClose}>Cancel</Button>
-          <Button type="submit" variant="contained" disabled={mutation.isPending}>Save</Button>
+          <Button type="submit" variant="contained" disabled={mutation.isPending || editMutation.isPending}>Save</Button>
         </DialogActions>
       </form>
     </Dialog>

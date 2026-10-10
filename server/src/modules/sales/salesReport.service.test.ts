@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { platformPrisma as prisma } from '../../config/database';
 import { createInvoice, amendInvoice, createSalesReturn } from './sales.service';
 import { getSalesSummary, getSalesDetailed } from './salesReport.service';
-import { createTestTenant, cleanupTestTenant, createMember, addBranch, TestTenant } from '../../test/fixtures';
+import { seedMetalRate, createTestTenant, cleanupTestTenant, createMember, addBranch, TestTenant } from '../../test/fixtures';
 
 // Sales Report: Summary = one row per invoice; Detailed = one row per line, credited to the employee who made that sale.
 describe('Sales Report (summary + detailed, per-line salesperson attribution)', () => {
@@ -22,6 +22,7 @@ describe('Sales Report (summary + detailed, per-line salesperson attribution)', 
 
   beforeAll(async () => {
     A = await createTestTenant(`SRA${suffix}`, ['invoice:create']);
+    await seedMetalRate(A.company.id, '22K', 6000);
     B = await createTestTenant(`SRB${suffix}`, ['invoice:create']);
     const mk = async (t: TestTenant, name: string) => {
       const m = await createMember({ companyId: t.company.id, roleId: t.role.id, email: `${name}-${suffix}@example.com`, name });
@@ -218,10 +219,10 @@ describe('Sales Report (summary + detailed, per-line salesperson attribution)', 
       expect(row.metalValue).toBe(60000);
       expect(row.mcAmount).toBe(1000);
       expect(row.vaPercent).toBe(10);
-      expect(row.vaAmount).toBe(100);
+      expect(row.vaAmount).toBe(6000); // 10% of the 60000 metal value
       expect(row.stoneValue).toBe(500);
-      expect(row.grossAmount).toBe(61600); // 60000 + 1000 + 10% VA on MC + 500 stone
-      expect(row.taxableAmount).toBe(61600);
+      expect(row.grossAmount).toBe(67500); // 60000 metal + 1000 MC + 6000 VA (10% of metal) + 500 stone
+      expect(row.taxableAmount).toBe(67500);
       expect(row.taxRate).toBe(3);
       expect(row.cgst + row.sgst + row.igst).toBeCloseTo(row.gst, 2);
       expect(row.karat).toBe('22K');

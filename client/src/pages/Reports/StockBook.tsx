@@ -86,7 +86,7 @@ const MEASURES: Measure[] = [
   { key: 'csWt', label: 'CS Wt', fmt: blankIfZero(wt) },
   { key: 'stonePieces', label: 'Stone Pcs', fmt: blankIfZero(String), hidden: true },
   { key: 'costPrice', label: 'Cost Price', fmt: money },
-  { key: 'sellingPrice', label: 'Selling Price', fmt: money },
+  { key: 'sellingPrice', label: 'Selling Price (today)', fmt: money },
 ];
 
 const dimColumn = (d: Dimension, hidden: boolean): DataTableColumn => ({

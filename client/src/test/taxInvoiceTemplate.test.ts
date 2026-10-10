@@ -162,8 +162,26 @@ describe('jewellery detail columns', () => {
   const ctx = buildInvoiceContext(intra());
   it('VA, metal value and making-with-VA derive from the line', () => {
     const t = buildTableData('items', defaultColumns('items', ['wastagePercent', 'makingCharge', 'vaAmount', 'makingWithVa', 'metalValue', 'makingRate']), ctx, true);
-    expect(t.rows[0]).toEqual(['8.00', '2,000.00', '160.00', '2,160.00', '49,300.00', '235.29']);
-    expect(t.total![2]).toBe('824.00'); // 8% of 2000 + 5500 + 2800
+    expect(t.rows[0]).toEqual(['8.00', '2,000.00', '3,944.00', '5,944.00', '49,300.00', '235.29']); // VA = 8% of the 49,300 metal value
+    expect(t.total![2]).toBe('20,787.20'); // 8% of the 44.8 g x 5800 metal value (259,840)
+  });
+  it('a line billed from a material breakdown prints its real metal / MC / VA / stone split (not MC+VA lumped, VA 0)', () => {
+    // The reference ring: 10 g @ 6000, ruby 1 ct @ 1500, MC 100/g, VA 10%. The stored line is a flat 68,500 with makingCharge = MC + VA.
+    const inv = intra();
+    inv.items = [{
+      ...inv.items[0], quantity: 1, netGoldWeight: 10, rateType: 'FIXED', goldRate: 68500, makingCharge: 7000, wastagePercent: 0, stoneValue: 1500,
+      unitPrice: 68500, totalPrice: 68500,
+      materialBreakdown: {
+        rows: [{ materialType: 'METAL', weight: 10, rate: 6000 }, { materialType: 'STONE', weight: 1, rate: 1500 }],
+        mcRate: 100, vaPercent: 10,
+      },
+    }];
+    const c = buildInvoiceContext(inv);
+    const t = buildTableData('items', defaultColumns('items', ['rate', 'wastagePercent', 'makingCharge', 'vaAmount', 'makingWithVa', 'metalValue', 'makingRate', 'stoneValue']), c, true);
+    expect(t.rows[0]).toEqual(['6,000.00', '10.00', '1,000.00', '6,000.00', '7,000.00', '60,000.00', '100.00', '1,500.00']);
+    expect(c.totals.metalValue).toBe(60000);
+    expect(c.totals.makingCharge).toBe(1000);
+    expect(c.totals.stoneValue).toBe(1500);
   });
   it('stone details, rates and amounts line up one stone per line', () => {
     const t = buildTableData('items', defaultColumns('items', ['stoneDetails', 'stoneRates', 'stoneAmounts', 'materialDetails', 'materialRates', 'stoneWeights', 'stonePieces', 'materialWeights', 'materialPieces']), ctx, false);

@@ -35,7 +35,7 @@ interface Props {
 export function PageActions({ actions }: { actions?: Action[] }) {
   if (!actions || actions.length === 0) return null;
   return (
-    <Box sx={{ display: 'flex', gap: 0.75, flexShrink: 0 }}>
+    <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap' }}>
       {actions.map((action) => (
         <Button
           key={action.label}
@@ -100,8 +100,8 @@ export function PageHeader({ title, subtitle, breadcrumbs, actions }: Props) {
           )}
         </Breadcrumbs>
       )}
-      <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 2 }}>
-        <Box>
+      <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 2, flexWrap: 'wrap' }}>
+        <Box sx={{ minWidth: 0 }}>
           {subtitle && (
             <Typography variant="body2" color="text.secondary">
               {subtitle}

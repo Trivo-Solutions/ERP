@@ -38,7 +38,7 @@ describe('HTTP contract: dates, malformed ids and foreign references', () => {
 
   const tagBody = (o: Record<string, any>, over: Record<string, unknown> = {}) => ({
     branchId: o.branchId, name: 'Contract tag', metalType: 'GOLD', metalKarat: '22K', grossWeight: 5, netWeight: 5,
-    costPrice: 100, sellingPrice: 200, stockTypeId: o.stockType, categoryId: o.category, ...over,
+    costPrice: 100, sellingPrice: 200, saleMcRate: 0, saleVaPercent: 0, stockTypeId: o.stockType, categoryId: o.category, ...over,
   });
   const newTag = async (api: ReturnType<typeof apiWith>, o: Record<string, any>) => (await api.post('/tagging/tags', tagBody(o))).body.data;
   const invoiceBody = (o: Record<string, any>, tag: any, over: Record<string, unknown> = {}) => ({

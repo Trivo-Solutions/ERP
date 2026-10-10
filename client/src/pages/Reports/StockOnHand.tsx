@@ -95,7 +95,7 @@ export function StockOnHand() {
         <Box sx={{ p: 1.5, display: 'flex', justifyContent: 'flex-end', gap: 3, bgcolor: '#EEF1FA' }}>
           <Typography sx={{ fontFamily: 'monospace' }}>Pieces: {totals.count ?? 0}</Typography>
           <Typography sx={{ fontFamily: 'monospace' }}>Cost: {money(totals.costValue ?? 0)}</Typography>
-          <Typography fontWeight={700} sx={{ fontFamily: 'monospace' }}>Selling: {money(totals.sellingValue ?? 0)}</Typography>
+          <Typography fontWeight={700} sx={{ fontFamily: 'monospace' }}>Selling (today's rate): {money(totals.sellingValue ?? 0)}{totals.unpricedCount ? ` · ${totals.unpricedCount} piece(s) not priced - rates missing` : ''}</Typography>
         </Box>
       </Card>
     </Box>

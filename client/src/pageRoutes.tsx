@@ -43,6 +43,8 @@ import { RepairJobs } from './pages/Quality/RepairJobs';
 
 // Masters
 import { MastersPage } from './pages/Masters/MastersPage';
+import { OfferManagementPage } from './pages/Offers/OfferManagementPage';
+import { ApprovalInboxPage } from './pages/Offers/ApprovalInboxPage';
 
 // Tagging
 import { TagsPage } from './pages/Tagging/TagsPage';
@@ -172,6 +174,8 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="quality/repairs" element={<RequirePermission permission="repair:view"><RepairJobs /></RequirePermission>} />
 
       {/* Masters */}
+      <Route path="offers" element={<RequirePermission permission="offer:view"><OfferManagementPage /></RequirePermission>} />
+      <Route path="offers/approvals" element={<RequirePermission permission="discount:approve"><ApprovalInboxPage /></RequirePermission>} />
       <Route path="masters" element={<RequirePermission permission="masters:view"><MastersPage /></RequirePermission>} />
 
       {/* Tagging */}
@@ -217,30 +221,30 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="finance/journals" element={<JournalEntries />} />
       <Route path="finance/accounts" element={<ChartOfAccounts />} />
       {/* J4-D1: these five now need report:financial_view (sensitive financial detail) — see navItems.tsx. */}
-      <Route path="finance/trial-balance" element={<RequirePermission permission="report:financial_view"><TrialBalance /></RequirePermission>} />
-      <Route path="finance/pnl" element={<RequirePermission permission="report:financial_view"><PnLStatement /></RequirePermission>} />
-      <Route path="finance/cost-centers" element={<CostCenters />} />
-      <Route path="finance/dealer-aging" element={<RequirePermission permission="report:financial_view"><DealerAging /></RequirePermission>} />
-      <Route path="finance/client-ledger" element={<RequirePermission permission="report:financial_view"><ClientLedger /></RequirePermission>} />
-      <Route path="finance/client-ledger/:clientId" element={<RequirePermission permission="report:financial_view"><ClientLedger /></RequirePermission>} />
-      <Route path="finance/supplier-ledger" element={<RequirePermission permission="report:financial_view"><SupplierLedger /></RequirePermission>} />
-      <Route path="finance/supplier-ledger/:supplierId" element={<RequirePermission permission="report:financial_view"><SupplierLedger /></RequirePermission>} />
+      <Route path="finance/trial-balance" element={<RequirePermission permission="report:trial_balance"><TrialBalance /></RequirePermission>} />
+      <Route path="finance/pnl" element={<RequirePermission permission="report:pnl"><PnLStatement /></RequirePermission>} />
+      <Route path="finance/cost-centers" element={<RequirePermission permission="report:cost_centers"><CostCenters /></RequirePermission>} />
+      <Route path="finance/dealer-aging" element={<RequirePermission permission="report:dealer_aging"><DealerAging /></RequirePermission>} />
+      <Route path="finance/client-ledger" element={<RequirePermission permission="report:client_ledger"><ClientLedger /></RequirePermission>} />
+      <Route path="finance/client-ledger/:clientId" element={<RequirePermission permission="report:client_ledger"><ClientLedger /></RequirePermission>} />
+      <Route path="finance/supplier-ledger" element={<RequirePermission permission="report:supplier_ledger"><SupplierLedger /></RequirePermission>} />
+      <Route path="finance/supplier-ledger/:supplierId" element={<RequirePermission permission="report:supplier_ledger"><SupplierLedger /></RequirePermission>} />
 
       {/* Reports */}
-      <Route path="reports/wip" element={<WipSummary />} />
-      <Route path="reports/stock" element={<StockSummary />} />
-      <Route path="reports/karigar" element={<KarigarBalances />} />
-      <Route path="reports/aging" element={<RequirePermission permission="report:financial_view"><AgingReceivables /></RequirePermission>} />
-      <Route path="reports/sales-register" element={<SalesRegister />} />
-      <Route path="reports/sales-report" element={<SalesReport />} />
-      <Route path="reports/stock-book" element={<StockBook />} />
-      <Route path="reports/barcode-history" element={<BarcodeHistory />} />
+      <Route path="reports/wip" element={<RequirePermission permission="report:wip"><WipSummary /></RequirePermission>} />
+      <Route path="reports/stock" element={<RequirePermission permission="report:stock_summary"><StockSummary /></RequirePermission>} />
+      <Route path="reports/karigar" element={<RequirePermission permission="report:karigar"><KarigarBalances /></RequirePermission>} />
+      <Route path="reports/aging" element={<RequirePermission permission="report:aging_receivables"><AgingReceivables /></RequirePermission>} />
+      <Route path="reports/sales-register" element={<RequirePermission permission="report:sales_register"><SalesRegister /></RequirePermission>} />
+      <Route path="reports/sales-report" element={<RequirePermission permission="report:sales_report"><SalesReport /></RequirePermission>} />
+      <Route path="reports/stock-book" element={<RequirePermission permission="report:stock_book"><StockBook /></RequirePermission>} />
+      <Route path="reports/barcode-history" element={<RequirePermission permission="report:barcode_history"><BarcodeHistory /></RequirePermission>} />
       <Route path="reports/repair-register" element={<RequirePermission permission="repair:view"><RepairRegister /></RequirePermission>} />
       <Route path="reports/repair-transfers" element={<RequirePermission permission="repair:view"><RepairTransfers /></RequirePermission>} />
       <Route path="reports/sales-returns" element={<RequirePermission permission="sales:view"><SalesReturnRegister /></RequirePermission>} />
-      <Route path="reports/stock-on-hand" element={<StockOnHand />} />
-      <Route path="reports/dead-stock" element={<DeadStock />} />
-      <Route path="reports/day-book" element={<RequirePermission permission="report:financial_view"><DayBook /></RequirePermission>} />
+      <Route path="reports/stock-on-hand" element={<RequirePermission permission="report:stock_on_hand"><StockOnHand /></RequirePermission>} />
+      <Route path="reports/dead-stock" element={<RequirePermission permission="report:dead_stock"><DeadStock /></RequirePermission>} />
+      <Route path="reports/day-book" element={<RequirePermission permission="report:day_book"><DayBook /></RequirePermission>} />
       <Route path="reports/gst-summary" element={<RequirePermission permission="report:financial_view"><GstSummary /></RequirePermission>} />
       <Route path="reports/purchase-gst-summary" element={<RequirePermission permission="report:financial_view"><PurchaseGstSummary /></RequirePermission>} />
       <Route path="reports/gstr1-table12" element={<RequirePermission permission="report:financial_view"><Gstr1Table12 /></RequirePermission>} />

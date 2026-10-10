@@ -9,7 +9,7 @@ import type { JwtPayload } from '../../middleware/auth';
 import { assertOwnedByCompany } from '../../middleware/tenant';
 import { createAuditEntry } from '../../middleware/audit';
 import { newInvitationToken, parseInvitationToken, hashInvitationToken } from './invitationToken';
-import { tenantQuery, tenantTransaction } from '../../shared/tenantContext';
+import { tenantQuery, tenantTransaction, runAsPlatform } from '../../shared/tenantContext';
 import type { BranchAccess, TenantContext } from '../../shared/tenantContext';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -242,6 +242,27 @@ export async function updateCompanyUser(
       username: data.username === undefined ? undefined : blankToNull(data.username),
     })) ?? err;
   }
+}
+
+// Admin password reset. The password lives on the GLOBAL User, so resetting it would also lock out /
+// take over that person's logins in any OTHER company — a company admin must never be able to do
+// that. Refused unless this company is the person's only membership (checked platform-side, since
+// RLS hides other companies' rows from a tenant query). There is no email provider, so the admin
+// types the new password and hands it over.
+export async function resetMemberPassword(ctx: TenantContext, companyUserId: string, newPassword: string) {
+  await assertOwnedByCompany('companyUser', companyUserId, ctx.companyId, 'User');
+  if (companyUserId === ctx.companyUserId) {
+    throw new AppError('Use Change Password to change your own password', 400);
+  }
+  const member = await tenantQuery(ctx.companyId, (tx) =>
+    tx.companyUser.findFirstOrThrow({ where: { id: companyUserId, companyId: ctx.companyId }, select: { userId: true } }));
+  const memberships = await runAsPlatform((p) => p.companyUser.count({ where: { userId: member.userId } }));
+  if (memberships > 1) {
+    throw new AppError('This person also belongs to another company and has one shared password — they must change it themselves', 409);
+  }
+  const hashed = await bcrypt.hash(newPassword, 12);
+  await runAsPlatform((p) => p.user.update({ where: { id: member.userId }, data: { password: hashed } }));
+  await createAuditEntry('company_users', companyUserId, ctx.userId, 'PASSWORD_RESET', undefined, { reset: true }, ctx.companyId);
 }
 
 // ─── Invitations ──────────────────────────────────────────────────────────────

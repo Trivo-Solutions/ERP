@@ -1007,6 +1007,83 @@ snapshot → attempt → FILED → LOCKED pipeline; 2 HTTP) all passing; full su
 pre-existing skips) and 2139/2140 under the real role-split `test:rls` cluster (1 pre-existing
 skip), both 0 failed; `audit:tenant` clean; `tsc`/Prisma validate clean; no schema/migration change.
 
+
+**One pricing engine, live gold, same-day estimates (2026-10-14).** Decisions fixed with the owner after a tag -> estimate -> bill audit:
+(1) **One formula** - `server/src/shared/pricingEngine.ts` (row = weight x rate; MC = metal weight x MC rate; **VA = % of the METAL's value**, never of MC;
+total rounded once to 2 dp). The sale-line breakdown, the estimate totals and the custom per-gram line all call it; the client mirror is `utils/estimateCalc.ts`
+and `pricingEngine.test.ts` fails if they drift. The old "VA marks up MC" rule is gone (sales report split and printed VA column included).
+(2) **Gold is the one LIVE element**: a METAL row is priced at the day's metal rate for the tag's karat (`resolveLiveMetalRate` - latest rate on/before today, with
+its date and `isToday`), never the rate stored on the tag. MC, VA and stone sale rates stay the tag's own columns. If today's rate is not entered the latest earlier
+one is used and the estimation / New Sale screens say so (with an "Update rate" link to `/designs/rates` for holders of the new **`rate:update`** permission, which
+now gates `POST /designs/rates` and `/rates/batch` instead of `system:config`). No rate at all for a karat = 409.
+(3) **Missing sale rates are blocked, never read as 0** (`shared/tagPriceability.ts`): estimation read/save and an auto-priced sale line refuse a tag with no MC / VA or a
+stone row with no sale rate (409); `POST/PATCH /tagging/tags` require them (400) and a metal rate for the karat; the New Tag form refuses blanks. A GRN-created piece
+takes its SALE MC/VA from the MakingCharge master (`shared/makingChargeLookup.ts`) - the PO/GRN MC/VA are cost and never become sale rates - and stays unsellable
+until they exist. (4) **An estimate is a quote for one day** (`shared/estimateExpiry.ts`): `validUntil` = end of the day; yesterday's cannot be sent to billing,
+approved or billed and is not offered by the billing search. A sent estimate can be **recalled** (estimator) or **returned from billing** before it is billed
+(`recallEstimate`, audited `RECALL`, no new permission); a "gold rate updated since this estimate" indicator compares its frozen rate with the live one - nothing
+reprices automatically. Estimate GST now comes from the default HSN's rate in the master. (5) Stock-side reports (branch summary, stock on hand, dead stock, stock book,
+counter lookup) show the **live** sale value beside cost (`shared/liveSaleValue.ts`; an unpriceable piece is counted `unpriced`, never 0). (6) The printed invoice reads a
+breakdown line's real metal / MC / VA / stone split from `materialBreakdown`. Tests: `pricingEngine.test.ts`, `liveGoldPricing.test.ts`, `estimateLifecycle.test.ts`,
+`liveStockValue.test.ts`. **Caveats:** re-saving (amending) an old PER_GRAM invoice with VA > 0 reprices that line under the new rule; existing companies need `rate:update`
+added to the roles that enter the daily rate (Starter Package v1 only reaches new companies) and users must log in again.
+
+**Release hardening (2026-10-10).** (a) **The business day is India time**, explicit and independent of the server's timezone: `shared/businessDay.ts`
+(`Asia/Kolkata`, UTC+05:30) drives estimate same-day expiry, "is today's metal rate entered", and the offers' "today"; `businessDay.test.ts` pins the 18:30 UTC
+rollover and passes under `TZ=America/New_York`. (b) Billing a fully priced tag no longer needs a metal rate on file: the offer-floor lookup only demands the live
+rate when an active offer has a METAL rule (`resolveOfferForTag`). (c) `scripts/backfillRateUpdatePermission.ts` (dry-run by default, `--apply` to write) adds
+`rate:update` additively to roles that already hold `system:config` - exactly the group that could enter rates before - and nothing else; not run against any live DB.
+(d) `http.releaseWorkflow.test.ts` drives rate -> tag -> stock -> estimate -> rate move -> bill (estimate and direct) -> offer -> discount + GST -> permissions ->
+tenant boundary over real HTTP against hand-computed figures.
+
+**Offer management, step 1 (2026-10-12) — definitions + resolver only; estimates and billing do not apply offers yet.**
+`Offer`/`OfferRule` (migration `20261012100000_offers`, RLS + composite FKs, no cascades) hold dated promotions on the **sale** rates:
+making charge (₹/g), VA (%), stone (₹/ct, per stone type) and optionally metal; each rule is `PERCENT_OFF` or `FIXED_RATE`, optionally
+narrowed by category / karat / stone type, and an offer can be scoped to one branch. Agreed rules, enforced in the pure
+`modules/offers/offerResolver.ts`: **no stacking** (one offer wins per piece — highest priority, then newest; within it each component takes its most
+specific rule); an offer **only ever lowers** a rate (a `FIXED_RATE` above the base rate is ignored); an offer that changes nothing never shadows
+one that does. An offer is a read-time overlay — it never writes to `JewelryTag`/`JewelryTagMaterial` (costPrice and tagged rates untouched; when the
+dates end the tagged price is simply the price again). The **base rate is a single seam** (`baseRatesForTag` in `offer.service.ts`): when the planned
+bulk temporary-price-change feature exists, only that function learns about it (pipeline: tagged rate → bulk change for the date → offer). Permissions
+`offer:view/create/edit/delete` (SUPER_ADMIN only until granted; `GET /offers/resolve` rides `estimation:view`); page `/offers`
+(`pages/Offers/OfferManagementPage.tsx`). **Decided, not yet built (steps 2–3):** the estimate's date picks the offer; the estimate/invoice line
+snapshots the original rate, the offer rate and the offer id; any final rate below the offered rate (override or extra discount, no tolerance) needs a
+store manager's approval (single-use, tied to the exact rates, requester ≠ approver, audited) before billing; memo/wholesale conversion is out of v1.
+Tests: `modules/offers/offerResolver.test.ts`, `offer.service.test.ts`.
+
+**Offer management, step 2 (2026-10-12) - "Apply offer" on the Estimation page.** When an offer applies to the selected piece today, the page
+shows a banner (offer name + each rate it lowers) with an **Apply offer** switch; switching it on loads the offered MC/VA/stone/metal rates (tagged
+rate struck through, "Offer saving" in Totals), switching it off restores the tagged rates. The client never names the offer: it sends
+`applyOffer: true` plus each line's `materialId`, and `createTagEstimate` re-resolves the winning offer by **today's date** itself - refusing (409)
+if none applies any more. The estimate stores `offerId` / `offerName` / `baseSaleMcRate` / `baseSaleVaPercent` and each line's `baseSaleRate` (migration
+`20261012120000_estimate_offer_snapshot`, composite FK to `offers`, Restrict) so editing, switching off or later deleting the offer never reprices a past
+quote - and an offer that a quote used can no longer be deleted (409; switch it off). Billing from the estimate inherits the offered rates (they are the
+estimate's rates). Tests: `modules/offers/estimateOffer.test.ts`.
+
+**Offer management, step 2b/3 (2026-10-13) - Apply offer on New Sale, and the store-manager approval gate.** New Sale's tagged lines get the same
+"Apply offer" (the client only sets `materialBreakdown.offerApplied`; `priceInvoice` picks the offer by invoice date, stamps it plus the tagged *and the
+offered* rates on the stored breakdown - `offer.mcRate/vaPercent`, row `baseRate/offerRate` - and 409s if none applies). **Step 3:** selling any component
+**below the offered rate (zero tolerance)** - a hand-lowered MC/VA/stone/metal rate on a tagged `materialBreakdown` line, *whether or not Apply offer was
+pressed* - or taking an invoice `discountAmount` on a bill carrying an applied offer, needs a **store manager's approval**. New `DiscountApproval` table
+(migration `20261013100000_discount_approvals`, RLS, composite FKs, no cascades; DB CHECKs: requester != approver, LINE has a tag, USED has an invoice),
+service `offers/offerApproval.service.ts`, pure logic `offerApproval.ts`, routes under `/offers/approvals`, permission `discount:approve` (granted to the
+Starter Package `STORE_MANAGER`; anyone with `invoice:create`/`invoice:edit` may *request*). `priceInvoice` returns `approvalNeeds` (server-computed);
+`createInvoice`/`amendInvoice` call `settleApprovals()` inside their transaction: an approval matches a need only by its **rateHash** (piece + exact
+below-offer figures, or the exact discount), is consumed `APPROVED -> USED` by a count-checked update (single use; a rollback releases it), and unmet needs
+come back together as 409 `DISCOUNT_APPROVAL_REQUIRED` with `details.needs`. Amending leaves already-approved rates alone (they are matched via
+`usedInvoiceId`). Screens: `BelowOfferApprovalDialog` (New Sale asks for + polls approvals, then re-saves) and `/offers/approvals` (`ApprovalInboxPage`,
+nav "Offer Approvals"). `AppError` gained an optional `details`. **Caveats:** a tagged line sent *without* a `materialBreakdown`, and the memo/wholesale path,
+are not gated (no component rates to compare); an extra discount on a bill with an offer the biller did not apply is ordinary; approvals have no expiry;
+"use" of an approval is recorded on the row (`usedAt`/`usedInvoiceId`), not as a separate audit entry; **an already-provisioned company's
+`STORE_MANAGER` needs `discount:approve` added (Role Editor / one-off script) and users must log in again** - Starter Package v1 only reaches companies provisioned from now on.
+**Estimates (2026-10-13):** an estimate priced below its offer is not sent to billing - "Send to Billing" becomes **"Send for Approval"** (reason
+required). `createTagEstimate`/`sendEstimateToBilling` check the rates against the offer in force today (`estimateBelowOffer`); if below, the estimate gets
+the new status `AWAITING_APPROVAL` (hidden from the billing search) and a `DiscountApproval` linked by `estimateId` is opened in the same transaction
+(migration `20261013120000_estimate_approval`; `TagEstimateItem.materialId` added so rows can be matched to the offer). Approve -> the estimate becomes `SENT`
+(released to billing); reject or withdraw -> back to `OPEN`. New Sale loads the estimate's approved approval (`GET /offers/approvals?estimateId=&status=APPROVED`)
+and sends it as `approvalIds`, so the manager's one approval also covers the bill. The server answers 409 `APPROVAL_REASON_REQUIRED` when a reason is missing.
+Tests: `modules/offers/discountApproval.test.ts`, `offerApproval.test.ts`, `estimateApproval.test.ts`, `saleOffer.test.ts`.
+
 ---
 
 ## 8. Known follow-ups / control gaps

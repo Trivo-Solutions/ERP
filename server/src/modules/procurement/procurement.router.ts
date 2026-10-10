@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { authenticate } from '../../middleware/auth';
-import { requirePermission } from '../../middleware/rbac';
+import { requirePermission, requireAnyPermission } from '../../middleware/rbac';
 import { resolveTenantContext } from '../../middleware/tenant';
 import { AppError } from '../../middleware/error';
 import { prisma } from '../../config/database';
@@ -34,6 +34,11 @@ procurementRouter.get('/requisitions/:id', requirePermission('po:view'), async (
   res.json({ success: true, data: await svc.getPR(req.tenant!, req.params.id) });
 });
 
+procurementRouter.delete('/requisitions/:id', requirePermission('po:delete'), async (req: Request, res: Response) => {
+  await svc.deletePR(req.tenant!, req.params.id, req.user!.userId);
+  res.json({ success: true, message: 'Requisition deleted' });
+});
+
 procurementRouter.post('/requisitions/:id/submit', requirePermission('po:create'), async (req: Request, res: Response) => {
   const pr = await svc.submitPR(req.params.id, req.tenant!, req.user!.userId);
   res.json({ success: true, data: pr });
@@ -56,13 +61,34 @@ procurementRouter.post('/requisitions/:id/convert', requirePermission('po:create
 
 // Suppliers — company-owned (Phase 3 — reversed the earlier "keep global" call: Supplier carries
 // private business data, same as Client).
-procurementRouter.get('/suppliers', requirePermission('po:view'), async (req: Request, res: Response) => {
-  res.json({ success: true, data: await svc.listSuppliers(req.tenant!.companyId) });
+procurementRouter.get('/suppliers', requireAnyPermission('po:view', 'supplier:view'), async (req: Request, res: Response) => {
+  // Inactive suppliers are only listed for someone who can reactivate them.
+  const includeInactive = req.query.includeInactive === 'true' && hasPermission(req.user!.permissions, 'supplier:deactivate');
+  res.json({ success: true, data: await svc.listSuppliers(req.tenant!.companyId, includeInactive) });
 });
 
-procurementRouter.post('/suppliers', requirePermission('po:create'), async (req: Request, res: Response) => {
+procurementRouter.post('/suppliers', requireAnyPermission('po:create', 'supplier:create'), async (req: Request, res: Response) => {
   const supplier = await svc.createSupplier(req.body, req.tenant!.companyId);
   res.status(201).json({ success: true, data: supplier });
+});
+
+procurementRouter.patch('/suppliers/:id', requirePermission('supplier:edit'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await svc.updateSupplier(req.tenant!, req.params.id, req.body, req.user!.userId) });
+});
+
+procurementRouter.post('/suppliers/:id/deactivate', requirePermission('supplier:deactivate'), async (req: Request, res: Response) => {
+  await svc.setSupplierActive(req.tenant!, req.params.id, false, req.user!.userId);
+  res.json({ success: true, message: 'Supplier deactivated' });
+});
+
+procurementRouter.post('/suppliers/:id/reactivate', requirePermission('supplier:deactivate'), async (req: Request, res: Response) => {
+  await svc.setSupplierActive(req.tenant!, req.params.id, true, req.user!.userId);
+  res.json({ success: true, message: 'Supplier reactivated' });
+});
+
+procurementRouter.delete('/suppliers/:id', requirePermission('supplier:delete'), async (req: Request, res: Response) => {
+  await svc.deleteSupplier(req.tenant!, req.params.id, req.user!.userId);
+  res.json({ success: true, message: 'Supplier deleted' });
 });
 
 // Purchase Orders
@@ -185,7 +211,7 @@ procurementRouter.post('/orders/:id/reject', requirePermission('po:approve'), as
   res.json({ success: true, data: po });
 });
 
-procurementRouter.delete('/orders/:id', requirePermission('po:create'), async (req: Request, res: Response) => {
+procurementRouter.delete('/orders/:id', requireAnyPermission('po:create', 'po:delete'), async (req: Request, res: Response) => {
   const perms = new Set(req.user!.permissions);
   const canDeleteApproved = perms.has('*') || perms.has('po:*') || perms.has('po:approve');
   await svc.deletePO(req.params.id, req.tenant!, req.user!.userId, canDeleteApproved);
@@ -204,15 +230,25 @@ procurementRouter.get('/suppliers/:id/returnable-tags', requirePermission('po:vi
 
 // Supplier payments (money out). Recording one is an accounting action, so it rides on journal:create
 // (accountant) rather than a new permission; reading them is the same po:view that shows the supplier.
-procurementRouter.get('/suppliers/:id/payments', requirePermission('po:view'), async (req: Request, res: Response) => {
+procurementRouter.get('/suppliers/:id/payments', requireAnyPermission('po:view', 'supplierPayment:view'), async (req: Request, res: Response) => {
   res.json({ success: true, data: await svc.listSupplierPayments(req.tenant!, req.params.id) });
 });
 
-procurementRouter.post('/suppliers/:id/payments', requirePermission('journal:create'), async (req: Request, res: Response) => {
+procurementRouter.post('/suppliers/:id/payments', requireAnyPermission('journal:create', 'supplierPayment:create'), async (req: Request, res: Response) => {
   const payment = await svc.recordSupplierPayment(
     { ...req.body, supplierId: req.params.id, paymentDate: parseDate(req.body.paymentDate, 'Payment date', true) },
     req.tenant!, req.user!.userId);
   res.status(201).json({ success: true, data: payment });
+});
+
+procurementRouter.post('/suppliers/:id/payments/:paymentId/reverse', requirePermission('supplierPayment:reverse'), async (req: Request, res: Response) => {
+  // The payment must belong to the supplier in the URL, as well as to the caller's company.
+  const pay = await tenantQuery(req.tenant!.companyId, (tx) => tx.supplierPayment.findFirst({
+    where: { id: req.params.paymentId, supplierId: req.params.id, companyId: req.tenant!.companyId }, select: { id: true },
+  }));
+  if (!pay) throw new AppError('Supplier payment not found', 404);
+  await svc.reverseSupplierPayment(req.tenant!, pay.id, req.body?.reason, req.user!.userId);
+  res.json({ success: true, message: 'Payment reversed' });
 });
 
 procurementRouter.get('/returns', requirePermission('po:view'), async (req: Request, res: Response) => {

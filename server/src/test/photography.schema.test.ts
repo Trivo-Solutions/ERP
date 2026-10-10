@@ -225,7 +225,9 @@ describe('Photography Phase 1 — schema, constraints and isolation', () => {
   it('permission catalog exposes the eight photography permissions', () => {
     const perms = PERMISSION_CATALOG.flatMap((g) => g.items).flatMap((i) => i.capabilities.map((c) => c.permission))
       .filter((p) => p.startsWith('photography:')).sort();
-    expect(perms).toEqual(['photography:capture', 'photography:delete', 'photography:manage_cameras', 'photography:manage_settings', 'photography:manage_stations',
-      'photography:restore', 'photography:review', 'photography:view']);
+    // The catalog also pads every row with unenforced create/edit/export (permissionCatalog.ts), so
+    // assert the eight real ones are all present rather than that they are the only ones.
+    expect(perms).toEqual(expect.arrayContaining(['photography:capture', 'photography:delete', 'photography:manage_cameras', 'photography:manage_settings', 'photography:manage_stations',
+      'photography:restore', 'photography:review', 'photography:view']));
   });
 });

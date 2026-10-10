@@ -53,7 +53,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <Box
       sx={{
-        width: 260,
+        width: '100%',
         overflow: 'hidden',
         display: 'flex',
         flexDirection: 'column',
@@ -80,6 +80,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
         <List dense disablePadding>
           {NAV_ITEMS.map((item) => {
             if (item.permission && !hasPermission(item.permission)) return null;
+            if (item.children && !item.children.some((c) => !c.permission || hasPermission(c.permission))) return null;
 
             if (item.path) {
               return (

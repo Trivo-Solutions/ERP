@@ -94,6 +94,15 @@ authRouter.get(
 
 // Edit a member's company-specific details (employee id, department, phone, username, role,
 // branch flag, active flag). The membership must belong to the caller's company.
+authRouter.post(
+  '/users/:companyUserId/reset-password', credentialLimiter, authenticate, resolveTenantContext, rejectClientTenantSelectors,
+  requirePermission('user:manage'), validate(z.object({ password: z.string().min(8).max(128) }).strict()),
+  async (req: Request, res: Response) => {
+    await authService.resetMemberPassword(req.tenant!, req.params.companyUserId, req.body.password);
+    res.json({ success: true, message: 'Password reset' });
+  }
+);
+
 authRouter.patch(
   '/users/:companyUserId', authenticate, resolveTenantContext, rejectClientTenantSelectors,
   requirePermission('user:manage'), validate(updateMemberSchema),

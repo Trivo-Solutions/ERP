@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Box, Button, Chip, Stack, Typography } from '@mui/material';
+import { Box, Button, Chip, FormControlLabel, Stack, Switch, Typography } from '@mui/material';
 import { ChevronLeft, ChevronRight } from '@mui/icons-material';
 import { EstimateBreakdown, EstimateBreakdownDialog, estimateTotals } from './EstimateBreakdown';
 
@@ -14,6 +14,37 @@ export interface MaterialPricingEntry {
   description: string;
   initial: EstimateBreakdown;     // what the piece opened with (its saved breakdown, else built from the tag)
   currentLineTotal: number;       // what the grid shows for this line right now
+  // Offers: the winning offer for this piece today (the resolver's resolution), if any; `offerName` is the one already on
+  // the line; `offerLocked` = the line came from an estimate, whose offer was settled there and is not switched here.
+  offer?: any;
+  offerName?: string;
+  offerLocked?: boolean;
+}
+
+export const breakdownHasOffer = (b: EstimateBreakdown) =>
+  b.baseMcRate != null || b.baseVaPercent != null || b.rows.some((r) => r.baseRate != null);
+
+// Lowers only: a rate already below the offered rate is left alone. Same result as the Estimation page's Apply offer.
+export function applyOfferToBreakdown(before: EstimateBreakdown, res: any): EstimateBreakdown {
+  const rows = before.rows.map((r) => {
+    const adj = r.materialId ? res.rows?.[r.materialId] : undefined;
+    return adj && Number(adj.offerRate) < Number(r.rate) ? { ...r, baseRate: Number(r.rate), rate: Number(adj.offerRate) } : r;
+  });
+  const mc = res.mc && Number(res.mc.offerRate) < Number(before.mcRate);
+  const va = res.va && Number(res.va.offerRate) < Number(before.vaPercent);
+  return {
+    rows,
+    mcRate: mc ? Number(res.mc.offerRate) : before.mcRate, vaPercent: va ? Number(res.va.offerRate) : before.vaPercent,
+    baseMcRate: mc ? Number(before.mcRate) : before.baseMcRate, baseVaPercent: va ? Number(before.vaPercent) : before.baseVaPercent,
+  };
+}
+
+// Put every lowered rate back to what the tag had (base rates ride on the rows / breakdown).
+export function removeOfferFromBreakdown(b: EstimateBreakdown): EstimateBreakdown {
+  return {
+    rows: b.rows.map(({ baseRate, ...r }) => ({ ...r, rate: baseRate ?? r.rate })),
+    mcRate: b.baseMcRate ?? b.mcRate, vaPercent: b.baseVaPercent ?? b.vaPercent,
+  };
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -32,7 +63,7 @@ export function MaterialPricingDialog({ entries, startKey, otherLinesTotal, onCl
   startKey: string;
   otherLinesTotal: number;        // grid totals of every line that is not part of this session (custom lines, locked ones)
   onClose: () => void;
-  onApply: (changed: Array<{ key: string; breakdown: EstimateBreakdown; quotedTotal: number }>) => void;
+  onApply: (changed: Array<{ key: string; breakdown: EstimateBreakdown; quotedTotal: number; offerName?: string }>) => void;
 }) {
   const [index, setIndex] = useState(Math.max(0, entries.findIndex((e) => e.key === startKey)));
   const [drafts, setDrafts] = useState<Record<string, EstimateBreakdown>>(() =>
@@ -65,6 +96,10 @@ export function MaterialPricingDialog({ entries, startKey, otherLinesTotal, onCl
   if (!entry) return null;
   const changed = isChanged(entry);
   const pieceTotal = round2(estimateTotals(drafts[entry.key]).total);
+  const offerOn = breakdownHasOffer(drafts[entry.key]);
+  const toggleOffer = (on: boolean) => setDrafts((d) => ({
+    ...d, [entry.key]: on ? applyOfferToBreakdown(d[entry.key], entry.offer) : removeOfferFromBreakdown(d[entry.key]),
+  }));
 
   return (
     <EstimateBreakdownDialog
@@ -75,6 +110,7 @@ export function MaterialPricingDialog({ entries, startKey, otherLinesTotal, onCl
       onClose={onClose}
       onSave={() => onApply(entries.filter(isChanged).map((e) => ({
         key: e.key, breakdown: drafts[e.key], quotedTotal: e.currentLineTotal,
+        offerName: breakdownHasOffer(drafts[e.key]) ? (e.offer?.offer?.name ?? e.offerName) : undefined,
       })))}
       applyLabel={changedCount > 0 ? `Apply to bill (${changedCount} changed)` : 'Apply to bill'}
       heading={
@@ -90,6 +126,11 @@ export function MaterialPricingDialog({ entries, startKey, otherLinesTotal, onCl
             <Typography sx={{ fontFamily: 'monospace', fontWeight: 800, fontSize: 18, color: '#44C47A' }}>{entry.tagNumber}</Typography>
             <Typography variant="body1" color="text.secondary" noWrap>{entry.description}</Typography>
           </Stack>
+          {!entry.offerLocked && (entry.offer || offerOn) && (
+            <FormControlLabel sx={{ mt: 0.5 }}
+              control={<Switch size="small" checked={offerOn} disabled={!entry.offer && !offerOn} onChange={(e) => toggleOffer(e.target.checked)} />}
+              label={<Typography variant="body2" fontWeight={600} color="success.main">Apply offer: {entry.offer?.offer?.name ?? entry.offerName}</Typography>} />
+          )}
           <Typography variant="caption" display="block" color="text.secondary">
             Change a rate, delete a row or add one — the price follows. Nothing is saved until Apply to bill, and only this bill
             changes: the tag and its cost are left as they are.

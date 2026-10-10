@@ -68,39 +68,39 @@ financeRouter.post('/journals/:id/post', requirePermission('journal:post'), asyn
 // J4-D1: trial balance / P&L / balance sheet are sensitive financial-detail reports — split out of
 // report:view into report:financial_view (operational reports like stock/WIP/sales-register stay
 // on report:view).
-financeRouter.get('/reports/trial-balance', requirePermission('report:financial_view'), async (req: Request, res: Response) => {
+financeRouter.get('/reports/trial-balance', requirePermission('report:trial_balance'), async (req: Request, res: Response) => {
   const asOfStr = qs(req, 'asOf');
   const data = await svc.getTrialBalance(req.tenant!.companyId, asOfStr ? new Date(asOfStr) : undefined);
   res.json({ success: true, data });
 });
 
-financeRouter.get('/reports/pnl', requirePermission('report:financial_view'), async (req: Request, res: Response) => {
+financeRouter.get('/reports/pnl', requirePermission('report:pnl'), async (req: Request, res: Response) => {
   const fromStr = qs(req, 'from') ?? `${new Date().getFullYear()}-04-01`;
   const toStr = qs(req, 'to') ?? new Date().toISOString();
   const data = await svc.getProfitAndLoss(req.tenant!.companyId, new Date(fromStr), new Date(toStr));
   res.json({ success: true, data });
 });
 
-financeRouter.get('/reports/balance-sheet', requirePermission('report:financial_view'), async (req: Request, res: Response) => {
+financeRouter.get('/reports/balance-sheet', requirePermission('report:balance_sheet'), async (req: Request, res: Response) => {
   const asOfStr = qs(req, 'asOf') ?? new Date().toISOString();
   const data = await svc.getBalanceSheet(req.tenant!.companyId, new Date(asOfStr));
   res.json({ success: true, data });
 });
 
-financeRouter.get('/reports/cost-centers', requirePermission('report:view'), async (req: Request, res: Response) => {
+financeRouter.get('/reports/cost-centers', requirePermission('report:cost_centers'), async (req: Request, res: Response) => {
   const data = await svc.getCostCenterProfitability(req.tenant!.companyId);
   res.json({ success: true, data });
 });
 
 // J4-D1: named explicitly in Decision 1 as sensitive (per-dealer outstanding + credit-limit flags).
-financeRouter.get('/reports/dealer-aging', requirePermission('report:financial_view'), async (req: Request, res: Response) => {
+financeRouter.get('/reports/dealer-aging', requirePermission('report:dealer_aging'), async (req: Request, res: Response) => {
   const asOfStr = qs(req, 'asOf');
   const data = await svc.getDealerAging(req.tenant!.companyId, asOfStr ? new Date(asOfStr) : undefined);
   res.json({ success: true, data });
 });
 
 // J4-D1: named explicitly in Decision 1 as sensitive (named customer balances).
-financeRouter.get('/reports/client-ledger/:clientId', requirePermission('report:financial_view'), async (req: Request, res: Response) => {
+financeRouter.get('/reports/client-ledger/:clientId', requirePermission('report:client_ledger'), async (req: Request, res: Response) => {
   const fromStr = qs(req, 'from');
   const toStr = qs(req, 'to');
   const data = await svc.getClientLedger(req.tenant!, req.params.clientId, fromStr ? new Date(fromStr) : undefined, toStr ? new Date(toStr) : undefined);
@@ -109,7 +109,7 @@ financeRouter.get('/reports/client-ledger/:clientId', requirePermission('report:
 
 // H4: day-book — one day's company-wide sales/payments/returns/exchanges rollup. J4-D1: named
 // explicitly in Decision 1 as sensitive.
-financeRouter.get('/reports/day-book', requirePermission('report:financial_view'), async (req: Request, res: Response) => {
+financeRouter.get('/reports/day-book', requirePermission('report:day_book'), async (req: Request, res: Response) => {
   const dateStr = qs(req, 'date') ?? new Date().toISOString();
   const data = await svc.getDayBook(req.tenant!.companyId, new Date(dateStr));
   res.json({ success: true, data });
@@ -138,7 +138,7 @@ financeRouter.get('/reports/gst-summary', requirePermission('report:financial_vi
 
 // One supplier's statement (purchases, returns, payments) with a running payable balance. J4-D1:
 // named explicitly in Decision 1 as sensitive.
-financeRouter.get('/reports/supplier-ledger/:supplierId', requirePermission('report:financial_view'), async (req: Request, res: Response) => {
+financeRouter.get('/reports/supplier-ledger/:supplierId', requirePermission('report:supplier_ledger'), async (req: Request, res: Response) => {
   const fromStr = qs(req, 'from'), toStr = qs(req, 'to');
   const data = await svc.getSupplierLedger(req.tenant!, req.params.supplierId, fromStr ? new Date(fromStr) : undefined, toStr ? new Date(toStr) : undefined);
   res.json({ success: true, data });

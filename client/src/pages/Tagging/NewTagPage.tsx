@@ -522,7 +522,12 @@ export function NewTagPage() {
   const totalStoneWt  = watchedMaterials.filter((m) => m.materialType !== 'METAL').reduce((s, m) => s + Number(m.weight || 0), 0);
   // Gross = net (metal) + stones — same convention the server uses everywhere else
   // (createTagFromGrnItem derives netWeight as grossWeight - stoneWeight).
-  const totalGrossWt = totalMetalWt + totalStoneWt;
+  // Stones are weighed in carats (1 CT = 0.2 g) but gross/net are grams, so convert before adding.
+  const CT_TO_GM = 0.2;
+  const totalStoneWtGm = watchedMaterials
+    .filter((m) => m.materialType !== 'METAL')
+    .reduce((s, m) => s + Number(m.weight || 0) * (m.unit === 'CT' ? CT_TO_GM : 1), 0);
+  const totalGrossWt = totalMetalWt + totalStoneWtGm;
   const materialsCostAmt = watchedMaterials.reduce((s, m) => s + Number(m.costAmount || 0), 0);
   const materialsSaleAmt = watchedMaterials.reduce((s, m) => s + Number(m.saleAmount || 0), 0);
 
@@ -765,6 +770,16 @@ export function NewTagPage() {
 
   const mutation = useMutation({
     mutationFn: (data: any) => {
+      // Sale rates are required before a tag is saved - a blank is never sent as 0 (an explicit 0 is a real rate). The server
+      // refuses the same thing; this just says so before the round trip.
+      const isBlank = (v: any) => v === '' || v == null;
+      const missingRates: string[] = [];
+      if (isBlank(data.saleMcRate)) missingRates.push('Sale making charge rate');
+      if (isBlank(data.saleVaPercent)) missingRates.push('Sale VA %');
+      (data.materials ?? []).forEach((m: any) => {
+        if (m.materialType !== 'METAL' && isBlank(m.saleRate) && isBlank(m.saleAmount) && !m.stoneGradeId) missingRates.push(`${m.code || 'Material'} sale rate`);
+      });
+      if (missingRates.length > 0) return Promise.reject({ response: { data: { error: `Fill in before saving: ${missingRates.join(', ')}` } } });
       const payload: any = {
         branchId:     data.branchId,
         makeType:     data.makeType,
@@ -773,7 +788,7 @@ export function NewTagPage() {
         metalKarat:   data.metalKarat || undefined,
         grossWeight:  totalGrossWt || Number(data.grossWeight || 0),
         netWeight:    totalMetalWt || Number(data.netWeight   || 0),
-        stoneWeight:  totalStoneWt || 0,
+        stoneWeight:  totalStoneWtGm || 0,
         huid:         data.huid         || undefined,
         settingType:  data.settingType  || undefined,
         notes:        data.notes        || undefined,
@@ -792,8 +807,8 @@ export function NewTagPage() {
         // Whatever MC rate/VA% actually priced this piece — auto-suggested from the MakingCharge
         // master but overridable on this form, so this is the exec's final decision, not a live
         // master value. Estimation/direct-sale pricing read this back later instead of re-deriving.
-        saleMcRate:    Number(data.saleMcRate    || 0),
-        saleVaPercent: Number(data.saleVaPercent || 0),
+        saleMcRate:    Number(data.saleMcRate),
+        saleVaPercent: Number(data.saleVaPercent),
         // Cost-side counterpart — persisted so re-opening this tag for edit shows back exactly
         // what was paid in labour/wastage, instead of resetting blank and dropping it from
         // costPrice on the next save.

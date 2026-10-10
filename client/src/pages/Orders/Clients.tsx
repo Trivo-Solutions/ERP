@@ -97,7 +97,7 @@ export function Clients() {
                     </IconButton>
                   </Tooltip>
                 )}
-                {hasPermission('report:financial_view') && (
+                {hasPermission('report:client_ledger') && (
                   <Tooltip title="Statement / ledger">
                     <IconButton size="small" onClick={() => navigate(`/finance/client-ledger/${c.id}`)}>
                       <Receipt fontSize="small" />

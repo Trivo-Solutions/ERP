@@ -31,7 +31,7 @@ const designSchema = z.object({
 // createTagFromGrnItem/createOldGoldExchange) is not dormant, even though the rest of this
 // router (designs/BOM/cost-estimates) is.
 
-designRouter.post('/rates', requirePermission('system:config'), async (req: Request, res: Response) => {
+designRouter.post('/rates', requirePermission('rate:update'), async (req: Request, res: Response) => {
   const rate = await designService.upsertMetalRate(req.tenant!.companyId, req.body);
   res.json({ success: true, data: rate });
 });
@@ -43,7 +43,7 @@ designRouter.get('/rates/sheet', requirePermission('design:view'), async (req: R
 });
 
 // Saves several purities' rates for one date atomically (same rows POST /rates writes).
-designRouter.post('/rates/batch', requirePermission('system:config'), async (req: Request, res: Response) => {
+designRouter.post('/rates/batch', requirePermission('rate:update'), async (req: Request, res: Response) => {
   const saved = await designService.saveRateSheet(
     req.tenant!.companyId, parseDate(req.body.date, 'Date'), req.body.rates, typeof req.body.source === 'string' ? req.body.source : undefined,
   );

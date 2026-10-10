@@ -103,7 +103,7 @@ The manufacturing modules were **not deleted** — they're structurally separabl
 | — | **Auth / RBAC / Hardware / Reports (mgmt)** | 🟢 Live | Channel-agnostic — 6 roles, 35+ permissions, audit log, scale/barcode/RFID integration |
 | 3 | **Inventory & Diamond Assortment** | 🟡 Partially dormant | Metal vault (`MetalStock`) still live (old-gold exchange feeds it); stone lots/consumables are manufacturing-era, unused post-pivot |
 | 4 | **Order Management & Reservation** | 🟡 Partially dormant | `Client` master (party record) is live and reused everywhere; `SalesOrder`/`OrderItem`/`MaterialReservation` (a *production* order) are dormant — **never used for retail/wholesale selling** |
-| 1 | **Product Design & CAD/BOM Vault** | 🔴 Dormant | `Design`/`BomItem`/`CostEstimate` untouched. **Exception:** `MetalRate` (`POST/GET /designs/rates*`) is live — it feeds C1/C2's sell-side daily pricing |
+| 1 | **Product Design & CAD/BOM Vault** | 🔴 Dormant | `Design`/`BomItem`/`CostEstimate` untouched. **Exception:** `MetalRate` (`POST/GET /designs/rates*`; saving needs `rate:update`) is live — it feeds C1/C2's sell-side daily pricing |
 | 5 | **In-House Manufacturing & WIP** | 🔴 Dormant | `JobCard`/`JobProcess`/`WipTracking`/`QcCheckpoint` — untouched |
 | 6 | **Outsourcing & Job Work Control** | 🔴 Dormant | `Artisan`/`KarigarLedger`/`SubcontractorInvoice` — untouched |
 
@@ -228,11 +228,33 @@ CLI equivalent: `npm run company:provision -- --code VASAVI --name "Vasavi Jewel
 | GET | `/tags/search` | `estimation:view` | Find a piece to quote |
 | GET | `/tags/:tagId` | `estimation:view` | The piece + its materials (sale side only — no cost) |
 | GET | `/tags/:tagId/estimates` | `estimation:view` | Estimates saved for a piece |
-| POST | `/tags/:tagId/estimates` | `estimation:manage` | Save an estimate; `sendToBilling: true` (+ the customer fields below) also hands it to billing |
+| POST | `/tags/:tagId/estimates` | `estimation:manage` | Save an estimate; `sendToBilling: true` (+ the customer fields below) also hands it to billing; `applyOffer: true` (+ `materialId` on each item) applies today's offer from `/offers` - 409 if none applies; the estimate keeps `offerId`/`offerName` and the pre-offer rates |
 | GET | `/estimates/:id` | `estimation:view` | One estimate |
 | POST | `/estimates/:id/send-to-billing` | `estimation:manage` | Hand a saved estimate to the billing counter (I5). Body: `customerName`*, `customerPhone`* (10-digit mobile), `salesPersonId`* (a User of this company), `customerDob`, `customerAddress`, `customerPan` (*required; omitted fields keep what the estimate already holds) |
+| POST | `/estimates/:id/recall` | `estimation:manage` | Pull a sent (or awaiting-approval) estimate back to OPEN before it is billed; withdraws its approval request; audited `RECALL`. 409 once billed. Body: `reason?` |
+| POST | `/estimates/:id/return-from-billing` | `invoice:create` | Same recall, from the billing screen ("Return to estimation"). |
 | GET | `/staff` | `estimation:view` | Active staff of this company for the sales-employee picker (`id` = User id) |
 | GET/POST/PUT | `/templates…` | `estimateTemplate:view` / `manage` | Print templates |
+
+### Offers — `/offers` (step 1 of offer management — definitions only)
+
+Dated offers on the **sale** rates (making charge, VA, stone, metal). Nothing here edits a tag; estimates/bills do not apply offers yet (step 2).
+
+| Method | Path | Permission | Description |
+|---|---|---|---|
+| GET | `/` | `offer:view` | All offers with rules and a derived `status` (`ACTIVE`/`UPCOMING`/`EXPIRED`/`INACTIVE`); `?status=` filters |
+| GET | `/:id` | `offer:view` | One offer |
+| POST | `/` | `offer:create` | `{ name, effectiveFrom, effectiveTo?, priority?, branchId?, rules[] }`; rule = `{ component: MAKING_CHARGE\|VA\|STONE\|METAL, mode: PERCENT_OFF\|FIXED_RATE, value, stoneTypeId?, categoryId?, karat? }` |
+| PUT | `/:id` | `offer:edit` | Replaces the header and the whole rule list in one transaction |
+| POST | `/:id/activate`, `/:id/deactivate` | `offer:edit` | Switch on/off |
+| DELETE | `/:id` | `offer:delete` | Permanent; refused (409) once an estimate/bill has used it — switch it off instead |
+| GET | `/resolve?tagId=&date=` | `estimation:view` | What the winning offer does to this tag's sale rates on `date` (default today): base rate, offer rate, rule id per component/material row |
+| GET | `/approvals` | `invoice:create`/`invoice:edit`/`discount:approve` | Below-offer approval requests. An approver (`discount:approve`) sees the company's; anyone else only their own. `?status=PENDING\|APPROVED\|REJECTED\|CANCELLED\|USED\|ALL`, `?mine=true` |
+| POST | `/approvals` | `invoice:create`/`invoice:edit` | Ask for approval. `{ scope: 'LINE', tagId, materialBreakdown, invoiceDate?, reason }` (server recomputes what is below the offered rate - 409 if nothing is) or `{ scope: 'DISCOUNT', discountAmount, reason }`. An identical open request by the same person is returned, not duplicated |
+| POST | `/approvals/:id/approve`, `/approvals/:id/reject` | `discount:approve` | Decide a PENDING request - never your own (403; also a DB CHECK). Reject needs a `note` |
+| POST | `/approvals/:id/cancel` | requester | Withdraw your own PENDING/APPROVED request |
+
+**Below-offer gate (step 3).** `POST /sales/invoices` and `PUT /sales/invoices/:id` take `approvalIds: string[]`. The server works out what needs approving: any `materialBreakdown` rate (MC, VA, or a tag material row carrying its `materialId`) of a tagged line **below the rate its offer gave** - whether or not "Apply offer" was pressed - and any invoice `discountAmount` on a bill that carries an applied offer. Each is met only by an `APPROVED`, unused approval whose **hash of the exact figures** matches (another piece, a lower rate or a bigger discount needs a new one); it is consumed (`USED`, count-checked) inside the bill's own transaction, so a rolled-back bill releases it. Unmet needs come back together as **409** `{ code: 'DISCOUNT_APPROVAL_REQUIRED', details: { needs[] } }`. Amending keeps rates the invoice already had approved. Lines without a `materialBreakdown` and the memo path are not gated (see CLAUDE.md).
 
 ### Inventory — `/inventory` (metal vault live; stones/consumables dormant)
 

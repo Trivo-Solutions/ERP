@@ -117,6 +117,9 @@ model Company {
   metalStocks                 MetalStock[]
   metalStockMovements         MetalStockMovement[]
   customerAdvances            CustomerAdvance[]
+  offers                      Offer[]
+  offerRules                  OfferRule[]
+  discountApprovals           DiscountApproval[]
   photographyStations         PhotographyStation[]
   stationCredentials          StationCredential[]
   tagImages                   TagImage[]
@@ -739,6 +742,9 @@ model User {
   exchangesReversed             OldGoldExchange[]            @relation("ExchangeReversedBy")
   advancesCreated               CustomerAdvance[]            @relation("AdvanceCreatedBy")
   advancesReversed              CustomerAdvance[]            @relation("AdvanceReversedBy")
+  offersCreated                 Offer[]                      @relation("OfferCreatedBy")
+  discountApprovalsRequested    DiscountApproval[]           @relation("DiscountApprovalRequestedBy")
+  discountApprovalsDecided      DiscountApproval[]           @relation("DiscountApprovalDecidedBy")
   photographyStationsRegistered PhotographyStation[]         @relation("StationRegisteredBy")
   stationCredentialsCreated     StationCredential[]          @relation("StationCredentialCreatedBy")
   stationCredentialsRevoked     StationCredential[]          @relation("StationCredentialRevokedBy")
@@ -1179,6 +1185,11 @@ model SupplierPayment {
   notes         String?
   createdById   String?
   createdAt     DateTime @default(now())
+  // Reversal flags the row, never edits or deletes it: the inverse journal is posted and the supplier's payable
+  // restored. Anything that sums supplier payments as money paid must skip rows where reversedAt is set.
+  reversedAt     DateTime?
+  reversedById   String?
+  reversalReason String?
 
   @@unique([companyId, paymentNumber])
   @@index([companyId])
@@ -2895,6 +2906,7 @@ model Branch {
   gstRegistrationId String?
   gstRegistration   CompanyGstRegistration? @relation(fields: [gstRegistrationId, companyId], references: [id, companyId])
 
+  offers              Offer[]
   tags                JewelryTag[]
   transfersFrom       BranchTransfer[]     @relation("FromBranch")
   transfersTo         BranchTransfer[]     @relation("ToBranch")
@@ -3066,6 +3078,7 @@ model JewelryTag {
   retaggedTo          TagRetag?                   @relation("RetagNew")
   hallmarkingItems    HallmarkingItem[]
   estimates           TagEstimate[]
+  discountApprovals   DiscountApproval[]
   // Photography state lives in its own table (tag_images), never as columns on this model: the tag-history trigger
   // would record every photo as a tag change.
   tagImages           TagImage[]
@@ -3147,6 +3160,7 @@ model ProductCategory {
   subCategoryLinks CategorySubCategory[]
   jewelryTags      JewelryTag[]
   makingCharges    MakingCharge[]
+  offerRules       OfferRule[]
   invoiceItems     InvoiceItem[]
   poItemCategories PoItemCategory[]
   sizes            Size[]
@@ -3366,6 +3380,7 @@ model TagEstimate {
   tag              JewelryTag        @relation(fields: [tagId, companyId], references: [id, companyId])
   estimateNumber   String
   items            TagEstimateItem[]
+  discountApprovals DiscountApproval[]
   // Making-charge (flat ₹/gram labour rate) + VA/wastage (% of metal value) — same two-sided
   // cost/sale shape as NewTagPage.tsx's MC & VA tab, applied once against total metal weight/value
   // rather than per material line (see estimation.service.ts for the exact formula).
@@ -3385,13 +3400,21 @@ model TagEstimate {
   currency         String            @default("INR")
   validUntil       DateTime?
   notes            String?
+  // Offer applied when this estimate was worked up (null = none). The name and the ORIGINAL (pre-offer) MC/VA are
+  // copied here, like taxRate, so a later edit or deletion of the offer never reprices or rewrites a past quote.
+  offerId          String?
+  offer            Offer?            @relation(fields: [offerId, companyId], references: [id, companyId], onDelete: Restrict)
+  offerName        String?
+  baseSaleMcRate   Decimal?          @db.Decimal(12, 4)
+  baseSaleVaPercent Decimal?         @db.Decimal(5, 2)
   createdById      String?
   createdBy        User?             @relation("EstimateCreatedBy", fields: [createdById], references: [id])
   createdAt        DateTime          @default(now())
 
   // Hand-off to the billing counter. OPEN (just a quote) -> SENT (the estimator sent it to billing; it now
   // shows up in the billing screen's estimate search) -> INVOICED (billed; invoiceId says which invoice —
-  // one estimate can only be billed once). The customer name/phone are optional and exist only so the biller
+  // one estimate can only be billed once). An estimate priced below its offer goes OPEN -> AWAITING_APPROVAL -> SENT
+  // (a store manager approved it) instead of straight to SENT. The customer name/phone are optional and exist only so the biller
   // can find "Ramesh's estimate" by name.
   status          String        @default("OPEN")
   sentToBillingAt DateTime?
@@ -3437,6 +3460,10 @@ model TagEstimateItem {
   costAmount   Decimal?    @db.Decimal(12, 2)
   saleRate     Decimal?    @db.Decimal(12, 4)
   saleAmount   Decimal?    @db.Decimal(12, 2)
+  // The tagged rate before an offer lowered it (only set when an offer was applied to this line).
+  baseSaleRate Decimal?    @db.Decimal(12, 4)
+  // The tag's own material row this line came from (informational; lets an approval floor find the row's offered rate).
+  materialId   String?
 
   @@index([companyId])
   @@map("tag_estimate_items")
@@ -3534,6 +3561,7 @@ model StoneType {
   createdAt   DateTime @default(now())
 
   stoneGrades       StoneGrade[]
+  offerRules        OfferRule[]
   vendorRates       VendorComponentRate[]
   poComponents      PoItemComponent[]
   grnComponentRates GrnItemComponentRate[]
@@ -3720,6 +3748,7 @@ model SalesInvoice {
   taxDetails          TaxInvoice?
   // Estimates that were billed on this invoice (TagEstimate.invoiceId).
   billedEstimates     TagEstimate[]
+  discountApprovalsUsed DiscountApproval[]
   exportDocs          ExportDocument[]
   payments            InvoicePayment[]
   advanceApplications CustomerAdvanceApplication[]
@@ -4952,4 +4981,110 @@ model PhotographyCaptureCommand {
   @@index([companyId, stationId, status])
   @@index([companyId, requestedById])
   @@map("photography_capture_commands")
+}
+
+// ─── Offers (sale-side rate offers by effective date) ─────────────────────────
+//
+// A temporary promotion on the SALE rates of a piece: making charge (₹/g), VA (%), stone rate (₹/ct) and
+// optionally the metal rate. It is applied by date, and never written back to JewelryTag/JewelryTagMaterial
+// (so costPrice and the tagged sale rates are untouched — when the offer's dates end, the tagged price is simply
+// the price again). NO STACKING: for a given piece exactly one offer wins (highest priority, then newest), and
+// inside it each component takes its single most specific matching rule. See shared/offerResolver.ts.
+// companyId direct — an offer is a company's own pricing policy.
+model Offer {
+  id            String      @id @default(cuid())
+  companyId     String
+  company       Company     @relation(fields: [companyId], references: [id])
+  name          String
+  description   String?
+  // Inclusive calendar dates. effectiveTo null = open-ended.
+  effectiveFrom DateTime    @db.Date
+  effectiveTo   DateTime?   @db.Date
+  // Higher wins when two offers both match a piece (they are never combined).
+  priority      Int         @default(0)
+  // Null = every branch.
+  branchId      String?
+  branch        Branch?     @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  isActive      Boolean     @default(true)
+  createdById   String?
+  createdBy     User?       @relation("OfferCreatedBy", fields: [createdById], references: [id])
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  rules         OfferRule[]
+  estimates     TagEstimate[]
+  discountApprovals DiscountApproval[]
+
+  @@unique([id, companyId])
+  @@index([companyId, isActive, effectiveFrom])
+  @@map("offers")
+}
+
+// One line of an offer. component: MAKING_CHARGE | VA | STONE | METAL. mode: PERCENT_OFF (value = % taken off the
+// rate) | FIXED_RATE (value = the rate itself — ₹/g for MC and METAL, % for VA, ₹/ct for STONE — applied only when
+// it is LOWER than the base rate, so an offer never raises a price). stoneTypeId only on STONE rules; null = every
+// stone type. categoryId / karat narrow the rule to a category / karat (null = any).
+model OfferRule {
+  id          String          @id @default(cuid())
+  companyId   String
+  company     Company         @relation(fields: [companyId], references: [id])
+  offerId     String
+  offer       Offer           @relation(fields: [offerId, companyId], references: [id, companyId], onDelete: Restrict)
+  component   String
+  mode        String
+  value       Decimal         @db.Decimal(12, 4)
+  stoneTypeId String?
+  stoneType   StoneType?      @relation(fields: [stoneTypeId, companyId], references: [id, companyId], onDelete: Restrict)
+  categoryId  String?
+  category    ProductCategory? @relation(fields: [categoryId, companyId], references: [id, companyId], onDelete: Restrict)
+  karat       String?
+  createdAt   DateTime        @default(now())
+
+  @@index([companyId])
+  @@index([offerId])
+  @@map("offer_rules")
+}
+
+// Offer management step 3: a store manager's approval for selling below an offer. When a bill prices a piece's making
+// charge / VA / stone / metal rate BELOW the rate its offer gives (a hand override), or takes an extra invoice-level
+// discount on a bill that carries an offer line, the biller asks for approval; a different person with
+// discount:approve decides it. The approval is tied to the EXACT figures (rateHash over scope + tag + the below-offer
+// rates, or the discount amount) and is single-use: createInvoice / amendInvoice consume it (APPROVED -> USED, count-checked)
+// in the bill's own transaction, so a rollback frees it. Requester != approver is also a DB CHECK. Never cascades.
+// scope: LINE | DISCOUNT. status: PENDING | APPROVED | REJECTED | CANCELLED | USED.
+model DiscountApproval {
+  id             String      @id @default(cuid())
+  companyId      String
+  company        Company     @relation(fields: [companyId], references: [id])
+  scope          String
+  status         String      @default("PENDING")
+  // LINE only: the piece, and the offer whose rates were undercut.
+  tagId          String?
+  tag            JewelryTag? @relation(fields: [tagId, companyId], references: [id, companyId], onDelete: Restrict)
+  offerId        String?
+  offer          Offer?      @relation(fields: [offerId, companyId], references: [id, companyId], onDelete: Restrict)
+  // The exact figures being approved, the offered figures they undercut (for the manager's screen), and a hash of the former.
+  requestedRates Json
+  offeredRates   Json
+  rateHash       String
+  reason         String
+  requestedById  String
+  requestedBy    User        @relation("DiscountApprovalRequestedBy", fields: [requestedById], references: [id])
+  requestedAt    DateTime    @default(now())
+  decidedById    String?
+  decidedBy      User?       @relation("DiscountApprovalDecidedBy", fields: [decidedById], references: [id])
+  decidedAt      DateTime?
+  decisionNote   String?
+  usedAt         DateTime?
+  usedInvoiceId  String?
+  usedInvoice    SalesInvoice? @relation(fields: [usedInvoiceId, companyId], references: [id, companyId], onDelete: Restrict)
+  // Set when the request was made by sending an estimate for approval; approving it releases that estimate to billing.
+  estimateId     String?
+  estimate       TagEstimate? @relation(fields: [estimateId, companyId], references: [id, companyId], onDelete: Restrict)
+
+  @@unique([id, companyId])
+  @@index([companyId, status, requestedAt])
+  @@index([usedInvoiceId])
+  @@index([estimateId])
+  @@map("discount_approvals")
 }

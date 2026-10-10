@@ -12,20 +12,56 @@ import { PageHeader } from '../../components/common/PageHeader';
 import { SelectField } from '../../components/fields/SelectField';
 import { useAuthStore } from '../../store/auth.store';
 
+interface MemberRow { id: string; isActive: boolean; user: { name: string; email: string }; role: { id: string; displayName: string } }
+
+/** Members holding the selected role, plus a picker to move any user onto it (PATCH /auth/users/:id). */
+function RoleUsersCard({ role }: { role: RoleRow }) {
+  const { enqueueSnackbar } = useSnackbar();
+  const qc = useQueryClient();
+  const [pick, setPick] = useState('');
+  const { data: members } = useQuery({ queryKey: ['company-users'], queryFn: () => apiGet<MemberRow[]>('/auth/users') });
+  const assign = useMutation({
+    mutationFn: (memberId: string) => apiPatch(`/auth/users/${memberId}`, { roleId: role.id }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['company-users'] });
+      qc.invalidateQueries({ queryKey: ['roles'] });
+      setPick('');
+      enqueueSnackbar('User assigned to role', { variant: 'success' });
+    },
+    onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed to assign user', { variant: 'error' }),
+  });
+  const holders = (members ?? []).filter((m) => m.role.id === role.id);
+  const others = (members ?? []).filter((m) => m.role.id !== role.id && m.isActive);
+  return (
+    <Card sx={{ p: 2, mb: 2 }}>
+      <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1 }}>Users with this role</Typography>
+      <Grid container spacing={2} alignItems="center">
+        <Grid item xs={12} sm={4}>
+          <SelectField
+            label="Assign user to this role" emptyLabel="(select a user)"
+            options={others.map((m) => ({ value: m.id, label: `${m.user.name} — ${m.role.displayName}` }))}
+            value={pick} onChange={(e) => setPick(e.target.value)}
+          />
+        </Grid>
+        <Grid item xs="auto">
+          <MuiButton variant="outlined" disabled={!pick || assign.isPending} onClick={() => assign.mutate(pick)}>Assign</MuiButton>
+        </Grid>
+      </Grid>
+      <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+        {holders.length ? holders.map((m) => m.user.name).join(', ') : 'No users hold this role yet.'}
+      </Typography>
+    </Card>
+  );
+}
+
 export interface RoleRow { id: string; name: string; displayName: string; permissions: string[]; _count?: { memberships: number } }
-interface PermissionCapability { action: string; permission: string }
+interface PermissionCapability { action: string; permission: string; enforced?: false }
 interface PermissionCatalogItem { key: string; label: string; capabilities: PermissionCapability[] }
 interface PermissionCatalogGroup { label: string; items: PermissionCatalogItem[] }
 
-// The reference layout asks for a uniform View/Add/Edit/Delete/Export grid (one column per action,
-// matching most jewellery-ERP role screens) — but this app's real permission strings aren't a
-// uniform CRUD set per feature (see permissionCatalog.ts: GRN is Create/Verify, Karigar is
-// Issue/Return, ...). Rather than inventing permissions nothing enforces just to fill a cell, only
-// actions that map cleanly onto one of these five columns get one; everything else (Manage, Adjust,
-// Approve, Verify, Issue, Return, Post, Transfer, Configure, Estimate, ...) is still fully grantable,
-// just in the "Other" column, labelled with its own real action name. Delete stays disabled on every
-// row on purpose: this app never hard-deletes a business record (tag, invoice, memo, ...) — only
-// status-changes it — so no permission string for it exists anywhere to grant.
+// Uniform View/Add/Edit/Delete/Export grid, one column per action. The server catalog guarantees
+// every row has all five (permissions no endpoint checks yet come back `enforced: false`); actions
+// that don't fit a column (Approve, Issue, Post, ...) are still grantable in the "Other" column.
 const STANDARD_COLUMNS = ['View', 'Add', 'Edit', 'Delete', 'Export'] as const;
 type StandardColumn = typeof STANDARD_COLUMNS[number];
 const ACTION_TO_COLUMN: Partial<Record<string, StandardColumn>> = {
@@ -233,6 +269,8 @@ export function RoleEditorPage() {
         </DialogActions>
       </Dialog>
 
+      {!isNew && selectedRole && hasPermission('user:manage') && <RoleUsersCard role={selectedRole} />}
+
       {isSuperAdmin && (
         <Alert severity="info" sx={{ mb: 2 }}>
           Super Administrator always has full access — its permissions can't be changed here. You can still rename it.
@@ -300,27 +338,16 @@ export function RoleEditorPage() {
                           <TableCell sx={{ pl: 5 }}>{item.label}</TableCell>
                           {STANDARD_COLUMNS.map((col) => {
                             const capability = standard[col];
-                            if (!capability) {
-                              // A native `title` instead of MUI's Tooltip — with ~150+ disabled
-                              // cells in this grid, a Popper-backed tooltip on every one of them
-                              // is enough live mouseenter/mouseleave listeners to visibly jank
-                              // scrolling as rows pass under a stationary cursor. `title` costs
-                              // nothing (the browser handles it, no JS, no extra DOM).
-                              return (
-                                <TableCell key={col} align="center">
-                                  <span title="Not separately enforced for this feature — no matching permission exists in the app yet">
-                                    <Checkbox size="small" disableRipple disabled />
-                                  </span>
-                                </TableCell>
-                              );
-                            }
+                            if (!capability) return <TableCell key={col} />;
                             return (
                               <TableCell key={col} align="center">
-                                <Checkbox
-                                  size="small" disableRipple
-                                  checked={draft.permissions.has(capability.permission)}
-                                  onChange={() => togglePermission(capability.permission)}
-                                />
+                                <span title={capability.enforced === false ? 'Grantable, but no screen checks this permission yet' : undefined}>
+                                  <Checkbox
+                                    size="small" disableRipple
+                                    checked={draft.permissions.has(capability.permission)}
+                                    onChange={() => togglePermission(capability.permission)}
+                                  />
+                                </span>
                               </TableCell>
                             );
                           })}

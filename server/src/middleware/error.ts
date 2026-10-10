@@ -7,9 +7,12 @@ export class AppError extends Error {
   isOperational: boolean;
   /** Optional stable machine-readable code (e.g. for the Camera Bridge, which must not parse messages). */
   code?: string;
+  /** Optional structured detail for the caller (e.g. which approvals a bill still needs). Sent as `details`. */
+  details?: unknown;
 
-  constructor(message: string, statusCode = 500, isOperational = true, code?: string) {
+  constructor(message: string, statusCode = 500, isOperational = true, code?: string, details?: unknown) {
     super(message);
+    this.details = details;
     this.statusCode = statusCode;
     this.isOperational = isOperational;
     this.code = code;
@@ -33,6 +36,7 @@ export function errorHandler(
       success: false,
       error: err.message,
       ...(err.code && { code: err.code }),
+      ...(err.details !== undefined && { details: err.details }),
       ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
     });
   }

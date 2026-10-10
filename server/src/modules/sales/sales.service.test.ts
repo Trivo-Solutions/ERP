@@ -6,7 +6,7 @@ import { getClientLedger, getDayBook, getDealerAging } from '../finance/finance.
 import { LEDGER_ACCOUNT } from '../../shared/ledgerAccounts';
 import { DEFAULT_HSN_CODE } from '../../shared/constants';
 import { cleanupJournalEntries, getJournalEntry, lineAmount } from '../../test/ledger';
-import { createTestTenant, cleanupTestTenant, TestTenant } from '../../test/fixtures';
+import { seedMetalRate, createTestTenant, cleanupTestTenant, TestTenant } from '../../test/fixtures';
 
 describe('createInvoice (tag-aware direct invoicing)', () => {
   const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -55,6 +55,7 @@ describe('createInvoice (tag-aware direct invoicing)', () => {
 
   beforeAll(async () => {
     tenant = await createTestTenant(suffix, ['invoice:create']);
+    await seedMetalRate(tenant.company.id, '22K', 6000);
     userId = tenant.user.id;
     branchId = tenant.branch.id;
 
@@ -435,9 +436,9 @@ describe('createInvoice (tag-aware direct invoicing)', () => {
       expect(Number(invoice.items[0].unitPrice)).toBe(48000 * 10 + 200);
     });
 
-    // VA% (wastagePercent): reuses the same markup-the-making-charge formula NewTagPage.tsx
-    // already applies for the MakingCharge master, rather than inventing a new one.
-    it('marks up makingCharge by wastagePercent (VA%) on a PER_GRAM line', async () => {
+    // VA% (wastagePercent) is a % of the METAL's value - the same rule as the tag, the estimate and F4 (shared/pricingEngine.ts) -
+    // never a mark-up of the making charge.
+    it('charges VA% on the metal value (not on the making charge) on a PER_GRAM line', async () => {
       const invoice = await createInvoice(
         {
           clientId, invoiceDate: new Date(), invoiceType: 'RETAIL',
@@ -450,8 +451,8 @@ describe('createInvoice (tag-aware direct invoicing)', () => {
       );
       invoiceIds.push(invoice.id);
 
-      // 10*48000 + 1000*(1+10/100) = 480000 + 1100 = 481100
-      expect(Number(invoice.items[0].unitPrice)).toBe(481100);
+      // metal 10*48000 = 480000; MC 1000; VA 10% of 480000 = 48000  =>  529000
+      expect(Number(invoice.items[0].unitPrice)).toBe(529000);
       expect(Number(invoice.items[0].wastagePercent)).toBe(10);
     });
 
@@ -639,8 +640,8 @@ describe('createInvoice (tag-aware direct invoicing)', () => {
       // PER_GRAM master: 300 * netGoldWeight(10) = 3000; wastagePercent from saleWastagePercent (5)
       expect(Number(invoice.items[0].makingCharge)).toBe(3000);
       expect(Number(invoice.items[0].wastagePercent)).toBe(5);
-      // 10*48000 + 3000*1.05 = 480000 + 3150
-      expect(Number(invoice.items[0].unitPrice)).toBe(480000 + 3150);
+      // metal 480000 + MC 3000 + VA 5% of 480000 = 24000
+      expect(Number(invoice.items[0].unitPrice)).toBe(480000 + 3000 + 24000);
     });
 
     // The concern this closes: an executive can override MC/VA at tagging time (NewTagPage's
@@ -662,7 +663,7 @@ describe('createInvoice (tag-aware direct invoicing)', () => {
       // Tag's own rate wins over the master's (300/5%): 777 * netGoldWeight(10) = 7770; VA 12%.
       expect(Number(invoice.items[0].makingCharge)).toBe(7770);
       expect(Number(invoice.items[0].wastagePercent)).toBe(12);
-      expect(Number(invoice.items[0].unitPrice)).toBe(10 * 48000 + 7770 * 1.12);
+      expect(Number(invoice.items[0].unitPrice)).toBe(480000 + 7770 + 57600); // VA 12% of the 480000 metal value
     });
 
     it('an explicit request-level makingCharge/wastagePercent still wins over the tag\'s own settled rate (regression)', async () => {

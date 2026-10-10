@@ -43,6 +43,14 @@ estimationRouter.post('/estimates/:id/send-to-billing', requirePermission('estim
   res.json({ success: true, data: estimate });
 });
 
+// Pull a sent estimate back before it is billed: the estimator from the estimation page, or the biller ("Return to estimation").
+estimationRouter.post('/estimates/:id/recall', requirePermission('estimation:manage'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await svc.recallEstimate(req.tenant!, req.params.id, req.user!.userId, 'ESTIMATOR', req.body?.reason) });
+});
+estimationRouter.post('/estimates/:id/return-from-billing', requirePermission('invoice:create'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await svc.recallEstimate(req.tenant!, req.params.id, req.user!.userId, 'BILLING', req.body?.reason) });
+});
+
 estimationRouter.get('/estimates/:id', requirePermission('estimation:view'), async (req: Request, res: Response) => {
   res.json({ success: true, data: await svc.getTagEstimate(req.tenant!, req.params.id) });
 });

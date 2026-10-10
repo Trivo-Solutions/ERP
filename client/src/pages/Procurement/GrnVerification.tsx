@@ -609,7 +609,7 @@ export function GrnVerification() {
                         const left = pr.leftNet > LOT_LEFT_TOLERANCE;
                         const open = i.purchaseLot.status === 'OPEN';
                         return (
-                          <Box key={i.id} sx={{ display: 'grid', gridTemplateColumns: 'minmax(170px, 1fr) minmax(280px, 2fr) 130px', alignItems: 'center', columnGap: 3 }}>
+                          <Box key={i.id} sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'minmax(170px, 1fr) minmax(280px, 2fr) 130px' }, alignItems: 'center', columnGap: 3 }}>
                             <Box>
                               <Typography variant="body2" fontWeight={600}>{i.poItem.materialName}</Typography>
                               <Typography variant="caption" color="text.secondary">
@@ -634,7 +634,7 @@ export function GrnVerification() {
                         );
                       })}
                       {pieces.map((i: any) => (
-                        <Box key={i.id} sx={{ display: 'grid', gridTemplateColumns: 'minmax(170px, 1fr) minmax(280px, 2fr) 130px', alignItems: 'center', columnGap: 3 }}>
+                        <Box key={i.id} sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'minmax(170px, 1fr) minmax(280px, 2fr) 130px' }, alignItems: 'center', columnGap: 3 }}>
                           <Box>
                             <Typography variant="body2" fontWeight={600}>{i.poItem.materialName}</Typography>
                             <Typography variant="caption" color="text.secondary">Single piece</Typography>

@@ -67,9 +67,10 @@ describe('Acceptance: a new company after Vasavi has substantial data', () => {
       layout: { elements: [{ id: 'e1', type: 'text', xMm: 2, yMm: 2, literalText: `${marker} Estimate`, fontSize: 10 }] },
     }), 'estimate template').id;
 
+    ok(await api.post('/designs/rates/batch', { date: new Date().toISOString().slice(0, 10), rates: [{ karat: '24K', ratePerGram: 6550 }] }), 'metal rate'); // gold is priced live: a tag with metal needs today's rate
     const tag = ok(await api.post('/tagging/tags', {
       branchId: co.branchId, stockTypeId: ids.stockType, categoryId: ids.category, collectionId: ids.collection,
-      name: `${marker} Bridal Necklace`, metalType: 'GOLD', metalKarat: '22K', grossWeight: 10, netWeight: 10, sellingPrice: 90000,
+      name: `${marker} Bridal Necklace`, metalType: 'GOLD', metalKarat: '22K', grossWeight: 10, netWeight: 10, sellingPrice: 90000, saleMcRate: 0, saleVaPercent: 0,
       notes: note,
       materials: [{ code: 'MAT1', materialType: 'METAL', materialCodeId: ids.materialCode, weight: 10 }],
     }), 'tag');
@@ -236,7 +237,7 @@ describe('Acceptance: a new company after Vasavi has substantial data', () => {
     it('Shree cannot build a tag or an invoice on Vasavi\'s category, stock type, collection, material, client, branch or tag', async () => {
       const v = vasavi.ids;
       const tag = (over: object) => shree.api.post('/tagging/tags', {
-        branchId: shree.branchId, name: 'Forged', metalType: 'GOLD', grossWeight: 1, netWeight: 1,
+        branchId: shree.branchId, name: 'Forged', metalType: 'GOLD', grossWeight: 1, netWeight: 1, saleMcRate: 0, saleVaPercent: 0,
         stockTypeId: shree.ids.stockType, categoryId: shree.ids.category, ...over,
       });
       expect((await tag({ categoryId: v.category })).status).toBe(404);

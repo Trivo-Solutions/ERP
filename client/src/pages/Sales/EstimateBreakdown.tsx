@@ -21,12 +21,18 @@ export interface EstimateRow {
   weight: number;
   unit: string;
   rate: number;
+  // Offers: the tag's own material row (so the server can find its tagged rate) and the rate before an offer lowered it.
+  materialId?: string;
+  baseRate?: number;
 }
 
 export interface EstimateBreakdown {
   rows: EstimateRow[];
   mcRate: number;      // ₹ per gram of metal
   vaPercent: number;   // % of metal value
+  // Offers: the tagged MC / VA an applied offer lowered (so "Remove offer" can put them back).
+  baseMcRate?: number;
+  baseVaPercent?: number;
 }
 
 const MATERIAL_TYPES = ['METAL', 'STONE', 'DIAMOND', 'FINDING', 'OTHER'];

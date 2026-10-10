@@ -36,6 +36,17 @@ import type { StarterPackageDefinition } from './types';
 // companies are never touched.
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Per-report grants (split out of report:view / report:financial_view). Every role that held report:view
+// keeps opening exactly the reports it could before; only the Accountant gets the financial ones.
+const OPERATIONAL_REPORTS = [
+  'report:stock_summary', 'report:stock_book', 'report:stock_on_hand', 'report:dead_stock', 'report:barcode_history',
+  'report:sales_register', 'report:sales_report', 'report:wip', 'report:karigar', 'report:cost_centers',
+];
+const FINANCIAL_REPORTS = [
+  'report:trial_balance', 'report:pnl', 'report:balance_sheet', 'report:day_book', 'report:dealer_aging',
+  'report:aging_receivables', 'report:client_ledger', 'report:supplier_ledger',
+];
+
 export const STARTER_PACKAGE_V1: StarterPackageDefinition = {
   version: 1,
   name: 'TRIVO Starter Package v1 — Jewellery Trading',
@@ -59,7 +70,7 @@ export const STARTER_PACKAGE_V1: StarterPackageDefinition = {
         'job:view', 'job:create', 'job:update', 'wip:update', 'qc:inspect', 'qc:approve',
         'karigar:view', 'karigar:issue', 'karigar:return',
         'hallmark:manage', 'repair:view', 'repair:create', 'repair:edit', 'repair:manage',
-        'invoice:create', 'report:view', 'masters:view',
+        'invoice:create', 'report:view', ...OPERATIONAL_REPORTS, 'masters:view',
         // client:*/payment:*/return:* preserve exactly what order:*/invoice:create already granted
         // here before those actions got their own permission strings (Phase J2) — see permissionCatalog.ts.
         'client:view', 'client:create', 'client:edit', 'payment:create', 'return:create',
@@ -74,7 +85,7 @@ export const STARTER_PACKAGE_V1: StarterPackageDefinition = {
         // in addition to report:view — the Accountant is the one starter role that keeps them.
         // J4-D6: payment:view — this role already saw payment history via sales:view; explicitly
         // re-granted now that it's independently delegable.
-        'report:view', 'report:financial_view', 'tax:manage', 'invoice:create',
+        'report:view', ...OPERATIONAL_REPORTS, ...FINANCIAL_REPORTS, 'report:financial_view', 'tax:manage', 'invoice:create',
         'sales:view', 'stock:view', 'order:view', 'masters:view',
         'client:view', 'payment:create', 'payment:view', 'return:create',
       ],
@@ -83,13 +94,13 @@ export const STARTER_PACKAGE_V1: StarterPackageDefinition = {
       name: 'SALES_MANAGER', displayName: 'Sales Manager',
       permissions: [
         'sales:view', 'sales:create', 'memo:manage', 'invoice:create',
-        'export:doc', 'order:view', 'order:create', 'report:view', 'masters:view',
+        'export:doc', 'order:view', 'order:create', 'report:view', ...OPERATIONAL_REPORTS, 'masters:view',
         // J4-D6: payment:view — preserves this role's existing payment-history access (previously
         // via sales:view) now that it's a separate permission.
         'client:view', 'client:create', 'client:edit', 'payment:create', 'payment:view', 'return:create',
         'estimation:view', 'estimation:manage', 'estimateTemplate:view',
         'tag:view', 'tag:create', 'branch:create', 'branch:edit', 'branch:transfer', 'branch:approve',
-        'stock:adjust', 'user:manage', 'role:view', 'role:create', 'role:edit', 'role:delete', 'system:config', 'audit:view',
+        'stock:adjust', 'user:manage', 'role:view', 'role:create', 'role:edit', 'role:delete', 'system:config', 'rate:update', 'audit:view',
       ],
     },
     { name: 'FLOOR_WORKER', displayName: 'Floor Worker', permissions: ['job:view', 'wip:update', 'karigar:view'] },
@@ -99,9 +110,11 @@ export const STARTER_PACKAGE_V1: StarterPackageDefinition = {
         'stock:view', 'stock:adjust', 'stone:manage', 'stone:split',
         // J4-D5: grn:view alongside the existing grn:create — preserves this role's GRN-list access
         // now that GET /procurement/grn no longer rides grn:create.
-        'consumable:manage', 'po:view', 'grn:view', 'grn:create', 'grn:verify', 'report:view', 'masters:view',
+        'consumable:manage', 'po:view', 'grn:view', 'grn:create', 'grn:verify', 'report:view', ...OPERATIONAL_REPORTS, 'masters:view',
         'tagTemplate:view', 'tagTemplate:create', 'tagTemplate:edit', 'estimation:view', 'estimation:manage',
         'estimateTemplate:view', 'estimateTemplate:create', 'estimateTemplate:edit',
+        // Offers step 3: the store manager decides below-offer approval requests.
+        'discount:approve',
       ],
     },
   ],

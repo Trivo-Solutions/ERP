@@ -79,7 +79,7 @@ type ScopedModel =
   | 'branch' | 'client' | 'jewelryTag' | 'salesInvoice' | 'role'
   | 'memoOut' | 'tagTemplate' | 'branchTransfer' | 'stockAudit'
   | 'account' | 'costCenter' | 'invoicePayment' | 'salesReturn' | 'oldGoldExchange'
-  | 'purchaseOrder' | 'purchaseRequisition' | 'goodsReceiptNote' | 'purchaseReturn'
+  | 'purchaseOrder' | 'purchaseRequisition' | 'goodsReceiptNote' | 'purchaseReturn' | 'supplierPayment'
   | 'repairJob' | 'hallmarkingBatch'
   // Phase 3 — full rollout
   | 'design' | 'costEstimate' | 'supplier' | 'metalStock' | 'stoneLot' | 'consumable'
@@ -106,7 +106,9 @@ type ScopedModel =
   // Returned-jewellery pipeline (Repair Register / Branch->HO custody)
   | 'repairCase' | 'repairTransfer'
   // Photography (Phase 1 — schema only)
-  | 'photographyStation' | 'stationCredential' | 'tagImage';
+  | 'photographyStation' | 'stationCredential' | 'tagImage'
+  // Offer management
+  | 'offer' | 'discountApproval';
 
 // Routed through tenantQuery (Form 1 — see tenantContext.ts) rather than a bare prisma call:
 // this is a read against a tenant-scoped table, so it follows the same one standard pattern as

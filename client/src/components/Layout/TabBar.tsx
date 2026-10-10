@@ -16,7 +16,7 @@ export function TabBar() {
       role="tablist"
       aria-label="Open pages"
       sx={{
-        display: 'flex', alignItems: 'flex-end', gap: 0.5, px: 1.5, pt: 0.25,
+        display: 'flex', alignItems: 'flex-end', gap: 0.5, px: { xs: 0.5, md: 1.5 }, pt: 0.25,
         overflowX: 'auto', scrollbarWidth: 'thin', bgcolor: 'action.hover',
         borderTop: '1px solid', borderColor: 'divider',
       }}
@@ -39,8 +39,8 @@ export function TabBar() {
               else if (e.key === 'Delete') { e.preventDefault(); closeTab(tab.id); }
             }}
             sx={{
-              display: 'flex', alignItems: 'center', gap: 0.5, pl: 1.25, pr: 0.25, height: 27,
-              flexShrink: 0, maxWidth: 200, cursor: 'pointer', userSelect: 'none',
+              display: 'flex', alignItems: 'center', gap: 0.5, pl: 1.25, pr: 0.25, height: { xs: 34, md: 27 },
+              flexShrink: 0, maxWidth: { xs: 150, md: 200 }, cursor: 'pointer', userSelect: 'none',
               borderRadius: '5px 5px 0 0',
               bgcolor: active ? 'background.paper' : 'transparent',
               borderTop: '2px solid', borderTopColor: active ? 'primary.main' : 'transparent',

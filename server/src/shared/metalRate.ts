@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../config/database';
 import { tenantQuery } from './tenantContext';
+import { businessDayString, dayToDbDate } from './businessDay';
 
 // Gold is quoted once a day as a 24K Gold rate and a 24K Old Gold rate; every other active GOLD karat is
 // DERIVED from those two on the server: base x that karat's KaratMaster purity / 99.9 (the master is the source
@@ -36,4 +37,27 @@ export async function resolveMetalRate(companyId: string, karat: string, date: D
     where: { companyId, karat, currency, date: { lte: date } },
     orderBy: { date: 'desc' },
   }));
+}
+
+export interface LiveMetalRate {
+  ratePerGram: number;
+  /** The date the rate was entered for (a @db.Date, as 'YYYY-MM-DD'). */
+  rateDate: string;
+  /** False when nobody has entered today's rate yet and an earlier day's rate is being used - callers must say so. */
+  isToday: boolean;
+}
+
+/**
+ * The sale-side metal rate for a karat: the latest rate entered on or before `asOf` (default now), with the date it
+ * belongs to and whether it is today's. The metal rate is the one LIVE element of a sale price - it is read here every
+ * time a piece is priced and never copied onto the tag. Returns null when no rate was ever entered (callers refuse to
+ * price rather than guess).
+ */
+export async function resolveLiveMetalRate(companyId: string, karat: string, asOf: Date | string = new Date(), currency = 'INR'): Promise<LiveMetalRate | null> {
+  // `asOf` is an instant or a 'YYYY-MM-DD' India day; "today" is the India day, never the server machine's.
+  const asOfDay = typeof asOf === 'string' ? asOf : businessDayString(asOf);
+  const row = await resolveMetalRate(companyId, karat, dayToDbDate(asOfDay), currency);
+  if (!row) return null;
+  const rateDate = row.date.toISOString().slice(0, 10);
+  return { ratePerGram: Number(row.ratePerGram), rateDate, isToday: rateDate === businessDayString(new Date()) };
 }

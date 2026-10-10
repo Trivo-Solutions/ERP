@@ -96,9 +96,9 @@ export function buildInvoiceContext(invoice: any, copyLabel = ''): InvoiceContex
     grossWeight: items.reduce((s, i) => s + i.grossWeight, 0),
     netWeight: items.reduce((s, i) => s + i.netWeight, 0),
     stoneWeight: items.reduce((s, i) => s + i.stoneWeight, 0),
-    makingCharge: items.reduce((s, i) => s + n(i.raw.makingCharge) * i.qty, 0),
-    stoneValue: items.reduce((s, i) => s + n(i.raw.stoneValue) * i.qty, 0),
-    metalValue: items.reduce((s, i) => (i.raw.rateType === 'FIXED' ? s : s + i.netWeight * n(i.raw.goldRate)), 0),
+    makingCharge: items.reduce((s, i) => s + lineSplit(i).mc, 0),
+    stoneValue: items.reduce((s, i) => s + lineSplit(i).stone, 0),
+    metalValue: items.reduce((s, i) => s + lineSplit(i).metalValue, 0),
   };
   return {
     inv: invoice, tax, client: invoice.client ?? {}, branch: invoice.branch ?? {},
@@ -275,8 +275,29 @@ function materialsOf(v: InvoiceItemView, stonesOnly: boolean): MaterialRow[] {
 }
 const joinLines = (xs: string[]) => xs.join('\n');
 
-// VA = value-addition: the line's making charge marked up by its wastage %.
-const vaOf = (v: InvoiceItemView) => n(v.raw.makingCharge) * v.qty * n(v.raw.wastagePercent) / 100;
+// How a line splits into metal / making charge (MC) / value addition (VA) / other materials - the one pricing rule: MC = metal
+// weight x MC rate, VA = a % of the METAL's value (never of MC or stones). A line billed from a material breakdown (every tagged
+// line, estimate lines) carries its own rows + MC/VA rates, so its split is read from there; any other line uses its stored
+// per-unit figures. (The stored makingCharge of a breakdown line is MC + VA together, so it is never printed as "MC".)
+interface LineSplit { metalValue: number; metalRate: number; mc: number; va: number; vaPercent: number; mcRate: number; stone: number }
+function lineSplit(v: InvoiceItemView): LineSplit {
+  const it = v.raw;
+  const bd = it.materialBreakdown;
+  if (bd && Array.isArray(bd.rows)) {
+    const metal = bd.rows.filter((r: any) => r.materialType === 'METAL');
+    const wt = metal.reduce((s: number, r: any) => s + n(r.weight), 0);
+    const metalValue = metal.reduce((s: number, r: any) => s + n(r.weight) * n(r.rate), 0);
+    const stone = bd.rows.filter((r: any) => r.materialType !== 'METAL').reduce((s: number, r: any) => s + n(r.weight) * n(r.rate), 0);
+    const mcRate = n(bd.mcRate), vaPercent = n(bd.vaPercent);
+    return { metalValue, metalRate: wt > 0 ? metalValue / wt : 0, mc: wt * mcRate, va: metalValue * vaPercent / 100, vaPercent, mcRate, stone };
+  }
+  const flat = it.rateType === 'FIXED';
+  const metalValue = flat ? 0 : v.netWeight * n(it.goldRate);
+  const mc = n(it.makingCharge) * v.qty;
+  const vaPercent = n(it.wastagePercent);
+  return { metalValue, metalRate: n(it.goldRate), mc, va: metalValue * vaPercent / 100, vaPercent, mcRate: v.netWeight > 0 ? mc / v.netWeight : 0, stone: n(it.stoneValue) * v.qty };
+}
+const vaOf = (v: InvoiceItemView) => lineSplit(v).va;
 
 function lineCell(field: string, v: InvoiceItemView, idx: number, ctx: InvoiceContext): string {
   const it = v.raw;
@@ -299,10 +320,10 @@ function lineCell(field: string, v: InvoiceItemView, idx: number, ctx: InvoiceCo
     case 'grossWeight': return WT(v.grossWeight);
     case 'stoneWeight': return WT(v.stoneWeight);
     case 'netWeight': return WT(v.netWeight);
-    case 'rate': return INR(it.goldRate);
-    case 'wastagePercent': return n(it.wastagePercent).toFixed(2);
-    case 'makingCharge': return INR(n(it.makingCharge) * v.qty);
-    case 'stoneValue': return INR(n(it.stoneValue) * v.qty);
+    case 'rate': return INR(lineSplit(v).metalRate);
+    case 'wastagePercent': return lineSplit(v).vaPercent.toFixed(2);
+    case 'makingCharge': return INR(lineSplit(v).mc);
+    case 'stoneValue': return INR(lineSplit(v).stone);
     case 'unitPrice': return INR(it.unitPrice);
     case 'lineDiscountAmount': return INR(it.lineDiscountAmount);
     case 'taxableValue': return INR(it.taxableValue);
@@ -317,9 +338,9 @@ function lineCell(field: string, v: InvoiceItemView, idx: number, ctx: InvoiceCo
     case 'totalPrice': return INR(it.totalPrice);
     case 'lineTotalWithTax': return INR(n(it.taxableValue) + n(it.lineTotalTax));
     case 'vaAmount': return INR(vaOf(v));
-    case 'makingWithVa': return INR(n(it.makingCharge) * v.qty + vaOf(v));
-    case 'makingRate': return v.netWeight > 0 ? INR((n(it.makingCharge) * v.qty) / v.netWeight) : '';
-    case 'metalValue': return it.rateType === 'FIXED' ? '' : INR(v.netWeight * n(it.goldRate));
+    case 'makingWithVa': return INR(lineSplit(v).mc + lineSplit(v).va);
+    case 'makingRate': return v.netWeight > 0 ? INR(lineSplit(v).mcRate) : '';
+    case 'metalValue': return lineSplit(v).metalValue > 0 || it.rateType !== 'FIXED' ? INR(lineSplit(v).metalValue) : '';
     case 'discountPercent': {
       const gross = n(it.totalPrice);
       return gross > 0 && n(it.lineDiscountAmount) > 0 ? n((n(it.lineDiscountAmount) / gross * 100).toFixed(2)).toFixed(2) : '';
@@ -352,8 +373,8 @@ function lineNumber(field: string, v: InvoiceItemView): number {
     case 'grossWeight': return v.grossWeight;
     case 'stoneWeight': return v.stoneWeight;
     case 'netWeight': return v.netWeight;
-    case 'makingCharge': return n(it.makingCharge) * v.qty;
-    case 'stoneValue': return n(it.stoneValue) * v.qty;
+    case 'makingCharge': return lineSplit(v).mc;
+    case 'stoneValue': return lineSplit(v).stone;
     case 'unitPrice': return n(it.unitPrice);
     case 'lineDiscountAmount': return n(it.lineDiscountAmount);
     case 'taxableValue': return n(it.taxableValue);
@@ -364,8 +385,8 @@ function lineNumber(field: string, v: InvoiceItemView): number {
     case 'totalPrice': return n(it.totalPrice);
     case 'lineTotalWithTax': return n(it.taxableValue) + n(it.lineTotalTax);
     case 'vaAmount': return vaOf(v);
-    case 'makingWithVa': return n(it.makingCharge) * v.qty + vaOf(v);
-    case 'metalValue': return it.rateType === 'FIXED' ? 0 : v.netWeight * n(it.goldRate);
+    case 'makingWithVa': return lineSplit(v).mc + lineSplit(v).va;
+    case 'metalValue': return lineSplit(v).metalValue;
     default: return 0;
   }
 }

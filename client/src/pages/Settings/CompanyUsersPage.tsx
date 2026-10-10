@@ -5,7 +5,7 @@ import {
   TextField, Chip, Switch, FormControlLabel, IconButton, FormGroup, Checkbox,
   Alert, InputAdornment, Tooltip,
 } from '@mui/material';
-import { Add, Edit, ContentCopy, Cancel } from '@mui/icons-material';
+import { Add, Edit, ContentCopy, Cancel, LockReset } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { useSnackbar } from 'notistack';
@@ -325,12 +325,43 @@ function EditMemberDialog({
   );
 }
 
+function ResetPasswordDialog({ member, onClose }: { member?: Member; onClose: () => void }) {
+  const { enqueueSnackbar } = useSnackbar();
+  const [password, setPassword] = useState('');
+  const mutation = useMutation({
+    mutationFn: () => apiPost(`/auth/users/${member!.id}/reset-password`, { password }),
+    onSuccess: () => { enqueueSnackbar('Password reset', { variant: 'success' }); setPassword(''); onClose(); },
+    onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed to reset password', { variant: 'error' }),
+  });
+  if (!member) return null;
+  return (
+    <Dialog open onClose={onClose} maxWidth="xs" fullWidth>
+      <form onSubmit={(e) => { e.preventDefault(); if (password.length >= 8) mutation.mutate(); }}>
+        <DialogTitle fontWeight={700}>Reset password — {member.user.name}</DialogTitle>
+        <DialogContent sx={{ pt: 2 }}>
+          <Alert severity="info" sx={{ mb: 2 }}>Set a new password and share it with {member.user.email} yourself.</Alert>
+          <TextField
+            fullWidth autoFocus label="New password" type="password" value={password}
+            onChange={(e) => setPassword(e.target.value)} autoComplete="new-password"
+            helperText="At least 8 characters"
+          />
+        </DialogContent>
+        <DialogActions sx={{ p: 2.5 }}>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button type="submit" variant="contained" disabled={password.length < 8 || mutation.isPending}>Reset</Button>
+        </DialogActions>
+      </form>
+    </Dialog>
+  );
+}
+
 export function CompanyUsersPage() {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteResult, setInviteResult] = useState<{ token: string; email: string } | null>(null);
   const [editMember, setEditMember] = useState<Member | undefined>();
+  const [resetMember, setResetMember] = useState<Member | undefined>();
 
   const { data: members, isLoading: loadingMembers } = useQuery({
     queryKey: ['company-users'],
@@ -390,9 +421,14 @@ export function CompanyUsersPage() {
                   </TableCell>
                   <TableCell sx={{ fontSize: 12 }}>{m.lastLoginAt ? new Date(m.lastLoginAt).toLocaleString('en-IN') : 'Never'}</TableCell>
                   <TableCell align="right">
-                    <IconButton size="small" onClick={() => setEditMember(m)}>
+                    <IconButton size="small" title="Edit" onClick={() => setEditMember(m)}>
                       <Edit fontSize="small" />
                     </IconButton>
+                    {!m.isDefault && (
+                      <IconButton size="small" title="Reset password" onClick={() => setResetMember(m)}>
+                        <LockReset fontSize="small" />
+                      </IconButton>
+                    )}
                   </TableCell>
                 </TableRow>
               ))}
@@ -459,6 +495,7 @@ export function CompanyUsersPage() {
         }}
       />
       <InviteLinkDialog result={inviteResult} onClose={() => setInviteResult(null)} />
+      <ResetPasswordDialog member={resetMember} onClose={() => setResetMember(undefined)} />
       <EditMemberDialog
         open={!!editMember}
         member={editMember}

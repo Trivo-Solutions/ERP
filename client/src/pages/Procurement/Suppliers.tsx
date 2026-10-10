@@ -9,7 +9,7 @@ import { Add, TrendingUp, LocalShipping, Scale, CurrencyRupee } from '@mui/icons
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm, Controller } from 'react-hook-form';
 import { useSnackbar } from 'notistack';
-import { apiGet, apiPost } from '../../api/client';
+import { apiGet, apiPost, apiDelete } from '../../api/client';
 import { PageHeader } from '../../components/common/PageHeader';
 import { usePermissions } from '../../hooks/usePermissions';
 import { SelectField } from '../../components/fields/SelectField';
@@ -131,6 +131,85 @@ function VendorEvaluation() {
   );
 }
 
+function SupplierPaymentsDialog({ supplier, onClose }: { supplier: any; onClose: () => void }) {
+  const { enqueueSnackbar } = useSnackbar();
+  const qc = useQueryClient();
+  const { hasPermission } = usePermissions();
+  const [reversing, setReversing] = useState<any>(null);
+  const [reason, setReason] = useState('');
+  const { data: payments, isLoading } = useQuery({
+    queryKey: ['supplier-payments', supplier?.id],
+    queryFn: () => apiGet<any[]>(`/procurement/suppliers/${supplier.id}/payments`),
+    enabled: !!supplier,
+  });
+  const reverse = useMutation({
+    mutationFn: () => apiPost(`/procurement/suppliers/${supplier.id}/payments/${reversing.id}/reverse`, { reason }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['supplier-payments', supplier.id] });
+      qc.invalidateQueries({ queryKey: ['suppliers'] });
+      setReversing(null); setReason('');
+      enqueueSnackbar('Payment reversed', { variant: 'success' });
+    },
+    onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed to reverse', { variant: 'error' }),
+  });
+  return (
+    <Dialog open={!!supplier} onClose={onClose} maxWidth="md" fullWidth>
+      <DialogTitle fontWeight={700}>Payments — {supplier?.name}</DialogTitle>
+      <DialogContent>
+        <Box sx={{ overflowX: 'auto' }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>No.</TableCell><TableCell>Date</TableCell><TableCell>Mode</TableCell>
+                <TableCell align="right">Amount</TableCell><TableCell>Status</TableCell><TableCell />
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {isLoading ? (
+                <TableRow><TableCell colSpan={6} align="center" sx={{ py: 3 }}>Loading...</TableCell></TableRow>
+              ) : (payments ?? []).map((p: any) => (
+                <TableRow key={p.id}>
+                  <TableCell sx={{ fontFamily: 'monospace' }}>{p.paymentNumber}</TableCell>
+                  <TableCell>{new Date(p.paymentDate).toLocaleDateString('en-IN')}</TableCell>
+                  <TableCell>{p.mode}</TableCell>
+                  <TableCell align="right" sx={{ fontFamily: 'monospace' }}>{fmt(Number(p.amount))}</TableCell>
+                  <TableCell>
+                    {p.reversedAt
+                      ? <Chip size="small" label="Reversed" title={p.reversalReason ?? ''} />
+                      : <Chip size="small" color="success" label="Paid" />}
+                  </TableCell>
+                  <TableCell align="right">
+                    {!p.reversedAt && hasPermission('supplierPayment:reverse') && (
+                      <Button size="small" color="error" onClick={() => { setReversing(p); setReason(''); }}>Reverse</Button>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+              {!isLoading && (payments ?? []).length === 0 && (
+                <TableRow><TableCell colSpan={6} align="center" sx={{ py: 3 }}>No payments yet</TableCell></TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </Box>
+        {reversing && (
+          <Box sx={{ mt: 2 }}>
+            <Typography variant="body2" sx={{ mb: 1 }}>
+              Reverse <strong>{reversing.paymentNumber}</strong> ({fmt(Number(reversing.amount))})? The amount goes back onto what you owe this supplier
+              and an opposite ledger entry is posted. The original payment stays on record.
+            </Typography>
+            <TextField fullWidth autoFocus size="small" label="Reason (required)" value={reason} onChange={(e) => setReason(e.target.value)} />
+            <Box sx={{ mt: 1, display: 'flex', gap: 1, justifyContent: 'flex-end' }}>
+              <Button onClick={() => setReversing(null)}>Cancel</Button>
+              <Button color="error" variant="contained" disabled={!reason.trim() || reverse.isPending} onClick={() => reverse.mutate()}>Reverse payment</Button>
+            </Box>
+          </Box>
+        )}
+      </DialogContent>
+      <DialogActions sx={{ p: 2.5 }}><Button onClick={onClose}>Close</Button></DialogActions>
+    </Dialog>
+  );
+}
+
 // ─── Supplier List ────────────────────────────────────────────────────────────
 
 function SupplierList() {
@@ -140,10 +219,25 @@ function SupplierList() {
   const { hasPermission } = usePermissions();
   const [createOpen, setCreateOpen] = useState(false);
   const [paySupplier, setPaySupplier] = useState<any>(null);
+  const [editSupplier, setEditSupplier] = useState<any>(null);
+  const [paymentsSupplier, setPaymentsSupplier] = useState<any>(null);
+  const [deleteSupplier, setDeleteSupplier] = useState<any>(null);
+  const canDeactivate = hasPermission('supplier:deactivate');
+
+  const activeMutation = useMutation({
+    mutationFn: (s: any) => apiPost(`/procurement/suppliers/${s.id}/${s.isActive ? 'deactivate' : 'reactivate'}`),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['suppliers'] }); enqueueSnackbar('Supplier updated', { variant: 'success' }); },
+    onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' }),
+  });
+  const deleteMutation = useMutation({
+    mutationFn: (s: any) => apiDelete(`/procurement/suppliers/${s.id}`),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['suppliers'] }); setDeleteSupplier(null); enqueueSnackbar('Supplier deleted', { variant: 'success' }); },
+    onError: (e: any) => { setDeleteSupplier(null); enqueueSnackbar(e.response?.data?.error ?? 'Failed to delete', { variant: 'error' }); },
+  });
 
   const { data: suppliers, isLoading } = useQuery({
-    queryKey: ['suppliers'],
-    queryFn: () => apiGet<any[]>('/procurement/suppliers'),
+    queryKey: ['suppliers', canDeactivate],
+    queryFn: () => apiGet<any[]>(`/procurement/suppliers${canDeactivate ? '?includeInactive=true' : ''}`),
   });
 
   const payForm = useForm({
@@ -166,7 +260,7 @@ function SupplierList() {
   return (
     <>
       <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 2 }}>
-        {hasPermission('po:create') && (
+        {(hasPermission('po:create') || hasPermission('supplier:create')) && (
           <Button variant="contained" startIcon={<Add />} onClick={() => setCreateOpen(true)}>Add Supplier</Button>
         )}
       </Box>
@@ -191,7 +285,7 @@ function SupplierList() {
             ) : (suppliers ?? []).map((s: any) => (
               <TableRow key={s.id} hover>
                 <TableCell sx={{ fontFamily: 'monospace', fontWeight: 700, color: '#44C47A', fontSize: 12 }}>{s.supplierCode}</TableCell>
-                <TableCell sx={{ fontWeight: 600 }}>{s.name}</TableCell>
+                <TableCell sx={{ fontWeight: 600 }}>{s.name}{!s.isActive && <Chip label="Inactive" size="small" sx={{ ml: 1 }} />}</TableCell>
                 <TableCell><Chip label={s.type} size="small" /></TableCell>
                 <TableCell sx={{ fontFamily: 'monospace', fontSize: 12 }}>{s.gstNumber ?? '—'}</TableCell>
                 <TableCell>{s.phone ?? '—'}</TableCell>
@@ -205,8 +299,16 @@ function SupplierList() {
                     <Button size="small" variant="outlined" sx={{ mr: 1 }} onClick={() => setPaySupplier(s)}>Pay</Button>
                   )}
                   {/* J4-D1: supplier-ledger now requires report:financial_view, not the broader report:view. */}
-                  {hasPermission('report:financial_view') && (
+                  {hasPermission('report:supplier_ledger') && (
                     <Button size="small" onClick={() => navigate(`/finance/supplier-ledger/${s.id}`)}>Statement</Button>
+                  )}
+                  {(hasPermission("po:view") || hasPermission("supplierPayment:view")) && <Button size="small" onClick={() => setPaymentsSupplier(s)}>Payments</Button>}
+                  {hasPermission('supplier:edit') && <Button size="small" onClick={() => setEditSupplier(s)}>Edit</Button>}
+                  {canDeactivate && (
+                    <Button size="small" onClick={() => activeMutation.mutate(s)}>{s.isActive ? 'Deactivate' : 'Reactivate'}</Button>
+                  )}
+                  {hasPermission('supplier:delete') && (
+                    <Button size="small" color="error" onClick={() => setDeleteSupplier(s)}>Delete</Button>
                   )}
                 </TableCell>
               </TableRow>
@@ -217,6 +319,22 @@ function SupplierList() {
       </Card>
 
       <AddSupplierDialog open={createOpen} onClose={() => setCreateOpen(false)} />
+      <SupplierPaymentsDialog supplier={paymentsSupplier} onClose={() => setPaymentsSupplier(null)} />
+      <AddSupplierDialog open={!!editSupplier} supplier={editSupplier} onClose={() => setEditSupplier(null)} />
+
+      <Dialog open={!!deleteSupplier} onClose={() => setDeleteSupplier(null)} maxWidth="xs" fullWidth>
+        <DialogTitle fontWeight={700}>Delete supplier?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            Permanently delete <strong>{deleteSupplier?.name}</strong>? Only a supplier with no orders, receipts,
+            payments or balance can be deleted — otherwise deactivate it instead.
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ p: 2.5 }}>
+          <Button onClick={() => setDeleteSupplier(null)}>Cancel</Button>
+          <Button color="error" variant="contained" disabled={deleteMutation.isPending} onClick={() => deleteMutation.mutate(deleteSupplier)}>Delete</Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Money out to a supplier: Dr Accounts Payable / Cr Cash-or-Bank, reduces the payable above. */}
       <Dialog open={!!paySupplier} onClose={() => setPaySupplier(null)} maxWidth="xs" fullWidth>

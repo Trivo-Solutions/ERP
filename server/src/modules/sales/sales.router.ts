@@ -60,7 +60,7 @@ salesRouter.post('/memos/:id/convert', requirePermission('memo:manage'), async (
 });
 
 // H1: Sales register — every invoice (retail + wholesale) in a date range.
-salesRouter.get('/reports/register', requirePermission('report:view'), async (req: Request, res: Response) => {
+salesRouter.get('/reports/register', requirePermission('report:sales_register'), async (req: Request, res: Response) => {
   const fromStr = req.query.from as string ?? new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
   const toStr = req.query.to as string ?? new Date().toISOString();
   const data = await svc.getSalesRegister(req.tenant!, {
@@ -80,10 +80,10 @@ const salesReportFilters = (req: Request) => {
     salesPersonId: str('salesPersonId'), paymentStatus: str('paymentStatus'), status: str('status'),
   };
 };
-salesRouter.get('/reports/sales-summary', requirePermission('report:view'), async (req: Request, res: Response) => {
+salesRouter.get('/reports/sales-summary', requirePermission('report:sales_report'), async (req: Request, res: Response) => {
   res.json({ success: true, data: await salesReportSvc.getSalesSummary(req.tenant!, salesReportFilters(req)) });
 });
-salesRouter.get('/reports/sales-detailed', requirePermission('report:view'), async (req: Request, res: Response) => {
+salesRouter.get('/reports/sales-detailed', requirePermission('report:sales_report'), async (req: Request, res: Response) => {
   res.json({ success: true, data: await salesReportSvc.getSalesDetailed(req.tenant!, salesReportFilters(req)) });
 });
 

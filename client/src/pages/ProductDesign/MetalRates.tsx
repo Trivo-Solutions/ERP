@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost } from '../../api/client';
 import { PageHeader } from '../../components/common/PageHeader';
+import { useAuthStore } from '../../store/auth.store';
 
 const todayStr = () => {
   const d = new Date();
@@ -19,6 +20,8 @@ const fmt = (n: any) => `₹${Number(n).toLocaleString('en-IN', { minimumFractio
 export function MetalRates() {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
+  // Entering rates is its own grant (rate:update); the server refuses everyone else regardless of this button.
+  const canUpdateRates = useAuthStore((s) => s.hasPermission('rate:update'));
   const [date, setDate] = useState(todayStr());
   const [source, setSource] = useState('MANUAL');
   // Edit mode: one switch opens every purity. karat -> typed value (pre-filled with the stored rate).
@@ -112,7 +115,7 @@ export function MetalRates() {
               <option value="API">API Feed</option>
             </TextField>
             <Box sx={{ flex: 1 }} />
-            {!editing ? (
+            {!canUpdateRates ? null : !editing ? (
               <Button variant="outlined" startIcon={<Edit />} onClick={startEdit} disabled={isLoading || sheet.length === 0}>Edit</Button>
             ) : (
               <>

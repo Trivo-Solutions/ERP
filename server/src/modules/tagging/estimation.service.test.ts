@@ -4,7 +4,7 @@ import { AppError } from '../../middleware/error';
 import {
   getTagForEstimation, createTagEstimate, getTagEstimate, listTagEstimatesForTag,
 } from './estimation.service';
-import { createTestTenant, cleanupTestTenant, TestTenant } from '../../test/fixtures';
+import { seedMetalRate, createTestTenant, cleanupTestTenant, TestTenant } from '../../test/fixtures';
 
 describe('Estimation (per-tag price quote)', () => {
   const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -19,6 +19,7 @@ describe('Estimation (per-tag price quote)', () => {
 
   beforeAll(async () => {
     tenant = await createTestTenant(`EST${suffix}`, []);
+    await seedMetalRate(tenant.company.id, '22K', 5500);
     userId = tenant.user.id;
     branchId = tenant.branch.id;
 

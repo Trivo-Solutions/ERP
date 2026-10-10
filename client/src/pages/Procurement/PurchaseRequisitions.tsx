@@ -8,7 +8,7 @@ import { Add, Close, CheckCircle, Cancel, SwapHoriz } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm, Controller, useFieldArray, useWatch } from 'react-hook-form';
 import { useSnackbar } from 'notistack';
-import { apiGet, apiPost } from '../../api/client';
+import { apiGet, apiPost, apiDelete } from '../../api/client';
 import { PageHeader, PageActions } from '../../components/common/PageHeader';
 import { StatusChip } from '../../components/common/StatusChip';
 import { useAuthStore } from '../../store/auth.store';
@@ -205,8 +205,19 @@ function PRDrawer({ prId, onClose }: { prId: string; onClose: () => void }) {
     onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed', { variant: 'error' }),
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: () => apiDelete(`/procurement/requisitions/${prId}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['prs'] });
+      enqueueSnackbar('Requisition deleted', { variant: 'success' });
+      onClose();
+    },
+    onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed to delete', { variant: 'error' }),
+  });
+
   const canApprove = hasPermission('po:approve');
   const canCreate = hasPermission('po:create');
+  const canDelete = hasPermission('po:delete');
 
   return (
     <Drawer anchor="right" open={!!prId} onClose={onClose} PaperProps={{ sx: { width: 640 } }}>
@@ -292,6 +303,12 @@ function PRDrawer({ prId, onClose }: { prId: string; onClose: () => void }) {
                 <Button variant="contained" startIcon={<CheckCircle />}
                   disabled={submitMutation.isPending}
                   onClick={() => submitMutation.mutate()}>Submit for Approval</Button>
+              )}
+              {pr.status === 'DRAFT' && canDelete && (
+                <Button variant="outlined" color="error" disabled={deleteMutation.isPending}
+                  onClick={() => { if (window.confirm(`Delete requisition ${pr.prNumber}? This cannot be undone.`)) deleteMutation.mutate(); }}>
+                  Delete
+                </Button>
               )}
               {pr.status === 'SUBMITTED' && canApprove && (
                 <>

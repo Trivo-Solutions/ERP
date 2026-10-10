@@ -62,7 +62,7 @@ describe('HTTP: deleting master rows', () => {
     const cat2 = (await a.post('/masters/categories', { code: 'TAGCAT', name: 'Tag Cat' })).body.data;
     const stockType = (await a.get('/masters/stock-types')).body.data[0].id;
     const tag = await a.post('/tagging/tags', {
-      branchId: branchA, name: 'Piece', metalType: 'GOLD', metalKarat: '22K', grossWeight: 5, netWeight: 5,
+      branchId: branchA, name: 'Piece', metalType: 'GOLD', metalKarat: '22K', grossWeight: 5, netWeight: 5, saleMcRate: 0, saleVaPercent: 0,
       stockTypeId: stockType, categoryId: cat2.id,
     });
     expect(tag.status).toBe(201);

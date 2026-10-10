@@ -25,7 +25,7 @@ taggingRouter.get('/branches/stock-summary', requirePermission('tag:view'), asyn
 });
 
 // H2: stock on hand, by branch x category.
-taggingRouter.get('/reports/stock-on-hand', requirePermission('report:view'), async (req: Request, res: Response) => {
+taggingRouter.get('/reports/stock-on-hand', requirePermission('report:stock_on_hand'), async (req: Request, res: Response) => {
   const data = await svc.getStockOnHand(req.tenant!.companyId, {
     branchId: req.query.branchId as string | undefined,
     categoryId: req.query.categoryId as string | undefined,
@@ -34,7 +34,7 @@ taggingRouter.get('/reports/stock-on-hand', requirePermission('report:view'), as
 });
 
 // Stock Book: one row per tag, branch-scoped to the caller's own grants (see getStockBook).
-taggingRouter.get('/reports/stock-book', requirePermission('report:view'), async (req: Request, res: Response) => {
+taggingRouter.get('/reports/stock-book', requirePermission('report:stock_book'), async (req: Request, res: Response) => {
   const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
   const date = (v: unknown) => {
     const s = str(v); if (!s) return undefined;
@@ -50,7 +50,7 @@ taggingRouter.get('/reports/stock-book', requirePermission('report:view'), async
 });
 
 // Barcode history: every recorded change to every tag (see tagHistory.service.ts). Branch-scoped like the Stock Book.
-taggingRouter.get('/reports/tag-history', requirePermission('report:view'), async (req: Request, res: Response) => {
+taggingRouter.get('/reports/tag-history', requirePermission('report:barcode_history'), async (req: Request, res: Response) => {
   const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
   const date = (v: unknown) => {
     const s = str(v); if (!s) return undefined;
@@ -67,7 +67,7 @@ taggingRouter.get('/reports/tag-history', requirePermission('report:view'), asyn
 });
 
 // H3: dead stock / ageing.
-taggingRouter.get('/reports/dead-stock', requirePermission('report:view'), async (req: Request, res: Response) => {
+taggingRouter.get('/reports/dead-stock', requirePermission('report:dead_stock'), async (req: Request, res: Response) => {
   const asOfStr = req.query.asOf as string | undefined;
   const data = await svc.getDeadStock(req.tenant!.companyId, asOfStr ? new Date(asOfStr) : undefined);
   res.json({ success: true, data });
@@ -129,6 +129,7 @@ taggingRouter.get('/tags/:id/preview-values', requirePermission('tag:view'), asy
 });
 
 taggingRouter.post('/tags', requirePermission('tag:create'), async (req: Request, res: Response) => {
+  await svc.assertTagSaleRatesForSave(req.tenant!, req.body ?? {}, { partial: false });
   const tag = await svc.createTag(req.tenant!, req.body, req.user!.userId);
   res.status(201).json({ success: true, data: tag });
 });
@@ -136,6 +137,7 @@ taggingRouter.post('/tags', requirePermission('tag:create'), async (req: Request
 // Corrects a tag's own details after the fact — not a stock movement, so it's gated the same as
 // creating/retiring a tag (tag:create) rather than needing its own permission.
 taggingRouter.patch('/tags/:id', requirePermission('tag:create'), async (req: Request, res: Response) => {
+  await svc.assertTagSaleRatesForSave(req.tenant!, req.body ?? {}, { partial: true });
   const tag = await svc.updateTag(req.params.id, req.body, req.tenant!, req.user!.userId);
   res.json({ success: true, data: tag });
 });

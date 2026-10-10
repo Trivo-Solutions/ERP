@@ -5,7 +5,9 @@ import { assertSubCategoryForCategory } from '../../shared/subCategory';
 import { createAuditEntry } from '../../middleware/audit';
 import { FINISHED_GOODS_MATERIAL_TYPE } from '../../shared/constants';
 import { isValidKarat } from '../../shared/karatMaster';
-import { resolveMetalRate } from '../../shared/metalRate';
+import { resolveMetalRate, resolveLiveMetalRate } from '../../shared/metalRate';
+import { pickMakingCharge } from '../../shared/makingChargeLookup';
+import { liveValueByKey, liveSaleValue, loadLiveRates, LIVE_VALUE_TAG_SELECT } from '../../shared/liveSaleValue';
 import { resolveSupplierStateCode, splitInputGst, round2, resolveBuyerRegistration } from '../../shared/inputGst';
 import { resolvePriceMaster } from '../../shared/priceMaster';
 import { allocateFromLot } from '../../shared/purchaseLot';
@@ -96,6 +98,8 @@ export async function updateBranch(id: string, companyId: string, data: {
 const STOCK_STATUSES = ['IN_STOCK', 'ON_APPROVAL', 'TRANSFERRED'] as const;
 
 export async function getBranchStockSummary(companyId: string) {
+  // Sale value is LIVE (today's metal rate on the pieces' own stored rates); cost is what was paid. See shared/liveSaleValue.ts.
+  const live = await liveValueByKey(companyId, { status: 'IN_STOCK' }, (t) => t.branchId);
   const [branches, grouped] = await Promise.all([
     tenantQuery(companyId, (_tx) => _tx.branch.findMany({ where: { companyId, isActive: true }, orderBy: { name: 'asc' } })),
     tenantQuery(companyId, (_tx) => _tx.jewelryTag.groupBy({
@@ -113,7 +117,8 @@ export async function getBranchStockSummary(companyId: string) {
       branchId: b.id, branchCode: b.branchCode, branchName: b.name,
       inStock: {
         count: inStock?._count._all ?? 0,
-        sellingValue: Number(inStock?._sum.sellingPrice ?? 0),
+        sellingValue: Math.round((live.get(b.id)?.value ?? 0) * 100) / 100,
+        unpricedCount: live.get(b.id)?.unpriced ?? 0,
         costValue: Number(inStock?._sum.costPrice ?? 0),
         grossWeight: Number(inStock?._sum.grossWeight ?? 0),
       },
@@ -128,6 +133,12 @@ export async function getBranchStockSummary(companyId: string) {
 // "what could I sell right now," so ON_APPROVAL/TRANSFERRED pieces (spoken for or in transit)
 // don't belong in it.
 export async function getStockOnHand(companyId: string, filters: { branchId?: string; categoryId?: string } = {}) {
+  const liveWhere = {
+    status: 'IN_STOCK',
+    ...(filters.branchId && { branchId: filters.branchId }),
+    ...(filters.categoryId && { categoryId: filters.categoryId }),
+  };
+  const live = await liveValueByKey(companyId, liveWhere, (t) => `${t.branchId}|${t.categoryId ?? ''}`);
   const [branches, categories, grouped] = await Promise.all([
     tenantQuery(companyId, (_tx) => _tx.branch.findMany({ where: { companyId, isActive: true }, orderBy: { name: 'asc' } })),
     tenantQuery(companyId, (_tx) => _tx.productCategory.findMany({ where: { companyId }, orderBy: { name: 'asc' } })),
@@ -153,7 +164,8 @@ export async function getStockOnHand(companyId: string, filters: { branchId?: st
       branchId: g.branchId, branchName: branchById.get(g.branchId)!.name,
       categoryId: g.categoryId, categoryName: g.categoryId ? categoryById.get(g.categoryId)?.name ?? 'Unknown' : 'Uncategorized',
       count: g._count._all,
-      sellingValue: Number(g._sum.sellingPrice ?? 0),
+      sellingValue: Math.round((live.get(`${g.branchId}|${g.categoryId ?? ''}`)?.value ?? 0) * 100) / 100,
+      unpricedCount: live.get(`${g.branchId}|${g.categoryId ?? ''}`)?.unpriced ?? 0,
       costValue: Number(g._sum.costPrice ?? 0),
       grossWeight: Number(g._sum.grossWeight ?? 0),
     }))
@@ -164,6 +176,7 @@ export async function getStockOnHand(companyId: string, filters: { branchId?: st
     totals: {
       count: rows.reduce((s, r) => s + r.count, 0),
       sellingValue: rows.reduce((s, r) => s + r.sellingValue, 0),
+      unpricedCount: rows.reduce((s, r) => s + r.unpricedCount, 0),
       costValue: rows.reduce((s, r) => s + r.costValue, 0),
       grossWeight: rows.reduce((s, r) => s + r.grossWeight, 0),
     },
@@ -181,18 +194,19 @@ export async function getDeadStock(companyId: string, asOfDate?: Date) {
   const tags = await tenantQuery(companyId, (_tx) => _tx.jewelryTag.findMany({
     where: { companyId, status: 'IN_STOCK' },
     select: {
-      id: true, tagNumber: true, name: true, sellingPrice: true, costPrice: true, updatedAt: true,
+      id: true, tagNumber: true, name: true, costPrice: true, updatedAt: true, ...LIVE_VALUE_TAG_SELECT,
       branch: { select: { name: true } },
       category: { select: { name: true } },
     },
   }));
+  const liveRates = await loadLiveRates(companyId, tags.map((t) => t.metalKarat));
 
   const rows = tags.map((t) => {
     const daysInStock = Math.floor((cutoff.getTime() - new Date(t.updatedAt).getTime()) / 86_400_000);
     return {
       id: t.id, tagNumber: t.tagNumber, name: t.name,
       branchName: t.branch.name, categoryName: t.category?.name ?? 'Uncategorized',
-      sellingValue: Number(t.sellingPrice), costValue: Number(t.costPrice),
+      sellingValue: liveSaleValue(t, liveRates) ?? 0, priced: liveSaleValue(t, liveRates) !== null, costValue: Number(t.costPrice),
       daysInStock,
       bucket: daysInStock <= 90 ? '0-90' : daysInStock <= 180 ? '91-180' : daysInStock <= 365 ? '181-365' : '365+',
     };
@@ -268,7 +282,8 @@ export async function getStockBook(ctx: TenantContext, filters: {
       collection: { select: { name: true } },
       stockType: { select: { name: true } },
       manufacturer: { select: { name: true } },
-      materials: { select: { materialType: true, weight: true, pieces: true } },
+      saleMcRate: true, saleVaPercent: true,
+      materials: { select: { materialType: true, weight: true, pieces: true, saleRate: true } },
     },
     orderBy: [{ tagNumber: 'asc' }],
     take: STOCK_BOOK_LIMIT + 1,
@@ -277,6 +292,7 @@ export async function getStockBook(ctx: TenantContext, filters: {
   if (truncated) tags.pop();
 
   const now = Date.now();
+  const liveRates = await loadLiveRates(ctx.companyId, tags.map((t) => t.metalKarat));
   const rows = tags.map((t) => {
     // Diamonds and coloured stones are the two stone columns a jeweller reads; anything else non-metal
     // (a plain "STONE" row, pearls…) counts with the coloured stones. Weights are already carats.
@@ -298,7 +314,8 @@ export async function getStockBook(ctx: TenantContext, filters: {
       qty: 1,
       grossWeight: Number(t.grossWeight), netWeight: Number(t.netWeight), stoneWeight: Number(t.stoneWeight),
       diaWt: Math.round(diaWt * 1000) / 1000, csWt: Math.round(csWt * 1000) / 1000, stonePieces,
-      costPrice: Number(t.costPrice), sellingPrice: Number(t.sellingPrice),
+      // Cost is what was paid; the sale figure is LIVE (today's metal rate on the piece's own stored rates), 0 + priced:false when it cannot be priced.
+      costPrice: Number(t.costPrice), sellingPrice: liveSaleValue(t, liveRates) ?? 0, priced: liveSaleValue(t, liveRates) !== null,
       taggedOn: t.createdAt, updatedAt: t.updatedAt,
       // Days since the status last changed — same updatedAt proxy (and caveat) as getDeadStock.
       daysInStatus: Math.floor((now - new Date(t.updatedAt).getTime()) / 86_400_000),
@@ -391,7 +408,10 @@ export async function getTag(ctx: TenantContext, id: string) {
   if (!tag || tag.companyId !== ctx.companyId || !canAccessBranch(ctx, tag.branchId)) {
     throw new AppError('Tag not found', 404);
   }
-  return tag;
+  // Today's price for the piece (live gold + its own stored rates); null when it cannot be priced. `sellingPrice` stays the
+  // figure from the day it was tagged.
+  const liveRates = await loadLiveRates(ctx.companyId, [tag.metalKarat]);
+  return { ...tag, liveSellingPrice: liveSaleValue(tag, liveRates) };
 }
 
 /**
@@ -439,6 +459,29 @@ async function withLotComponentRates<T extends { materialType: string; stoneGrad
     if (rate === null) return m;
     return { ...m, costRate: rate, costAmount: Math.round((Number(m.weight) * rate + Number.EPSILON) * 100) / 100 };
   }));
+}
+
+/**
+ * The entry-point rule for tagging (POST/PATCH /tags): a piece may only be saved with its sale rates set - the making-charge
+ * rate, the VA %, a sale rate on every non-metal row (or a stone grade the price master prices it from) - and, when it carries
+ * metal, with a metal rate on file for its karat (gold is priced live from that table). Blank is refused, never read as 0;
+ * an explicit 0 is a real rate. `partial` (an edit) only checks the fields the request actually sends.
+ */
+export async function assertTagSaleRatesForSave(ctx: TenantContext, body: any, opts: { partial: boolean }) {
+  const isNum = (v: unknown) => (typeof v === 'number' || (typeof v === 'string' && v.trim() !== '')) && Number.isFinite(Number(v)) && Number(v) >= 0;
+  const missing: string[] = [];
+  if (!opts.partial || 'saleMcRate' in body) { if (!isNum(body.saleMcRate)) missing.push('making charge rate'); }
+  if (!opts.partial || 'saleVaPercent' in body) { if (!isNum(body.saleVaPercent)) missing.push('VA %'); }
+  const rows: any[] = Array.isArray(body.materials) ? body.materials : [];
+  for (const m of rows) {
+    if (m?.materialType !== 'METAL' && !isNum(m?.saleRate) && !isNum(m?.saleAmount) && !m?.stoneGradeId) missing.push(`${m?.code ?? 'material'} sale rate`);
+  }
+  if (missing.length > 0) throw new AppError(`Sale rates are required before a tag is saved - missing: ${missing.join(', ')}`, 400);
+  if (rows.some((m) => m?.materialType === 'METAL') && body.metalKarat) {
+    if (!(await resolveLiveMetalRate(ctx.companyId, String(body.metalKarat)))) {
+      throw new AppError(`No metal rate has been entered for ${body.metalKarat} - enter it under Metal Rates first`, 409);
+    }
+  }
 }
 
 export async function createTag(ctx: TenantContext, data: {
@@ -859,6 +902,18 @@ export async function createTagFromGrnItem(data: {
   }
   sellingPrice = sellingPrice ?? 0;
 
+  // The PO/GRN making charge and VA are what was PAID (cost) and never become sale rates. The piece's SALE making-charge rate
+  // and VA % come from the MakingCharge master for its karat + category + make type; with no matching master row they stay
+  // unset, and the piece cannot be estimated or sold until they are set on the tag (assertTagPriceable).
+  const mcRows = await tenantQuery(ctx.companyId, (_tx) => _tx.makingCharge.findMany({
+    where: { companyId: ctx.companyId, isActive: true }, orderBy: { effectiveDate: 'desc' },
+  }));
+  const masterCharge = pickMakingCharge(mcRows, data.categoryId, effectiveKarat, data.makeType ?? 'GOLD');
+  const saleMcRate = masterCharge
+    ? (masterCharge.makingChargeType === 'PER_GRAM' ? Number(masterCharge.makingCharge) : netWeight > 0 ? Number(masterCharge.makingCharge) / netWeight : undefined)
+    : undefined;
+  const saleVaPercent = masterCharge ? Number(masterCharge.saleWastagePercent) : undefined;
+
   // Layer 2: master ids are company-owned — sub-category/collection are checked here, and the
   // stock type/category are fetched scoped to the company just below.
   await assertSubCategoryForCategory(ctx.companyId, data.categoryId, data.subCategoryId, true);
@@ -911,6 +966,8 @@ export async function createTagFromGrnItem(data: {
           settingType: data.settingType,
           costPrice,
           sellingPrice,
+          saleMcRate,
+          saleVaPercent,
           grnItemId: data.grnItemId,
           notes: data.notes,
           stockTypeId: data.stockTypeId,
@@ -1138,7 +1195,7 @@ export async function searchTags(ctx: TenantContext, query: string, branchId?: s
   const allowedBranchIds = branchId
     ? (canAccessBranch(ctx, branchId) ? [branchId] : ['__none__'])
     : (ctx.branchAccess.allBranches ? undefined : ctx.branchAccess.branchIds);
-  return tenantQuery(ctx.companyId, (_tx) => _tx.jewelryTag.findMany({
+  const rows = await tenantQuery(ctx.companyId, (_tx) => _tx.jewelryTag.findMany({
     where: {
       companyId: ctx.companyId,
       ...(allowedBranchIds && { branchId: { in: allowedBranchIds } }),
@@ -1149,10 +1206,16 @@ export async function searchTags(ctx: TenantContext, query: string, branchId?: s
         { huid: { contains: query, mode: 'insensitive' } },
       ],
     },
-    include: { branch: { select: { name: true } }, category: { select: { id: true, name: true } } },
+    include: {
+      branch: { select: { name: true } }, category: { select: { id: true, name: true } },
+      materials: { select: { materialType: true, weight: true, saleRate: true } },
+    },
     take: 20,
     orderBy: { tagNumber: 'asc' },
   }));
+  // Today's price per piece (live gold + the piece's own stored rates); null when a piece cannot be priced.
+  const liveRates = await loadLiveRates(ctx.companyId, rows.map((t) => t.metalKarat));
+  return rows.map(({ materials: _m, ...t }) => ({ ...t, liveSellingPrice: liveSaleValue({ ...t, materials: _m }, liveRates) }));
 }
 
 // ─── Branch Transfers ─────────────────────────────────────────────────────────

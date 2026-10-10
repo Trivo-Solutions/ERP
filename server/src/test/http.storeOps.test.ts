@@ -99,6 +99,8 @@ describe('HTTP: the store-operations loop (Phase I)', () => {
       expect(tag.body.data.status).toBe('IN_STOCK');
       expect(Number(tag.body.data.costPrice)).toBe(40000);
       A.tagId = tag.body.data.id;
+      // A bought-in piece is only sellable once its SALE making charge / VA are set on the tag (the GRN's are cost-side).
+      await prisma.jewelryTag.update({ where: { id: A.tagId }, data: { saleMcRate: 0, saleVaPercent: 0 } });
       A.tagNumber = tag.body.data.tagNumber;
 
       // ...and the GRN list now shows the tag against that line
@@ -202,7 +204,7 @@ describe('HTTP: the store-operations loop (Phase I)', () => {
       expect(c.status).toBe(201);
       const tag = (await a.post('/tagging/tags', {
         branchId: A.branchId, name: 'Big piece', metalType: 'GOLD', metalKarat: '22K', grossWeight: 50, netWeight: 50,
-        costPrice: 100, sellingPrice: 300000, stockTypeId: A.stockType, categoryId: A.category,
+        costPrice: 100, sellingPrice: 300000, saleMcRate: 0, saleVaPercent: 0, stockTypeId: A.stockType, categoryId: A.category,
       })).body.data;
       const body = (clientId: string) => ({
         clientId, branchId: A.branchId, invoiceDate: new Date().toISOString(), invoiceType: 'RETAIL',

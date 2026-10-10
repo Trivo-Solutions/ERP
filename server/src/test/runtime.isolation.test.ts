@@ -272,10 +272,10 @@ describe('Phase 4: runtime isolation', () => {
       va = await mk(`EXV${suffix}`.slice(0, 12), 'Vas'); sh = await mk(`EXS${suffix}`.slice(0, 12), 'Shr');
       const stock = (await va.api.get('/masters/stock-types')).body.data[0].id;
       const cat = (await va.api.get('/masters/categories')).body.data[0].id;
-      const tag = await va.api.post('/tagging/tags', { branchId: va.branchId, stockTypeId: stock, categoryId: cat, name: 'Vasavi Export Ring', metalType: 'GOLD', metalKarat: '22K', grossWeight: 5, netWeight: 5, sellingPrice: 30000 });
+      const tag = await va.api.post('/tagging/tags', { branchId: va.branchId, stockTypeId: stock, categoryId: cat, name: 'Vasavi Export Ring', metalType: 'GOLD', metalKarat: '22K', grossWeight: 5, netWeight: 5, sellingPrice: 30000, saleMcRate: 0, saleVaPercent: 0, });
       ids.tag = tag.body.data.id;
       // a second, never-sold tag: a SOLD tag can no longer be reprinted, so the print control needs one still in stock
-      ids.printTag = (await va.api.post('/tagging/tags', { branchId: va.branchId, stockTypeId: stock, categoryId: cat, name: 'Vasavi Print Ring', metalType: 'GOLD', metalKarat: '22K', grossWeight: 5, netWeight: 5, sellingPrice: 30000 })).body.data.id;
+      ids.printTag = (await va.api.post('/tagging/tags', { branchId: va.branchId, stockTypeId: stock, categoryId: cat, name: 'Vasavi Print Ring', metalType: 'GOLD', metalKarat: '22K', grossWeight: 5, netWeight: 5, sellingPrice: 30000, saleMcRate: 0, saleVaPercent: 0, })).body.data.id;
       const client = await va.api.post('/orders/clients', { name: 'Vasavi Export Client', type: 'RETAIL' });
       ids.client = client.body.data.id;
       const inv = await va.api.post('/sales/invoices', { clientId: ids.client, invoiceDate: new Date().toISOString(), invoiceType: 'RETAIL', branchId: va.branchId, currency: 'INR', items: [{ productCode: 'X', description: 'Vasavi Export Ring', quantity: 1, grossWeight: 5, netGoldWeight: 5, rateType: 'FIXED', goldRate: 30000, karat: '22K', tagId: ids.tag }] });
@@ -321,7 +321,7 @@ describe('Phase 4: runtime isolation', () => {
     it('using the other company\'s template on your OWN tag is also refused', async () => {
       const stock = (await sh.api.get('/masters/stock-types')).body.data[0].id;
       const cat = (await sh.api.get('/masters/categories')).body.data[0].id;
-      const own = await sh.api.post('/tagging/tags', { branchId: sh.branchId, stockTypeId: stock, categoryId: cat, name: 'Shree Ring', metalType: 'GOLD', grossWeight: 1, netWeight: 1 });
+      const own = await sh.api.post('/tagging/tags', { branchId: sh.branchId, stockTypeId: stock, categoryId: cat, name: 'Shree Ring', metalType: 'GOLD', grossWeight: 1, netWeight: 1, saleMcRate: 0, saleVaPercent: 0, });
       expect((await sh.api.get(`/tagging/tags/${own.body.data.id}/print?templateId=${ids.tpl}`)).status).toBe(404);
       expect((await sh.api.get(`/tagging/tags/${own.body.data.id}/print`)).status).toBe(200);
     });

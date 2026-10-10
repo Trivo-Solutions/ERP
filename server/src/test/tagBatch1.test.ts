@@ -10,7 +10,7 @@ import { resolveMetalRate } from '../shared/metalRate';
 // and SOLD / RETIRED (purchase-returned) tag protection — through the real routes where it matters.
 describe('Tagging batch 1', () => {
   const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-  const PERMS = ['masters:view', 'masters:create', 'masters:edit', 'masters:delete', 'tag:create', 'tag:view', 'system:config', 'design:view'];
+  const PERMS = ['masters:view', 'masters:create', 'masters:edit', 'masters:delete', 'tag:create', 'tag:view', 'system:config', 'design:view', 'rate:update'];
   let A: TestTenant, B: TestTenant;
   let api: ReturnType<typeof apiWith>;
   let stockTypeId: string, ringCatId: string, chainCatId: string;

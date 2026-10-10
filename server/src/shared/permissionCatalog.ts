@@ -10,7 +10,7 @@
 // no automated check that every enforced string appears here (a missing one is simply ungrantable
 // from the UI, not a security hole; an extra one here that nothing enforces is inert).
 
-export interface PermissionCapability { action: string; permission: string }
+export interface PermissionCapability { action: string; permission: string; enforced?: false }
 export interface PermissionCatalogItem { key: string; label: string; capabilities: PermissionCapability[] }
 export interface PermissionCatalogGroup { label: string; items: PermissionCatalogItem[] }
 
@@ -47,17 +47,43 @@ function cap(permission: string): PermissionCapability {
 export const PERMISSION_CATALOG: PermissionCatalogGroup[] = [
   {
     label: 'General', items: [
-      { key: 'dashboard', label: 'Dashboard & Reports', capabilities: [cap('report:view')] },
-      // J4-D1: split out of report:view — client ledger, dealer/aging-receivables, day book, GST
-      // summary (sales + purchase), supplier ledger, trial balance, P&L, balance sheet. Operational
-      // reports (stock, WIP, karigar balances, sales register, dead stock, ...) stay on report:view.
-      { key: 'financialReports', label: 'Sensitive Financial Reports', capabilities: [cap('report:financial_view')] },
+      // The dashboard (and Workflow Guide) only. Each report is its own row in the Reports group below.
+      { key: 'dashboard', label: 'Dashboard', capabilities: [cap('report:view')] },
       { key: 'audit', label: 'Audit Log', capabilities: [cap('audit:view')] },
+    ],
+  },
+  {
+    label: 'Reports', items: [
+      // Each report is its own grant (View). Split out of report:view (operational) and
+      // report:financial_view (financial); migration 20261014100000_split_report_permissions gave every
+      // existing role the new strings matching what it could already open.
+      { key: 'rptStock', label: 'Stock Summary', capabilities: [cap('report:stock_summary')] },
+      { key: 'rptStockBook', label: 'Stock Book', capabilities: [cap('report:stock_book')] },
+      { key: 'rptStockOnHand', label: 'Stock on Hand', capabilities: [cap('report:stock_on_hand')] },
+      { key: 'rptDeadStock', label: 'Dead Stock / Ageing', capabilities: [cap('report:dead_stock')] },
+      { key: 'rptBarcode', label: 'Barcode History', capabilities: [cap('report:barcode_history')] },
+      { key: 'rptSalesRegister', label: 'Sales Register', capabilities: [cap('report:sales_register')] },
+      { key: 'rptSalesReport', label: 'Sales Report (Summary / Detailed)', capabilities: [cap('report:sales_report')] },
+      { key: 'rptWip', label: 'WIP Summary', capabilities: [cap('report:wip')] },
+      { key: 'rptKarigar', label: 'Karigar Balances', capabilities: [cap('report:karigar')] },
+      { key: 'rptCostCenters', label: 'Cost Centers', capabilities: [cap('report:cost_centers')] },
+      { key: 'rptTrialBalance', label: 'Trial Balance', capabilities: [cap('report:trial_balance')] },
+      { key: 'rptPnl', label: 'P&L Statement', capabilities: [cap('report:pnl')] },
+      { key: 'rptBalanceSheet', label: 'Balance Sheet', capabilities: [cap('report:balance_sheet')] },
+      { key: 'rptDayBook', label: 'Day Book', capabilities: [cap('report:day_book')] },
+      { key: 'rptDealerAging', label: 'Dealer Aging', capabilities: [cap('report:dealer_aging')] },
+      { key: 'rptAgingReceivables', label: 'Aging Receivables', capabilities: [cap('report:aging_receivables')] },
+      { key: 'rptClientLedger', label: 'Client Ledger', capabilities: [cap('report:client_ledger')] },
+      { key: 'rptSupplierLedger', label: 'Supplier Ledger', capabilities: [cap('report:supplier_ledger')] },
+      // The statutory family (GST summaries, ITC, GSTR-1 / 3B / 2B, RCM) stays one grant: those routes are frozen.
+      { key: 'financialReports', label: 'GST & Statutory Reports (GST Summary, ITC, GSTR-1/3B/2B)', capabilities: [cap('report:financial_view')] },
     ],
   },
   {
     label: 'Product Design', items: [
       { key: 'design', label: 'Design Library / Metal Rates', capabilities: [cap('design:view'), cap('design:create'), cap('design:edit')] },
+      // Entering / changing the daily gold & silver rates - the one LIVE element of every sale price, so it is its own grant (not system:config).
+      { key: 'metalRate', label: 'Daily Metal Rates (enter / change)', capabilities: [cap('rate:update')] },
       { key: 'bom', label: 'Bill of Materials', capabilities: [cap('bom:manage')] },
       { key: 'cost', label: 'Cost Estimation', capabilities: [cap('cost:estimate')] },
     ],
@@ -70,6 +96,16 @@ export const PERMISSION_CATALOG: PermissionCatalogGroup[] = [
         // (see approvePO in procurement.service.ts) — po:approve_high_value is required IN ADDITION
         // to po:approve, never instead of it.
         capabilities: [cap('po:view'), cap('po:create'), cap('po:approve'), cap('po:approve_high_value')],
+      },
+      // Supplier master. view/create also keep working through po:view/po:create (see procurement.router.ts).
+      {
+        key: 'supplier', label: 'Suppliers',
+        capabilities: [cap('supplier:view'), cap('supplier:create'), cap('supplier:edit'), cap('supplier:deactivate'), cap('supplier:delete')],
+      },
+      // Money paid out to suppliers. view/create also work via po:view / journal:create (the older gates).
+      {
+        key: 'supplierPayment', label: 'Supplier Payments',
+        capabilities: [cap('supplierPayment:view'), cap('supplierPayment:create'), cap('supplierPayment:reverse')],
       },
       // J4-D5: grn:view is new — GET /procurement/grn used to ride the create permission.
       { key: 'grn', label: 'GRN Verification', capabilities: [cap('grn:view'), cap('grn:create'), cap('grn:verify')] },
@@ -256,6 +292,16 @@ export const PERMISSION_CATALOG: PermissionCatalogGroup[] = [
     ],
   },
   {
+    label: 'Offers', items: [
+      // Dated sale-rate offers (making charge / VA / stone / metal). Applying an offer to an estimate or bill
+      // needs no extra permission — it is automatic; this only governs who may define and change offers.
+      { key: 'offer', label: 'Offer Management', capabilities: [cap('offer:view'), cap('offer:create'), cap('offer:edit'), cap('offer:delete')] },
+      // Selling below an offered rate (a hand-lowered rate or an extra discount on an offer bill) needs a second person's
+      // approval. Anyone who can bill may REQUEST it; only a holder of discount:approve can decide one (never their own).
+      { key: 'discount', label: 'Below-offer Approvals', capabilities: [cap('discount:approve')] },
+    ],
+  },
+  {
     label: 'Masters', items: [
       {
         key: 'masters', label: 'Masters (karats, HSN, categories, ...)',
@@ -278,6 +324,40 @@ export const PERMISSION_CATALOG: PermissionCatalogGroup[] = [
     ],
   },
 ];
+
+// Every row gets the full View / Create / Edit / Delete / Export set so a company's Super Admin can
+// delegate any of them to any role (CLAUDE.md §6.2). Anything added here that no requirePermission(...)
+// call enforces yet is flagged `enforced: false` so the Role Editor can say so honestly: granting it is
+// stored and valid, but it changes nothing until an endpoint checks it. (Every permission an endpoint
+// already enforces was in the catalog before this padding ran, so a padded entry is never enforced.)
+const STANDARD_ACTIONS: { permission: string; action: string; label: string; aliases: string[] }[] = [
+  { permission: 'view', action: 'view', label: 'View', aliases: ['View'] },
+  { permission: 'create', action: 'create', label: 'Create', aliases: ['Create'] },
+  { permission: 'edit', action: 'edit', label: 'Edit', aliases: ['Edit', 'Update'] },
+  { permission: 'delete', action: 'delete', label: 'Delete', aliases: ['Delete'] },
+  { permission: 'export', action: 'export', label: 'Export', aliases: ['Export'] },
+];
+
+(function padStandardCapabilities() {
+  const taken = new Set(PERMISSION_CATALOG.flatMap((g) => g.items.flatMap((i) => i.capabilities.map((c) => c.permission))));
+  for (const group of PERMISSION_CATALOG) {
+    for (const item of group.items) {
+      const prefixes = new Set(item.capabilities.map((c) => c.permission.split(':')[0]));
+      const hasUnderscoreAction = item.capabilities.some((c) => c.permission.split(':')[1]?.includes('_'));
+      // A row with one plain resource prefix keeps it (stock:view -> stock:export); a mixed or
+      // underscore-action row (gst:registration_*) gets its own key as the prefix so it can't collide.
+      const prefix = prefixes.size === 1 && !hasUnderscoreAction ? [...prefixes][0] : item.key;
+      for (const std of STANDARD_ACTIONS) {
+        if (item.capabilities.some((c) => std.aliases.includes(c.action))) continue;
+        let permission = `${prefix}:${std.permission}`;
+        if (taken.has(permission)) permission = `${item.key}:${std.permission}`;
+        if (taken.has(permission)) continue;
+        taken.add(permission);
+        item.capabilities.push({ action: std.label, permission, enforced: false });
+      }
+    }
+  }
+})();
 
 export const ALL_CATALOG_PERMISSIONS: ReadonlySet<string> = new Set(
   PERMISSION_CATALOG.flatMap((g) => g.items.flatMap((i) => i.capabilities.map((c) => c.permission)))

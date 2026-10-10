@@ -249,7 +249,7 @@ export async function getSalesDetailed(ctx: TenantContext, filters: SalesReportF
     } else {
       metalWt = num(l.netGoldWeight) * qty;
       metalValue = l.rateType === 'FIXED' ? 0 : num(l.netGoldWeight) * num(l.goldRate) * qty;
-      mcAmount = num(l.makingCharge) * qty; vaAmount = mcAmount * vaPercent / 100;
+      mcAmount = num(l.makingCharge) * qty; vaAmount = metalValue * vaPercent / 100;
       mcRate = num(l.netGoldWeight) > 0 ? num(l.makingCharge) / num(l.netGoldWeight) : 0;
       stoneCost = num(l.stoneValue) * qty;
     }

@@ -1,6 +1,7 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import request from 'supertest';
+import { businessDayString, dayToDbDate } from '../shared/businessDay';
 import { platformPrisma as prisma, prisma as runtimePrisma } from '../config/database'; // tests act as the platform/admin role for fixtures and verification; the code under test uses the runtime client
 import { env } from '../config/env';
 import { TenantContext } from '../shared/tenantContext';
@@ -116,6 +117,8 @@ export async function cleanupTestTenant(t: TestTenant) {
   await prisma.poItemComponent.deleteMany({ where: { companyId } });
   await prisma.vendorComponentRate.deleteMany({ where: { companyId } });
 
+  // Below-offer approvals point at tags, offers and invoices (all RESTRICT) - first, before any of those go.
+  await prisma.discountApproval.deleteMany({ where: { companyId } });
   // Returned-jewellery pipeline: leaf-first (retags/transfer items -> transfers -> cases), all before the return lines and tags they point at.
   await prisma.tagRetag.deleteMany({ where: { companyId } });
   await prisma.repairTransferItem.deleteMany({ where: { companyId } });
@@ -168,6 +171,9 @@ export async function cleanupTestTenant(t: TestTenant) {
   await prisma.repairJob.deleteMany({ where: { companyId } }); // after repairTransaction
   await prisma.hallmarkingBatch.deleteMany({ where: { companyId } }); // after hallmarkingItem
   await prisma.tagEstimate.deleteMany({ where: { companyId } }); // after tagEstimateItem
+  // Offers: estimates point at them (RESTRICT), and they point at branches / stone types / categories - rules first, then offers.
+  await prisma.offerRule.deleteMany({ where: { companyId } });
+  await prisma.offer.deleteMany({ where: { companyId } });
   await prisma.jobProcess.deleteMany({ where: { companyId } }); // after wipTracking/qcCheckpoint
   await prisma.oldGoldExchange.deleteMany({ where: { companyId } }); // a tagged buy-back references its tag
   await prisma.jewelryTag.deleteMany({ where: { companyId } }); // after jewelryTagMaterial/memoItem/etc — a test's own createdTagIds cleanup normally beats us to this
@@ -439,4 +445,14 @@ export async function withForcedRls<T>(tables: string[], fn: (tx: any) => Promis
     if (e !== ROLLBACK) throw e;
   }
   return result;
+}
+
+/** Today's metal rate for a company - gold is priced live, so any test that prices a tagged METAL row needs one. */
+export async function seedMetalRate(companyId: string, karat = '22K', ratePerGram = 6000, purity = 0.916) {
+  const date = dayToDbDate(businessDayString()); // today's INDIA day, as the app reads it
+  return prisma.metalRate.upsert({
+    where: { companyId_date_karat_currency: { companyId, date, karat, currency: 'INR' } },
+    create: { companyId, date, karat, purity, ratePerGram, currency: 'INR' },
+    update: { ratePerGram },
+  });
 }

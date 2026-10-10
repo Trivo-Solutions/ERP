@@ -3,7 +3,7 @@ import {
   DesignServices, ShoppingCart, Inventory2, Assignment, Factory,
   Engineering, Verified, PointOfSale, AccountBalance,
   Dashboard, Settings,
-  HardwareOutlined, PhotoCamera, Assessment, AltRoute, Style, Tune, Calculate, People,
+  HardwareOutlined, PhotoCamera, Assessment, AltRoute, Style, Tune, Calculate, People, LocalOffer,
 } from '@mui/icons-material';
 
 export interface NavItem {
@@ -136,32 +136,32 @@ export const NAV_ITEMS: NavItem[] = [
       { label: 'Chart of Accounts', path: '/finance/accounts', permission: 'finance:view' },
       // J4-D1: these six now require report:financial_view on the backend (sensitive financial
       // detail) — Cost Centers stayed on report:view (finance:view actually gates its list route).
-      { label: 'Trial Balance', path: '/finance/trial-balance', permission: 'report:financial_view' },
-      { label: 'P&L Statement', path: '/finance/pnl', permission: 'report:financial_view' },
-      { label: 'Cost Centers', path: '/finance/cost-centers', permission: 'report:view' },
-      { label: 'Dealer Aging', path: '/finance/dealer-aging', permission: 'report:financial_view' },
-      { label: 'Client Ledger', path: '/finance/client-ledger', permission: 'report:financial_view' },
-      { label: 'Supplier Ledger', path: '/finance/supplier-ledger', permission: 'report:financial_view' },
+      { label: 'Trial Balance', path: '/finance/trial-balance', permission: 'report:trial_balance' },
+      { label: 'P&L Statement', path: '/finance/pnl', permission: 'report:pnl' },
+      { label: 'Cost Centers', path: '/finance/cost-centers', permission: 'report:cost_centers' },
+      { label: 'Dealer Aging', path: '/finance/dealer-aging', permission: 'report:dealer_aging' },
+      { label: 'Client Ledger', path: '/finance/client-ledger', permission: 'report:client_ledger' },
+      { label: 'Supplier Ledger', path: '/finance/supplier-ledger', permission: 'report:supplier_ledger' },
     ],
   },
   {
-    label: 'Reports', icon: <Assessment />, permission: 'report:view',
+    label: 'Reports', icon: <Assessment />, // shown when any child report is allowed (Sidebar hides an empty group)
     children: [
-      { label: 'WIP Summary', path: '/reports/wip', permission: 'report:view' },
-      { label: 'Stock Summary', path: '/reports/stock', permission: 'report:view' },
-      { label: 'Karigar Balances', path: '/reports/karigar', permission: 'report:view' },
+      { label: 'WIP Summary', path: '/reports/wip', permission: 'report:wip' },
+      { label: 'Stock Summary', path: '/reports/stock', permission: 'report:stock_summary' },
+      { label: 'Karigar Balances', path: '/reports/karigar', permission: 'report:karigar' },
       // J4-D1: same sensitivity class as Dealer Aging above — requires report:financial_view.
-      { label: 'Aging Receivables', path: '/reports/aging', permission: 'report:financial_view' },
-      { label: 'Sales Register', path: '/reports/sales-register', permission: 'report:view' },
-      { label: 'Sales Report', path: '/reports/sales-report', permission: 'report:view' },
-      { label: 'Stock Book', path: '/reports/stock-book', permission: 'report:view' },
-      { label: 'Barcode History', path: '/reports/barcode-history', permission: 'report:view' },
+      { label: 'Aging Receivables', path: '/reports/aging', permission: 'report:aging_receivables' },
+      { label: 'Sales Register', path: '/reports/sales-register', permission: 'report:sales_register' },
+      { label: 'Sales Report', path: '/reports/sales-report', permission: 'report:sales_report' },
+      { label: 'Stock Book', path: '/reports/stock-book', permission: 'report:stock_book' },
+      { label: 'Barcode History', path: '/reports/barcode-history', permission: 'report:barcode_history' },
       { label: 'Sales Returns', path: '/reports/sales-returns', permission: 'sales:view' },
       { label: 'Repair Register', path: '/reports/repair-register', permission: 'repair:view' },
       { label: 'Repair Transfers', path: '/reports/repair-transfers', permission: 'repair:view' },
-      { label: 'Stock on Hand', path: '/reports/stock-on-hand', permission: 'report:view' },
-      { label: 'Dead Stock / Ageing', path: '/reports/dead-stock', permission: 'report:view' },
-      { label: 'Day Book', path: '/reports/day-book', permission: 'report:financial_view' },
+      { label: 'Stock on Hand', path: '/reports/stock-on-hand', permission: 'report:stock_on_hand' },
+      { label: 'Dead Stock / Ageing', path: '/reports/dead-stock', permission: 'report:dead_stock' },
+      { label: 'Day Book', path: '/reports/day-book', permission: 'report:day_book' },
       { label: 'GST Summary', path: '/reports/gst-summary', permission: 'report:financial_view' },
       { label: 'Purchase GST (ITC)', path: '/reports/purchase-gst-summary', permission: 'report:financial_view' },
       { label: 'GSTR-1 Reports', path: '/reports/gstr1', permission: 'report:financial_view' },
@@ -170,6 +170,8 @@ export const NAV_ITEMS: NavItem[] = [
     ],
   },
   { label: 'Hardware', icon: <HardwareOutlined />, path: '/hardware', permission: 'hardware:manage' },
+  { label: 'Offers', icon: <LocalOffer />, path: '/offers', permission: 'offer:view' },
+  { label: 'Offer Approvals', icon: <LocalOffer />, path: '/offers/approvals', permission: 'discount:approve' },
   { label: 'Masters', icon: <Tune />, path: '/masters', permission: 'masters:view' },
   {
     label: 'Management', icon: <People />, permission: 'user:manage',

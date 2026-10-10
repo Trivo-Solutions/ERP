@@ -36,7 +36,7 @@ describe('HTTP: purchase lots (bags)', () => {
   }
 
   const tagBody = (o: Record<string, any>, extra: Record<string, unknown> = {}) => ({
-    branchId: o.branchId, name: 'Lot piece', metalType: 'GOLD', metalKarat: '22K', grossWeight: 20, netWeight: 18,
+    branchId: o.branchId, name: 'Lot piece', metalType: 'GOLD', metalKarat: '22K', grossWeight: 20, netWeight: 18, saleMcRate: 0, saleVaPercent: 0,
     stockTypeId: o.stockType, categoryId: o.category, ...extra,
   });
 

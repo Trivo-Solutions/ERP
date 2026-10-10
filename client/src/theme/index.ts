@@ -141,6 +141,7 @@ function buildComponents(mode: 'light' | 'dark') {
       defaultProps: { size: 'small' as const, variant: 'outlined' as const },
       styleOverrides: {
         root: {
+          maxWidth: '100%', // fixed-width filter fields (width: 340) must never exceed a phone screen
           '& .MuiOutlinedInput-root': { borderRadius: 10 },
         },
       },
@@ -205,6 +206,60 @@ function buildComponents(mode: 'light' | 'dark') {
           '&:hover': { backgroundColor: alpha('#FFFFFF', 0.08) },
         },
       },
+    },
+    // ── Small screens ─────────────────────────────────────────────────────────────
+    // Dialogs and drawers never exceed the viewport; dialogs use nearly the full width on a phone.
+    MuiDialog: {
+      styleOverrides: {
+        paper: ({ theme }: { theme: Theme }) => ({
+          [theme.breakpoints.down('sm')]: {
+            margin: 8,
+            width: 'calc(100% - 16px)',
+            maxWidth: 'calc(100% - 16px) !important',
+            maxHeight: 'calc(100% - 16px)',
+          },
+        }),
+      },
+    },
+    // Cards/papers clip overflowing content by default; on small screens let it scroll sideways instead of being cut off.
+    MuiPaper: {
+      styleOverrides: {
+        root: ({ theme }: { theme: Theme }) => ({
+          [theme.breakpoints.down('md')]: { overflowX: 'auto' },
+        }),
+      },
+    },
+    MuiDialogContent: {
+      styleOverrides: {
+        root: ({ theme }: { theme: Theme }) => ({
+          [theme.breakpoints.down('sm')]: { padding: theme.spacing(1.5) },
+        }),
+      },
+    },
+    MuiDialogActions: {
+      styleOverrides: {
+        root: ({ theme }: { theme: Theme }) => ({
+          [theme.breakpoints.down('sm')]: { flexWrap: 'wrap', padding: theme.spacing(1, 1.5) },
+        }),
+      },
+    },
+    MuiDrawer: {
+      styleOverrides: {
+        paper: { maxWidth: '100vw' },
+      },
+    },
+    MuiTableCell: {
+      styleOverrides: {
+        root: ({ theme }: { theme: Theme }) => ({
+          [theme.breakpoints.down('sm')]: { padding: '6px 8px' },
+        }),
+      },
+    },
+    MuiTabs: {
+      defaultProps: { variant: 'scrollable' as const, scrollButtons: 'auto' as const, allowScrollButtonsMobile: true },
+    },
+    MuiPopover: {
+      styleOverrides: { paper: { maxWidth: 'calc(100vw - 16px)' } },
     },
     MuiLinearProgress: {
       styleOverrides: { root: { borderRadius: 4 } },

@@ -7,6 +7,7 @@ import { LEDGER_ACCOUNT, cashOrBankAccount } from '../../shared/ledgerAccounts';
 import { nextDocumentNumber, nextSimpleCode } from '../../shared/numberSequence';
 import { TenantContext, tenantQuery, tenantBatch, tenantTransaction } from '../../shared/tenantContext';
 import { assertOwnedByCompany, assertBranchAccessible, assertAllOwned } from '../../middleware/tenant';
+import { isBlockedByForeignKey } from '../../shared/prismaErrors';
 import { isValidKarat } from '../../shared/karatMaster';
 import { resolvePoComponents, snapshotGrnComponentRates, PoComponentInput } from '../../shared/vendorRates';
 import { FINISHED_GOODS_MATERIAL_TYPE, FINISHED_LOT_MATERIAL_TYPE, DEFAULT_HSN_CODE } from '../../shared/constants';
@@ -181,8 +182,9 @@ export async function createPO(data: {
   // be raised against another company's supplier relationship.
   await assertOwnedByCompany('supplier', data.supplierId, ctx.companyId, 'Supplier');
   const supplier = await tenantQuery(ctx.companyId, (_tx) => _tx.supplier.findUniqueOrThrow({
-    where: { id: data.supplierId }, select: { gstNumber: true },
+    where: { id: data.supplierId }, select: { gstNumber: true, isActive: true },
   }));
+  if (!supplier.isActive) throw new AppError('This supplier is inactive — reactivate it before raising a purchase order.', 409);
 
   // One FINISHED_GOODS line = one piece = one JewelryTag (see createTagFromGrnItem). A line with
   // quantity 3 would still only ever yield one tag, silently leaving two pieces off the books.
@@ -472,9 +474,9 @@ export async function createGRN(data: {
   return grn;
 }
 
-export async function listSuppliers(companyId: string) {
+export async function listSuppliers(companyId: string, includeInactive = false) {
   return tenantQuery(companyId, (_tx) => _tx.supplier.findMany({
-    where: { companyId, isActive: true },
+    where: { companyId, ...(includeInactive ? {} : { isActive: true }) },
     orderBy: { name: 'asc' },
   }));
 }
@@ -494,6 +496,57 @@ export async function createSupplier(data: {
       ?? await nextSimpleCode(companyId, `SUPPLIER:${data.type}`, supplierPrefix[data.type] ?? 'SU', 4, tx);
     return tx.supplier.create({ data: { ...data, companyId, supplierCode: code } });
   });
+}
+
+// Fields an admin may correct on a supplier. supplierCode (identity), currentDue (ledger-driven live
+// payable) and isActive (its own permission) are deliberately NOT here.
+const SUPPLIER_WRITABLE_KEYS = [
+  'name', 'type', 'gstNumber', 'panNumber', 'contactName', 'phone', 'email', 'address', 'city', 'state', 'pincode',
+  'bankName', 'bankAccount', 'bankIfsc', 'creditLimit', 'isComposition',
+] as const;
+
+export async function updateSupplier(ctx: TenantContext, supplierId: string, body: Record<string, unknown>, userId: string) {
+  await assertOwnedByCompany('supplier', supplierId, ctx.companyId, 'Supplier');
+  const data: Record<string, unknown> = {};
+  for (const k of SUPPLIER_WRITABLE_KEYS) if (body[k] !== undefined) data[k] = body[k];
+  if (Object.keys(data).length === 0) throw new AppError('Nothing to update', 400);
+  const before = await tenantQuery(ctx.companyId, (tx) => tx.supplier.findFirstOrThrow({ where: { id: supplierId, companyId: ctx.companyId } }));
+  const after = await tenantQuery(ctx.companyId, (tx) => tx.supplier.update({ where: { id: supplierId }, data }));
+  const pick = (o: any) => Object.fromEntries(Object.keys(data).map((k) => [k, o[k]]));
+  await createAuditEntry('suppliers', supplierId, userId, 'EDIT', pick(before), pick(after), ctx.companyId);
+  return after;
+}
+
+/** Deactivate / reactivate. An inactive supplier drops out of pickers and cannot receive new POs; history is untouched. */
+export async function setSupplierActive(ctx: TenantContext, supplierId: string, isActive: boolean, userId: string) {
+  await assertOwnedByCompany('supplier', supplierId, ctx.companyId, 'Supplier');
+  const res = await tenantQuery(ctx.companyId, (tx) =>
+    tx.supplier.updateMany({ where: { id: supplierId, companyId: ctx.companyId, isActive: !isActive }, data: { isActive } }));
+  if (res.count === 0) throw new AppError(isActive ? 'Supplier is already active' : 'Supplier is already inactive', 409);
+  await createAuditEntry('suppliers', supplierId, userId, isActive ? 'REACTIVATE' : 'DEACTIVATE', { isActive: !isActive }, { isActive }, ctx.companyId);
+}
+
+/** Permanent delete — only a supplier with no history at all. Anything else must be deactivated. Never cascades. */
+export async function deleteSupplier(ctx: TenantContext, supplierId: string, userId: string) {
+  await assertOwnedByCompany('supplier', supplierId, ctx.companyId, 'Supplier');
+  const existing = await tenantQuery(ctx.companyId, (tx) => tx.supplier.findFirstOrThrow({
+    where: { id: supplierId, companyId: ctx.companyId },
+    include: { _count: { select: {
+      purchaseOrders: true, artisans: true, returns: true, payments: true, componentRates: true,
+      debitNotes: true, rcmLiabilities: true, selfInvoices: true,
+    } } },
+  }));
+  const used = Object.entries(existing._count).filter(([, n]) => n > 0).map(([k]) => k);
+  if (used.length > 0 || Number(existing.currentDue) !== 0) {
+    throw new AppError('This supplier has transactions or a balance and cannot be deleted — deactivate it instead.', 409);
+  }
+  try {
+    await tenantQuery(ctx.companyId, (tx) => tx.supplier.delete({ where: { id: supplierId } }));
+  } catch (err) {
+    if (isBlockedByForeignKey(err)) throw new AppError('This supplier is still referenced by other records — deactivate it instead.', 409);
+    throw err;
+  }
+  await createAuditEntry('suppliers', supplierId, userId, 'DELETE', { name: existing.name, supplierCode: existing.supplierCode }, undefined, ctx.companyId);
 }
 
 // ─── Purchase Requisitions ────────────────────────────────────────────────────
@@ -567,6 +620,21 @@ export async function createPR(data: {
   });
   await createAuditEntry('purchase_requisitions', pr.id, userId, 'CREATE', undefined, undefined, ctx.companyId);
   return pr;
+}
+
+/** Delete a requisition that was never submitted. Anything past DRAFT carries approval history and stays. */
+export async function deletePR(ctx: TenantContext, id: string, userId: string) {
+  await assertOwnedByCompany('purchaseRequisition', id, ctx.companyId, 'Purchase requisition');
+  const pr = await tenantQuery(ctx.companyId, (tx) => tx.purchaseRequisition.findFirstOrThrow({
+    where: { id, companyId: ctx.companyId }, include: { _count: { select: { purchaseOrders: true, approvalHistory: true } } },
+  }));
+  if (pr.status !== 'DRAFT' || pr._count.purchaseOrders > 0 || pr._count.approvalHistory > 0) {
+    throw new AppError('Only a draft requisition that was never submitted can be deleted.', 409);
+  }
+  const res = await tenantTransaction(ctx.companyId, (tx) =>
+    tx.purchaseRequisition.deleteMany({ where: { id, companyId: ctx.companyId, status: 'DRAFT' } }));
+  if (res.count === 0) throw new AppError('Only a draft requisition that was never submitted can be deleted.', 409);
+  await createAuditEntry('purchase_requisitions', id, userId, 'DELETE', { prNumber: pr.prNumber, status: pr.status }, undefined, ctx.companyId);
 }
 
 export async function submitPR(id: string, ctx: TenantContext, userId: string) {
@@ -1072,6 +1140,34 @@ export async function recordSupplierPayment(data: {
 
   await createAuditEntry('supplier_payments', payment.id, userId, 'CREATE', undefined, undefined, ctx.companyId);
   return payment;
+}
+
+/**
+ * Reverse a supplier payment (flag + inverse journal + payable restored). The original row is kept for the audit
+ * trail; the claim is a count-checked update so two concurrent reversals can never both succeed.
+ */
+export async function reverseSupplierPayment(ctx: TenantContext, paymentId: string, reason: string, userId: string) {
+  if (!reason?.trim()) throw new AppError('A reason is required to reverse a payment', 400);
+  await assertOwnedByCompany('supplierPayment', paymentId, ctx.companyId, 'Supplier payment');
+  await tenantTransaction(ctx.companyId, async (tx) => {
+    const payment = await tx.supplierPayment.findFirstOrThrow({ where: { id: paymentId, companyId: ctx.companyId } });
+    const claimed = await tx.supplierPayment.updateMany({
+      where: { id: paymentId, companyId: ctx.companyId, reversedAt: null },
+      data: { reversedAt: new Date(), reversedById: userId, reversalReason: reason.trim() },
+    });
+    if (claimed.count === 0) throw new AppError('This payment has already been reversed', 409);
+    const amount = Number(payment.amount);
+    await postAutoJournalEntry(tx, ctx.companyId, {
+      date: new Date(), description: `Reversal of supplier payment ${payment.paymentNumber}: ${reason.trim()}`,
+      referenceType: 'SupplierPaymentReversal', referenceId: payment.id, userId,
+      lines: [
+        { accountCode: cashOrBankAccount(payment.mode), debit: amount },
+        { accountCode: LEDGER_ACCOUNT.ACCOUNTS_PAYABLE, credit: amount },
+      ],
+    });
+    await tx.supplier.update({ where: { id: payment.supplierId }, data: { currentDue: { increment: amount } } });
+  });
+  await createAuditEntry('supplier_payments', paymentId, userId, 'REVERSE', { reversed: false }, { reversed: true, reason: reason.trim() }, ctx.companyId);
 }
 
 // Layer 2: supplierId ownership validated first, same as listClientPayments().

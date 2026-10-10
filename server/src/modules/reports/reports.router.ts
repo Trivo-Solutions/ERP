@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { authenticate } from '../../middleware/auth';
-import { requirePermission } from '../../middleware/rbac';
+import { requirePermission, requireAnyPermission } from '../../middleware/rbac';
 import { resolveTenantContext } from '../../middleware/tenant';
 import { prisma } from '../../config/database';
 import { tenantQuery } from '../../shared/tenantContext';
@@ -46,7 +46,7 @@ reportsRouter.get('/dashboard', requirePermission('report:view'), async (req: Re
   });
 });
 
-reportsRouter.get('/wip-summary', requirePermission('report:view'), async (req: Request, res: Response) => {
+reportsRouter.get('/wip-summary', requireAnyPermission('report:wip', 'report:view'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   const wipByProcess = await tenantQuery(req.tenant!.companyId, (_tx) => _tx.jobProcess.groupBy({
     by: ['processName', 'status'],
@@ -63,7 +63,7 @@ reportsRouter.get('/wip-summary', requirePermission('report:view'), async (req: 
   res.json({ success: true, data: { wipByProcess, jobsByPriority } });
 });
 
-reportsRouter.get('/stock-summary', requirePermission('report:view'), async (req: Request, res: Response) => {
+reportsRouter.get('/stock-summary', requirePermission('report:stock_summary'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   const [metalByKarat, stonesByType, lowConsumables] = await Promise.all([
     tenantQuery(req.tenant!.companyId, (_tx) => _tx.metalStock.groupBy({
@@ -87,7 +87,7 @@ reportsRouter.get('/stock-summary', requirePermission('report:view'), async (req
   res.json({ success: true, data: { metalByKarat, stonesByType, lowConsumables } });
 });
 
-reportsRouter.get('/karigar-balances', requirePermission('report:view'), async (req: Request, res: Response) => {
+reportsRouter.get('/karigar-balances', requirePermission('report:karigar'), async (req: Request, res: Response) => {
   const artisans = await tenantQuery(req.tenant!.companyId, (_tx) => _tx.artisan.findMany({
     where: { companyId: req.tenant!.companyId, isActive: true, metalBalance: { gt: 0 } },
     select: { artisanCode: true, name: true, type: true, metalBalance: true },
@@ -98,7 +98,7 @@ reportsRouter.get('/karigar-balances', requirePermission('report:view'), async (
 
 // J4-D1: same sensitivity class as finance/reports/dealer-aging (named customer balances + aging) —
 // gated consistently rather than leaving an equivalent report reachable via the narrower report:view.
-reportsRouter.get('/aging-receivables', requirePermission('report:financial_view'), async (req: Request, res: Response) => {
+reportsRouter.get('/aging-receivables', requirePermission('report:aging_receivables'), async (req: Request, res: Response) => {
   const invoices = await tenantQuery(req.tenant!.companyId, (_tx) => _tx.salesInvoice.findMany({
     // J3.5 Finding 1: 'VOID' didn't exist when this list was written — a voided invoice keeps
     // balanceDue == totalAmount by design and must not age here as a live receivable.

@@ -446,7 +446,8 @@ export async function getSupplierLedger(ctx: TenantContext, supplierId: string, 
       select: { returnNumber: true, returnDate: true, totalAmount: true, taxAmount: true, createdAt: true },
     }),
     tx.supplierPayment.findMany({
-      where: { companyId: ctx.companyId, supplierId },
+      // A reversed payment is kept for the audit trail but no longer counts as money paid.
+      where: { companyId: ctx.companyId, supplierId, reversedAt: null },
       select: { paymentNumber: true, paymentDate: true, amount: true, mode: true, createdAt: true },
     }),
     // G2e: a standalone (Path B) Debit Note moves Supplier.currentDue exactly like a
