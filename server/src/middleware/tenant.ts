@@ -108,7 +108,9 @@ type ScopedModel =
   // Photography (Phase 1 — schema only)
   | 'photographyStation' | 'stationCredential' | 'tagImage'
   // Offer management
-  | 'offer' | 'discountApproval';
+  | 'offer' | 'discountApproval'
+  // Payment Configuration
+  | 'paymentProvider' | 'posTerminal';
 
 // Routed through tenantQuery (Form 1 — see tenantContext.ts) rather than a bare prisma call:
 // this is a read against a tenant-scoped table, so it follows the same one standard pattern as

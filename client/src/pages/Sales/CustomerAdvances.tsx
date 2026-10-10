@@ -14,12 +14,19 @@ import { SelectField } from '../../components/fields/SelectField';
 import { DateField } from '../../components/fields/DateField';
 import { exportToCsv } from '../../utils/exportToCsv';
 import { printAdvanceReceipt, advanceModeLabel } from '../../utils/printAdvanceReceipt';
+import { PaymentLegFields, usePaymentOptions } from '../../components/sales/PaymentLegFields';
+import { LegMeta, blankMeta, legMetaPayload, legMetaError } from '../../utils/paymentLegMeta';
 
 // Customer Advances — money a customer pays BEFORE any invoice. Held as a liability and later adjusted against a
 // bill; deliberately not Store Credit and not part of the customer's account balance.
 
 const money = (n: unknown) => '₹' + Number(n ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const dateTime = (v: unknown) => v ? new Date(v as string).toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+// Provider / terminal / cheque details recorded on a payment leg (a snapshot - it never changes if the setup does).
+const legDetail = (p: any) => [
+  p.providerName, p.terminalCode && `POS ${p.terminalCode}${p.terminalTid ? ` (TID ${p.terminalTid})` : ''}`, p.authCode && `Auth ${p.authCode}`,
+  p.chequeNumber && `Cheque ${p.chequeNumber}`, p.chequeBank,
+].filter(Boolean).map((x) => ` · ${x}`).join('');
 const isoDay = (d: Date) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 
 const MODES = [
@@ -188,7 +195,7 @@ export function CustomerAdvances() {
 // ─── New advance ─────────────────────────────────────────────────────────────
 
 const MAX_PAY_LINES = 10; // matches the server cap
-type PayLine = { key: number; mode: string; amount: string; referenceNo: string };
+type PayLine = { key: number; mode: string; amount: string; referenceNo: string; meta: LegMeta };
 
 function NewAdvanceDialog({ clients, branches, onClose, onCreated, companyName }: { clients: any[]; branches: any[]; onClose: () => void; onCreated: (a: any) => void; companyName: string }) {
   const { enqueueSnackbar } = useSnackbar();
@@ -196,9 +203,12 @@ function NewAdvanceDialog({ clients, branches, onClose, onCreated, companyName }
   const [branchId, setBranchId] = useState(branches.length === 1 ? branches[0].id : '');
   // One line per payment mode (a split receipt has several, e.g. Cash + UPI); the advance is their total.
   const nextKey = useRef(1);
-  const [lines, setLines] = useState<PayLine[]>([{ key: 0, mode: 'CASH', amount: '', referenceNo: '' }]);
+  const [lines, setLines] = useState<PayLine[]>([{ key: 0, mode: 'CASH', amount: '', referenceNo: '', meta: blankMeta() }]);
+  // Providers / terminals the chosen branch collects through (each leg keeps its OWN selection).
+  const { options: payOptions, isLoading: optionsLoading, isError: optionsError } = usePaymentOptions(branchId);
   const setLine = (key: number, patch: Partial<PayLine>) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)));
-  const addLine = () => setLines((ls) => (ls.length >= MAX_PAY_LINES ? ls : [...ls, { key: nextKey.current++, mode: ls[ls.length - 1]?.mode ?? 'CASH', amount: '', referenceNo: '' }]));
+  const addLine = () => setLines((ls) => (ls.length >= MAX_PAY_LINES ? ls : [...ls, { key: nextKey.current++, mode: ls[ls.length - 1]?.mode ?? 'CASH', amount: '', referenceNo: '', meta: blankMeta() }]));
+  const setMeta = (key: number, patch: Partial<LegMeta>) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, meta: { ...l.meta, ...patch } } : l)));
   const [notes, setNotes] = useState('');
   const [touched, setTouched] = useState(false);
   const [done, setDone] = useState<any | null>(null);
@@ -210,15 +220,16 @@ function NewAdvanceDialog({ clients, branches, onClose, onCreated, companyName }
     const a = Number(l.amount);
     return !l.amount ? 'Enter the amount' : !(a > 0) ? 'Amount must be greater than zero' : Math.abs(a * 100 - Math.round(a * 100)) > 1e-6 ? 'Up to 2 decimal places' : '';
   };
+  const metaError = (l: PayLine) => legMetaError(l.mode, l.meta, payOptions);
   const amt = lines.reduce((sum, l) => sum + (Number(l.amount) > 0 ? Math.round(Number(l.amount) * 100) : 0), 0) / 100;
   const errors = { client: client ? '' : 'Select a customer', branch: branchId ? '' : 'Select a branch' };
-  const invalid = !!(errors.client || errors.branch || lines.some((l) => lineError(l)));
+  const invalid = !!(errors.client || errors.branch || lines.some((l) => lineError(l) || metaError(l)));
   const split = lines.length > 1;
 
   const save = useMutation({
     mutationFn: () => apiPost<any>('/sales/advances', {
       clientId: client.id, branchId, notes: notes || undefined, idempotencyKey,
-      payments: lines.map((l) => ({ mode: l.mode, amount: Number(l.amount), referenceNo: l.mode !== 'CASH' && l.referenceNo ? l.referenceNo : undefined })),
+      payments: lines.map((l) => ({ mode: l.mode, amount: Number(l.amount), referenceNo: l.mode !== 'CASH' && l.referenceNo ? l.referenceNo : undefined, ...legMetaPayload(l.mode, l.meta, payOptions) })),
     }),
     onSuccess: (adv) => { setDone(adv); enqueueSnackbar(`Advance ${adv.advanceNumber} received`, { variant: 'success' }); },
     onError: (e: any) => enqueueSnackbar(errMsg(e, 'Could not save the advance'), { variant: 'error' }),
@@ -267,7 +278,7 @@ function NewAdvanceDialog({ clients, branches, onClose, onCreated, companyName }
               />
             </Grid>
             <Grid item xs={12} sm={6}>
-              <SelectField size="small" required label="Branch" value={branchId} onChange={(e) => setBranchId(e.target.value)} emptyLabel="Select branch"
+              <SelectField size="small" required label="Branch" value={branchId} onChange={(e) => { setBranchId(e.target.value); setLines((ls) => ls.map((l) => ({ ...l, meta: blankMeta() }))); }} emptyLabel="Select branch"
                 options={branches.map((b) => ({ value: b.id, label: b.name }))} error={touched && !!errors.branch} helperText={touched ? errors.branch : ' '} />
             </Grid>
             {lines.map((l, i) => {
@@ -276,7 +287,7 @@ function NewAdvanceDialog({ clients, branches, onClose, onCreated, companyName }
                 <Grid item xs={12} key={l.key}>
                   <Grid container spacing={1.5} alignItems="flex-start">
                     <Grid item xs={12} sm={3.5}>
-                      <SelectField size="small" required label={split ? `Payment Mode ${i + 1}` : 'Payment Mode'} value={l.mode} onChange={(e) => setLine(l.key, { mode: e.target.value })}
+                      <SelectField size="small" required label={split ? `Payment Mode ${i + 1}` : 'Payment Mode'} value={l.mode} onChange={(e) => setLine(l.key, { mode: e.target.value, meta: blankMeta() })}
                         options={MODES} helperText=" " />
                     </Grid>
                     <Grid item xs={6} sm={3.5}>
@@ -289,6 +300,8 @@ function NewAdvanceDialog({ clients, branches, onClose, onCreated, companyName }
                       <TextField size="small" fullWidth label={l.mode !== 'CASH' ? 'Reference No.' : 'Reference (n/a for cash)'} disabled={l.mode === 'CASH'} value={l.mode !== 'CASH' ? l.referenceNo : ''}
                         onChange={(e) => setLine(l.key, { referenceNo: e.target.value })} InputLabelProps={{ shrink: true }} helperText=" " />
                     </Grid>
+                    <PaymentLegFields mode={l.mode} value={l.meta} onChange={(p) => setMeta(l.key, p)} options={payOptions}
+                      isLoading={optionsLoading} isError={optionsError} showErrors={touched} error={metaError(l)} />
                     {split && (
                       <Grid item xs={1.5} sm={1}>
                         <Tooltip title="Remove this payment"><IconButton size="small" aria-label="Remove payment" onClick={() => setLines((ls) => ls.filter((x) => x.key !== l.key))}><DeleteOutline fontSize="small" /></IconButton></Tooltip>
@@ -398,7 +411,7 @@ function AdvanceDetailDrawer({ id, onClose, companyName }: { id: string | null; 
               <Field label="Applied">{money(a.appliedAmount)}</Field>
               <Field label="Available Advance"><Box component="span" sx={{ color: a.availableAmount > 0 ? 'success.main' : 'text.disabled' }}>{money(a.availableAmount)}</Box></Field>
               {a.payments?.length > 1
-                ? a.payments.map((p: any) => <Field key={p.id} label={advanceModeLabel(p.mode)}>{money(p.amount)}{p.referenceNo ? ` · ${p.referenceNo}` : ''}</Field>)
+                ? a.payments.map((p: any) => <Field key={p.id} label={advanceModeLabel(p.mode)}>{money(p.amount)}{p.referenceNo ? ` · ${p.referenceNo}` : ''}{legDetail(p)}</Field>)
                 : <><Field label="Payment Mode">{advanceModeLabel(a.mode)}</Field>
                   {a.referenceNo && <Field label="Reference No.">{a.referenceNo}</Field>}</>}
             </Section>

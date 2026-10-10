@@ -197,6 +197,9 @@ export const PERMISSION_CATALOG: PermissionCatalogGroup[] = [
         // GET /sales/clients/:clientId/payments used to ride sales:view.
         capabilities: [cap('payment:view'), cap('payment:create'), cap('payment:reverse')],
       },
+      // Payment Configuration: bank/provider master, branch availability and POS terminals (TID/MID). Reading the
+      // per-branch options on a collection screen needs only payment:create / payment:view.
+      { key: 'paymentConfig', label: 'Payment Providers & POS Terminals', capabilities: [cap('paymentConfig:view'), cap('paymentConfig:manage')] },
       { key: 'return', label: 'Sales Returns', capabilities: [cap('return:create')] },
       { key: 'exportDoc', label: 'Export Documents', capabilities: [cap('export:doc')] },
     ],

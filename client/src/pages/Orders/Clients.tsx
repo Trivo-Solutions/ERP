@@ -13,6 +13,8 @@ import { DateField } from '../../components/fields/DateField';
 import { CurrencyField } from '../../components/fields/CurrencyField';
 import { ClientKycDialog } from '../../components/common/ClientKycDialog';
 import { useAuthStore } from '../../store/auth.store';
+import { PaymentLegFields, usePaymentOptions } from '../../components/sales/PaymentLegFields';
+import { LegMeta, blankMeta, legMetaPayload, legMetaError } from '../../utils/paymentLegMeta';
 
 export function Clients() {
   const { enqueueSnackbar } = useSnackbar();
@@ -25,6 +27,15 @@ export function Clients() {
   const { data, isLoading } = useQuery({ queryKey: ['clients'], queryFn: () => apiGet<any[]>('/orders/clients') });
   const { control, handleSubmit, reset } = useForm({ defaultValues: { name: '', type: 'WHOLESALE', gstNumber: '', panNumber: '', form60Received: false, phone: '', email: '', dateOfBirth: '', address: '', city: '', district: '', state: '', pincode: '', creditLimit: 0, pricingTier: 'STANDARD' } });
   const paymentForm = useForm({ defaultValues: { amount: 0, mode: 'CASH', paymentDate: new Date().toISOString().slice(0, 10), referenceNo: '', notes: '' } });
+  // A standalone receipt has no invoice to take a branch from: provider / terminal data needs the collecting branch.
+  const { data: branchData } = useQuery({ queryKey: ['branches'], queryFn: () => apiGet<any[]>('/tagging/branches'), enabled: !!paymentClient });
+  const branches: any[] = (branchData as any)?.data ?? branchData ?? [];
+  const [payBranchId, setPayBranchId] = useState('');
+  const [payMeta, setPayMeta] = useState<LegMeta>(blankMeta());
+  const [showMetaErrors, setShowMetaErrors] = useState(false);
+  const { options: payOptions, isLoading: optionsLoading, isError: optionsError } = usePaymentOptions(payBranchId || undefined);
+  const payMode = paymentForm.watch('mode');
+  const closePayment = () => { setPaymentClient(null); setPayBranchId(''); setPayMeta(blankMeta()); setShowMetaErrors(false); };
 
   const mutation = useMutation({
     mutationFn: (data: any) => apiPost('/orders/clients', data),
@@ -34,10 +45,13 @@ export function Clients() {
   // F2: an on-account payment — an advance, or a payment against the client's general
   // outstanding balance rather than one specific invoice.
   const paymentMutation = useMutation({
-    mutationFn: (data: any) => apiPost(`/sales/clients/${paymentClient!.id}/payments`, { ...data, paymentDate: new Date(data.paymentDate) }),
+    mutationFn: (data: any) => apiPost(`/sales/clients/${paymentClient!.id}/payments`, {
+      ...data, paymentDate: new Date(data.paymentDate),
+      ...(payBranchId && { branchId: payBranchId }), ...legMetaPayload(data.mode, payMeta, payOptions),
+    }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['clients'] });
-      setPaymentClient(null);
+      closePayment();
       paymentForm.reset();
       enqueueSnackbar('Payment recorded', { variant: 'success' });
     },
@@ -147,8 +161,8 @@ export function Clients() {
       {/* F2: on-account payment — an advance, or a payment against the client's general
           outstanding balance rather than one specific invoice (that's the invoice detail
           drawer's "Record Payment" instead). */}
-      <Dialog open={!!paymentClient} onClose={() => setPaymentClient(null)} maxWidth="xs" fullWidth>
-        <form onSubmit={paymentForm.handleSubmit((d) => paymentMutation.mutate(d))}>
+      <Dialog open={!!paymentClient} onClose={closePayment} maxWidth="xs" fullWidth>
+        <form onSubmit={paymentForm.handleSubmit((d) => { setShowMetaErrors(true); if (legMetaError(d.mode, payMeta, payOptions)) return; paymentMutation.mutate(d); })}>
           <DialogTitle fontWeight={700}>Record Payment</DialogTitle>
           <DialogContent sx={{ pt: 2 }}>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>{paymentClient?.name}</Typography>
@@ -159,7 +173,7 @@ export function Clients() {
               </Grid>
               <Grid item xs={6}>
                 <Controller name="mode" control={paymentForm.control}
-                  render={({ field }) => <SelectField {...field} label="Mode" options={[
+                  render={({ field }) => <SelectField {...field} onChange={(e) => { field.onChange(e); setPayMeta(blankMeta()); setShowMetaErrors(false); }} label="Mode" options={[
                     { value: 'CASH', label: 'Cash' }, { value: 'CARD', label: 'Card' },
                     { value: 'UPI', label: 'UPI' }, { value: 'BANK_TRANSFER', label: 'Bank Transfer' },
                     { value: 'CHEQUE', label: 'Cheque' },
@@ -174,13 +188,20 @@ export function Clients() {
                   render={({ field }) => <TextField {...field} fullWidth label="Reference No." />} />
               </Grid>
               <Grid item xs={12}>
+                <SelectField size="small" label="Collected at branch (optional)" value={payBranchId} emptyLabel="Not specified"
+                  onChange={(e) => { setPayBranchId(e.target.value); setPayMeta(blankMeta()); }}
+                  options={branches.map((b: any) => ({ value: b.id, label: b.name }))} helperText="Choose a branch to pick its POS terminal or bank" />
+              </Grid>
+              <PaymentLegFields mode={payMode} value={payMeta} onChange={(p) => setPayMeta((m) => ({ ...m, ...p }))} options={payOptions}
+                isLoading={optionsLoading} isError={optionsError} showErrors={showMetaErrors} error={legMetaError(payMode, payMeta, payOptions)} sm={12} />
+              <Grid item xs={12}>
                 <Controller name="notes" control={paymentForm.control}
                   render={({ field }) => <TextField {...field} fullWidth label="Notes" multiline minRows={2} />} />
               </Grid>
             </Grid>
           </DialogContent>
           <DialogActions sx={{ p: 2.5 }}>
-            <Button onClick={() => setPaymentClient(null)}>Cancel</Button>
+            <Button onClick={closePayment}>Cancel</Button>
             <Button type="submit" variant="contained" disabled={paymentMutation.isPending}>Record Payment</Button>
           </DialogActions>
         </form>

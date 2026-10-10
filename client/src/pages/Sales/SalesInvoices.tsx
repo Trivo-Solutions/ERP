@@ -18,6 +18,8 @@ import { printInvoice } from '../../utils/printInvoice';
 import { printCreditNote } from '../../utils/printCreditNote';
 import { useAuthStore } from '../../store/auth.store';
 import { PermissionGate } from '../../components/auth/PermissionGate';
+import { PaymentLegFields, usePaymentOptions } from '../../components/sales/PaymentLegFields';
+import { LegMeta, blankMeta, legMetaPayload, legMetaError } from '../../utils/paymentLegMeta';
 
 function fmt(n: number) {
   return '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
@@ -25,10 +27,14 @@ function fmt(n: number) {
 
 // ─── Invoice Detail Drawer (with Record Payment) ───────────────────────────────
 
-function RecordPaymentForm({ invoiceId, balanceDue }: { invoiceId: string; balanceDue: number }) {
+function RecordPaymentForm({ invoiceId, balanceDue, branchId }: { invoiceId: string; balanceDue: number; branchId?: string }) {
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
-  const { control, handleSubmit, reset } = useForm({
+  // Provider / terminal choices for the invoice's own branch; the server re-validates whatever is sent.
+  const { options: payOptions, isLoading: optionsLoading, isError: optionsError } = usePaymentOptions(branchId);
+  const [meta, setMeta] = useState<LegMeta>(blankMeta());
+  const [showMetaErrors, setShowMetaErrors] = useState(false);
+  const { control, handleSubmit, reset, watch } = useForm({
     defaultValues: {
       paymentDate: new Date().toISOString().split('T')[0],
       amount: balanceDue,
@@ -39,9 +45,10 @@ function RecordPaymentForm({ invoiceId, balanceDue }: { invoiceId: string; balan
 
   const mutation = useMutation({
     mutationFn: (data: any) => apiPost(`/sales/invoices/${invoiceId}/payment`, {
-      ...data, paymentDate: new Date(data.paymentDate), amount: Number(data.amount),
+      ...data, paymentDate: new Date(data.paymentDate), amount: Number(data.amount), ...legMetaPayload(data.mode, meta, payOptions),
     }),
     onSuccess: () => {
+      setMeta(blankMeta()); setShowMetaErrors(false);
       qc.invalidateQueries({ queryKey: ['invoice-detail', invoiceId] });
       qc.invalidateQueries({ queryKey: ['sales-invoices'] });
       reset();
@@ -51,7 +58,7 @@ function RecordPaymentForm({ invoiceId, balanceDue }: { invoiceId: string; balan
   });
 
   return (
-    <form onSubmit={handleSubmit((d) => mutation.mutate(d))}>
+    <form onSubmit={handleSubmit((d) => { setShowMetaErrors(true); if (legMetaError(d.mode, meta, payOptions)) return; mutation.mutate(d); })}>
       <Stack direction="row" spacing={1} alignItems="flex-start">
         <Controller name="paymentDate" control={control}
           render={({ field }) => (
@@ -64,7 +71,7 @@ function RecordPaymentForm({ invoiceId, balanceDue }: { invoiceId: string; balan
           )} />
         <Controller name="mode" control={control}
           render={({ field }) => (
-            <TextField {...field} select size="small" label="Mode" sx={{ width: 130 }}>
+            <TextField {...field} onChange={(e) => { field.onChange(e); setMeta(blankMeta()); setShowMetaErrors(false); }} select size="small" label="Mode" sx={{ width: 130 }}>
               <MenuItem value="CASH">Cash</MenuItem>
               <MenuItem value="CARD">Card</MenuItem>
               <MenuItem value="UPI">UPI</MenuItem>
@@ -79,6 +86,10 @@ function RecordPaymentForm({ invoiceId, balanceDue }: { invoiceId: string; balan
           Record
         </Button>
       </Stack>
+      <Grid container spacing={1} sx={{ mt: 0.5 }}>
+        <PaymentLegFields mode={watch('mode')} value={meta} onChange={(p) => setMeta((m) => ({ ...m, ...p }))} options={payOptions}
+          isLoading={optionsLoading} isError={optionsError} showErrors={showMetaErrors} error={legMetaError(watch('mode'), meta, payOptions)} sm={4} />
+      </Grid>
     </form>
   );
 }
@@ -449,7 +460,7 @@ function InvoiceDrawer({ invoiceId, onClose, onEdit }: { invoiceId: string; onCl
               <PermissionGate permission="payment:create">
                 <Divider sx={{ my: 2 }} />
                 <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1 }}>Record Payment</Typography>
-                <RecordPaymentForm invoiceId={invoice.id} balanceDue={Number(invoice.balanceDue)} />
+                <RecordPaymentForm invoiceId={invoice.id} balanceDue={Number(invoice.balanceDue)} branchId={invoice.branchId} />
               </PermissionGate>
             )}
           </>

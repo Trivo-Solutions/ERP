@@ -3,7 +3,7 @@ import {
   DesignServices, ShoppingCart, Inventory2, Assignment, Factory,
   Engineering, Verified, PointOfSale, AccountBalance,
   Dashboard, Settings,
-  HardwareOutlined, PhotoCamera, Assessment, AltRoute, Style, Tune, Calculate, People, LocalOffer,
+  HardwareOutlined, PhotoCamera, Assessment, AltRoute, Style, Tune, Calculate, People, LocalOffer, Payments,
 } from '@mui/icons-material';
 
 export interface NavItem {
@@ -183,5 +183,6 @@ export const NAV_ITEMS: NavItem[] = [
       { label: 'Roles & Permissions', path: '/settings/roles', permission: 'role:view' },
     ],
   },
+  { label: 'Payment Setup', icon: <Payments />, path: '/settings/payment-config', permission: 'paymentConfig:view' },
   { label: 'Settings', icon: <Settings />, path: '/settings', permission: 'system:config' },
 ];

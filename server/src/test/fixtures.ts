@@ -247,6 +247,10 @@ export async function cleanupTestTenant(t: TestTenant) {
   // membership they created).
   await prisma.auditLog.deleteMany({ where: { companyId } });
   await prisma.companyInvitation.deleteMany({ where: { companyId } });
+  // Payment Configuration: payment legs (deleted above) point at terminals/providers; terminals and allocations point at branches.
+  await prisma.posTerminal.deleteMany({ where: { companyId } });
+  await prisma.branchPaymentProvider.deleteMany({ where: { companyId } });
+  await prisma.paymentProvider.deleteMany({ where: { companyId } });
   await prisma.userBranchAccess.deleteMany({ where: { companyId } });
   await prisma.companyUser.deleteMany({ where: { companyId } });
   await prisma.branch.deleteMany({ where: { companyId } });

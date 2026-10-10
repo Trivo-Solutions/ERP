@@ -236,6 +236,22 @@ CLI equivalent: `npm run company:provision -- --code VASAVI --name "Vasavi Jewel
 | GET | `/staff` | `estimation:view` | Active staff of this company for the sales-employee picker (`id` = User id) |
 | GET/POST/PUT | `/templates…` | `estimateTemplate:view` / `manage` | Print templates |
 
+### Payment Configuration — `/payment-config` (provider master, branch availability, POS terminals)
+
+Selection + reconciliation metadata for payment legs. It never posts money: the ledger still books Cash vs Bank only, and a UTR / auth code / TID entered here is **not** proof of settlement (there is no gateway or acquirer integration). No credential of any kind is stored.
+
+| Method | Path | Permission | Description |
+|---|---|---|---|
+| GET | `/options?branchId=` | `payment:create` / `payment:view` / `paymentConfig:view` | Active providers (allocated at the branch) and active terminals at that branch, plus `requireTerminalForCard` / `requireProviderForBankTransfer`. Branch must be one the caller is granted (404 otherwise) |
+| GET/POST | `/providers` | `paymentConfig:view` / `manage` | `{ name, shortCode?, category: BANK|UPI_PROVIDER|ACQUIRER|OTHER, supportedMethods[] (CARD,UPI,BANK_TRANSFER,CHEQUE), merchantRef? }`; `?q=&active=` |
+| PATCH | `/providers/:id` | `paymentConfig:manage` | Edit / `isActive` (audited `EDIT`/`DEACTIVATE`/`REACTIVATE`). Never deleted |
+| GET/POST | `/branch-providers` | `paymentConfig:view` / `manage` | Which providers a branch collects through (`?branchId=`); POST `{ branchId, providerId }` is idempotent |
+| DELETE | `/branch-providers/:branchId/:providerId` | `paymentConfig:manage` | Remove an allocation (past payments untouched) |
+| GET/POST | `/terminals` | `paymentConfig:view` / `manage` | `{ code, name, providerId, tid, mid?, supportedMethods[] (CARD,UPI), branchId }`. TID is unique per **company + provider + MID** (a missing MID counts as one value) — never globally. A restricted user only lists their branches' terminals |
+| PATCH | `/terminals/:id` | `paymentConfig:manage` | Edit / move to another branch (audited `REASSIGN`) / `isActive`. Rewrites no past payment |
+
+**Payment legs.** `POST /sales/invoices` `payments[]`, `POST /sales/invoices/:id/payment`, `POST /sales/clients/:id/payments` (also takes `branchId`) and `POST /sales/advances` `payments[]` accept per-leg `providerId`, `terminalId`, `authCode`, `chequeNumber`, `chequeDate`, `chequeBank` (all optional; `referenceNo` stays the UTR). Rules (`shared/paymentMetadata.ts`, same on every flow): **CASH** takes none (400 if sent); **CARD** → an active terminal assigned to the payment's branch that supports CARD (provider derived from it); **UPI** → optional provider (active, allocated at the branch) and optional terminal; **BANK_TRANSFER** → provider; **CHEQUE** → cheque no./date/bank + optional provider. A supplied id is always validated (other company's / unknown id → 404, other branch / unsupported method → 400, inactive → 409). **"Required" applies once the branch has an active terminal (card) / allocated provider (transfer) configured** — an unconfigured branch keeps accepting today's legacy payloads. Each leg stores a *snapshot* (`providerName`, `terminalCode`, `terminalTid`, `terminalMid`) so later config changes never rewrite history. An auth code shaped like a card number (Luhn) is refused. Credit-settlement legs (`OLD_GOLD`, `STORE_CREDIT`, `CUSTOMER_ADVANCE`) take none.
+
 ### Offers — `/offers` (step 1 of offer management — definitions only)
 
 Dated offers on the **sale** rates (making charge, VA, stone, metal). Nothing here edits a tag; estimates/bills do not apply offers yet (step 2).

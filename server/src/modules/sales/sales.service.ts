@@ -35,13 +35,16 @@ import { TenantContext, tenantTransaction, tenantQuery, tenantBatch } from '../.
 import { assertBranchAccessible, assertOwnedByCompany, assertAllOwned } from '../../middleware/tenant';
 import { assertGstr1DocumentMutable, auditGstr1MutationBlocked } from '../finance/gst/gstr1FilingProtection';
 import { assertGstr3bPeriodMutable, auditGstr3bMutationBlocked } from '../finance/gst/gstr3bFilingProtection';
+import { resolvePaymentLegMeta, hasPaymentMeta, PaymentLegMetaInput } from '../../shared/paymentMetadata';
 
 // The customer's old metal handed over against this bill (mode OLD_GOLD) — see createInvoice.
 type OldGoldInput = {
   description: string; karat: string; grossWeight: number; stoneWeight?: number; deductionPercent?: number;
 };
 
-type PaymentInput = {
+// Payment Configuration: a leg may also carry providerId / terminalId / authCode / cheque details (PaymentLegMetaInput),
+// validated against the company's configuration by resolvePaymentLegMeta - metadata only, accounting is unchanged.
+type PaymentInput = PaymentLegMetaInput & {
   paymentDate: Date; amount: number; mode: string;
   referenceNo?: string; forexRate?: number; notes?: string;
   /** Required when mode is OLD_GOLD; `amount` is then ignored — the server values the metal itself. */
@@ -1438,7 +1441,7 @@ export async function voidInvoice(invoiceId: string, ctx: TenantContext, userId:
 export async function applyPayment(
   tx: Prisma.TransactionClient,
   companyId: string,
-  invoice: { id: string; clientId: string; paidAmount: unknown; totalAmount: unknown; exchangeRate: unknown },
+  invoice: { id: string; clientId: string; paidAmount: unknown; totalAmount: unknown; exchangeRate: unknown; branchId?: string | null },
   data: PaymentInput,
   userId: string,
   // fromCredit: this "payment" settles the bill out of credit the customer already holds (old gold just
@@ -1461,12 +1464,17 @@ export async function applyPayment(
     throw new AppError(`Advance ${advance.adv.advanceNumber} has only ${advance.remaining.toFixed(2)} available; ${data.amount.toFixed(2)} was asked for`, 409);
   }
 
+  // Provider / terminal / cheque metadata for THIS leg only (never merged across split legs). Validated before any write;
+  // a failure throws inside the caller's transaction, so nothing of the sale or this payment is kept.
+  const leg = await resolvePaymentLegMeta(tx, companyId, invoice.branchId, data.mode, data, { credit: !!(opts.fromCredit || advance) });
+
   const newPaid = Number(invoice.paidAmount) + data.amount;
   const newBalance = Number(invoice.totalAmount) - newPaid;
   const paymentNumber = await nextDocumentNumber(companyId, 'PMT', 'PMT', tx, data.paymentDate.getFullYear());
 
   const payment = await tx.invoicePayment.create({
     data: {
+      ...leg, branchId: invoice.branchId ?? null,
       companyId, paymentNumber, invoiceId: invoice.id, clientId: invoice.clientId,
       paymentDate: data.paymentDate, amount: data.amount,
       mode: advance ? PAYMENT_MODE_CUSTOMER_ADVANCE : data.mode, referenceNo: advance ? advance.adv.advanceNumber : data.referenceNo, notes: data.notes,
@@ -1534,6 +1542,8 @@ export async function recordPayment(data: PaymentInput & { invoiceId: string }, 
     const invoice = await tx.salesInvoice.findUniqueOrThrow({ where: { id: data.invoiceId } });
     // J3 Decision 5: a voided invoice is closed — it can never receive a new payment.
     if (invoice.status === 'VOID') throw new AppError('This invoice has been voided and cannot receive a payment', 409);
+    // Provider / terminal data is branch-scoped: the caller must be allowed at the invoice's branch to use it.
+    if (hasPaymentMeta(data)) await assertBranchAccessible(invoice.branchId, ctx);
     return applyPayment(tx, ctx.companyId, invoice, data, userId);
   });
 }
@@ -1759,19 +1769,25 @@ export async function reverseInvoicePayment(paymentId: string, ctx: TenantContex
 // outstanding balance rather than one specific invoice. Same InvoicePayment row shape and PMT-
 // numbering as an invoice-scoped payment (applyPayment above), just with no invoice to update
 // paidAmount/balanceDue/status on: this only ever moves client.currentBalance and the ledger.
-export async function recordClientPayment(data: PaymentInput & { clientId: string }, ctx: TenantContext, userId: string) {
+export async function recordClientPayment(data: PaymentInput & { clientId: string; branchId?: string }, ctx: TenantContext, userId: string) {
   if (data.amount <= 0) throw new AppError('Payment amount must be positive', 400);
   assertReceiptMode(data.mode);
+  // A standalone receipt has no invoice to take a branch from: provider/terminal data needs the collecting branch named.
+  if (data.branchId !== undefined && data.branchId !== null && typeof data.branchId !== 'string') throw new AppError('branchId must be a string', 400);
+  if (data.branchId) await assertBranchAccessible(data.branchId, ctx);
+  else if (hasPaymentMeta(data)) throw new AppError('branchId is required to record a provider or terminal', 400);
   const client = await tenantQuery(ctx.companyId, (tx) => tx.client.findUnique({ where: { id: data.clientId }, select: { companyId: true, name: true, isActive: true } }));
   if (!client || client.companyId !== ctx.companyId) throw new AppError('Client not found', 404);
   assertClientActive(client);
 
   return tenantTransaction(ctx.companyId, async (tx) => {
     await assertCashLimit(tx, ctx.companyId, data.clientId, data); // Sec 269ST — an advance is a receipt too
+    const leg = await resolvePaymentLegMeta(tx, ctx.companyId, data.branchId, data.mode, data);
     const paymentNumber = await nextDocumentNumber(ctx.companyId, 'PMT', 'PMT', tx, data.paymentDate.getFullYear());
 
     const payment = await tx.invoicePayment.create({
       data: {
+        ...leg, branchId: data.branchId ?? null,
         companyId: ctx.companyId, paymentNumber, clientId: data.clientId, invoiceId: null,
         paymentDate: data.paymentDate, amount: data.amount,
         mode: data.mode, referenceNo: data.referenceNo, notes: data.notes,

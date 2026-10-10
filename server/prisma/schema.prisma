@@ -125,6 +125,9 @@ model Company {
   tagImages                   TagImage[]
   photographyCaptureCommands  PhotographyCaptureCommand[]
   customerAdvancePayments     CustomerAdvancePayment[]
+  paymentProviders            PaymentProvider[]
+  branchPaymentProviders      BranchPaymentProvider[]
+  posTerminals                PosTerminal[]
   customerAdvanceApplications CustomerAdvanceApplication[]
   stoneLots                   StoneLot[]
   stoneLotSplits              StoneLotSplit[]
@@ -2919,6 +2922,9 @@ model Branch {
   oldGoldExchanges    OldGoldExchange[]
   metalStockMovements MetalStockMovement[]
   customerAdvances    CustomerAdvance[]
+  invoicePayments     InvoicePayment[]
+  branchPaymentProviders BranchPaymentProvider[]
+  posTerminals        PosTerminal[]
   taxInvoiceTemplates TaxInvoiceTemplate[]
   photographyStations PhotographyStation[]
   creditNoteTemplates CreditNoteTemplate[]
@@ -3900,12 +3906,109 @@ model InvoicePayment {
   reversalReason      String?
   // Customer Advances: set when this payment was settled from a customer advance.
   advanceApplications CustomerAdvanceApplication[] // at most one (invoicePaymentId is unique)
+  // Branch the money was collected at (the invoice's branch, or the one named on a standalone receipt). Nullable: legacy rows.
+  branchId     String?
+  branch       Branch? @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  // Payment Configuration: per-leg collection metadata. All nullable (legacy rows carry none; nothing is back-filled).
+  // The *Name/*Tid/*Mid/*Code columns are SNAPSHOTS taken when the leg was recorded, so deactivating, renaming or
+  // reassigning a provider/terminal later never changes what a past receipt says (reconciliation keeps working).
+  // referenceNo stays the UTR / transaction reference; none of this is proof of settlement.
+  providerId   String?
+  provider     PaymentProvider? @relation(fields: [providerId, companyId], references: [id, companyId], onDelete: Restrict)
+  terminalId   String?
+  terminal     PosTerminal?     @relation(fields: [terminalId, companyId], references: [id, companyId], onDelete: Restrict)
+  providerName String?
+  terminalCode String?
+  terminalTid  String?
+  terminalMid  String?
+  authCode     String?
+  chequeNumber String?
+  chequeDate   DateTime?
+  chequeBank   String?
 
   @@unique([companyId, paymentNumber])
   // Composite-FK target so an advance application can only point at a payment of the SAME customer and company.
   @@unique([id, clientId, companyId])
   @@index([companyId])
+  @@index([companyId, terminalId])
   @@map("invoice_payments")
+}
+
+// Payment Configuration — a bank / payment provider the company collects through (issuing bank, acquirer, UPI app...).
+// Pure master data: it is selection + reconciliation metadata and never a second accounting source of truth (the ledger
+// still books Cash vs Bank only). Never holds credentials or account numbers. Deactivate, never delete, once used.
+model PaymentProvider {
+  id               String                   @id @default(cuid())
+  companyId        String
+  company          Company                  @relation(fields: [companyId], references: [id])
+  name             String
+  shortCode        String?
+  // BANK | UPI_PROVIDER | ACQUIRER | OTHER - what the provider IS; the payment methods it serves are supportedMethods.
+  category         String
+  supportedMethods String[]
+  // Optional NON-secret merchant / account label (e.g. a VPA handle). Never a credential.
+  merchantRef      String?
+  isActive         Boolean                  @default(true)
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
+
+  branchLinks      BranchPaymentProvider[]
+  terminals        PosTerminal[]
+  invoicePayments  InvoicePayment[]
+  advancePayments  CustomerAdvancePayment[]
+
+  @@unique([companyId, name])
+  @@unique([companyId, shortCode])
+  @@unique([id, companyId])
+  @@index([companyId, isActive])
+  @@map("payment_providers")
+}
+
+// Which providers a branch collects through. A provider can serve many branches; a branch can have many providers.
+model BranchPaymentProvider {
+  id         String          @id @default(cuid())
+  companyId  String
+  company    Company         @relation(fields: [companyId], references: [id])
+  branchId   String
+  branch     Branch          @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  providerId String
+  provider   PaymentProvider @relation(fields: [providerId, companyId], references: [id, companyId], onDelete: Restrict)
+  isActive   Boolean         @default(true)
+  createdAt  DateTime        @default(now())
+
+  @@unique([branchId, providerId])
+  @@unique([id, companyId])
+  @@index([companyId, branchId])
+  @@map("branch_payment_providers")
+}
+
+// A physical card/POS machine. NOT a HardwareDevice (that is a scale / barcode / RFID reader on a port). TIDs are unique
+// per acquirer (+ merchant), never globally: the DB enforces (companyId, providerId, COALESCE(mid,''), tid) - see the
+// migration. A terminal belongs to exactly one branch at a time; moving it rewrites no past payment (snapshots).
+model PosTerminal {
+  id               String                   @id @default(cuid())
+  companyId        String
+  company          Company                  @relation(fields: [companyId], references: [id])
+  code             String
+  name             String
+  providerId       String
+  provider         PaymentProvider          @relation(fields: [providerId, companyId], references: [id, companyId], onDelete: Restrict)
+  tid              String
+  mid              String?
+  supportedMethods String[]
+  branchId         String
+  branch           Branch                   @relation(fields: [branchId, companyId], references: [id, companyId], onDelete: Restrict)
+  isActive         Boolean                  @default(true)
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
+
+  invoicePayments  InvoicePayment[]
+  advancePayments  CustomerAdvancePayment[]
+
+  @@unique([companyId, code])
+  @@unique([id, companyId])
+  @@index([companyId, branchId, isActive])
+  @@map("pos_terminals")
 }
 
 // Customer Advance (Phase 1: schema only). Money a customer pays BEFORE any invoice, held as a LIABILITY
@@ -3965,9 +4068,26 @@ model CustomerAdvancePayment {
   amount      Decimal         @db.Decimal(12, 2)
   referenceNo String?
   createdAt   DateTime        @default(now())
+  // Payment Configuration: per-leg collection metadata. All nullable (legacy rows carry none; nothing is back-filled).
+  // The *Name/*Tid/*Mid/*Code columns are SNAPSHOTS taken when the leg was recorded, so deactivating, renaming or
+  // reassigning a provider/terminal later never changes what a past receipt says (reconciliation keeps working).
+  // referenceNo stays the UTR / transaction reference; none of this is proof of settlement.
+  providerId   String?
+  provider     PaymentProvider? @relation(fields: [providerId, companyId], references: [id, companyId], onDelete: Restrict)
+  terminalId   String?
+  terminal     PosTerminal?     @relation(fields: [terminalId, companyId], references: [id, companyId], onDelete: Restrict)
+  providerName String?
+  terminalCode String?
+  terminalTid  String?
+  terminalMid  String?
+  authCode     String?
+  chequeNumber String?
+  chequeDate   DateTime?
+  chequeBank   String?
 
   @@index([companyId, advanceId])
   @@index([companyId, mode])
+  @@index([companyId, terminalId])
   @@map("customer_advance_payments")
 }
 

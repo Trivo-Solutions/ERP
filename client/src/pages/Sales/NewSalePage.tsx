@@ -25,6 +25,8 @@ import { MaterialPricingDialog, MaterialPricingEntry, applyOfferToBreakdown, rem
 import { BelowOfferApprovalDialog, ApprovalNeed } from './BelowOfferApprovalDialog';
 import { SaleSummary, SaleFigures } from './SaleSummary';
 import { useAuthStore } from '../../store/auth.store';
+import { PaymentLegFields, usePaymentOptions } from '../../components/sales/PaymentLegFields';
+import { LegMeta, blankMeta, fieldsFor, legMetaPayload, legMetaError } from '../../utils/paymentLegMeta';
 import { usePageShortcuts, focusFirstField } from '../../hooks/usePageShortcuts';
 import { DataTable, DataTableColumn } from '../../components/common/DataTable';
 
@@ -138,6 +140,8 @@ interface PaymentSplit {
   og: { description: string; karat: string; gross: string; stone: string; deduction: string };
   // CUSTOMER_ADVANCE only: which of the customer's advances pays this split (money received before the bill — not Store Credit).
   advanceId?: string;
+  // Payment Configuration: this leg's own POS terminal / bank / auth code / cheque details (each split keeps its own).
+  meta?: LegMeta;
 }
 
 const PAYMENT_MODES: Array<{ value: string; label: string }> = [
@@ -321,6 +325,8 @@ export function NewSalePage() {
   const selectedClientId = watch('clientId');
   const selectedClient = clientList.find((c: any) => c.id === selectedClientId);
   const branchId = watch('branchId');
+  // Active providers / terminals of the billing branch; the server re-validates whatever each split names.
+  const { options: payOptions, isLoading: payOptionsLoading, isError: payOptionsError } = usePaymentOptions(branchId || undefined);
 
   // HSN codes/rates and whether this customer is same-state (CGST + SGST) or inter-state (IGST) — what the server will
   // apply, so the bill can be previewed before it exists. Falls back to 3% / inter-state until it arrives.
@@ -887,6 +893,12 @@ export function NewSalePage() {
   const panOnFile = !!selectedClient && (!!selectedClient.panNumber || !!selectedClient.form60Received || GSTIN_WITH_PAN.test(selectedClient.gstNumber ?? ''));
   const panBlocked = currency === 'INR' && !!selectedClient && total > PAN_REQUIRED_ABOVE && !panOnFile;
 
+  // A terminal / provider belongs to one branch: changing the billing branch clears every split's selection.
+  useEffect(() => { setPaymentSplits((p) => (p.some((s) => s.meta) ? p.map((s) => (s.meta ? { ...s, meta: undefined } : s)) : p)); }, [branchId]);
+  const updateSplitMeta = (key: string, patch: Partial<LegMeta>) =>
+    setPaymentSplits((p) => p.map((s) => (s.key === key ? { ...s, meta: { ...(s.meta ?? blankMeta()), ...patch } } : s)));
+  const splitMetaError = (s: PaymentSplit) => legMetaError(s.mode, s.meta ?? blankMeta(), payOptions);
+
   const addPaymentSplit = (prefillAmount?: number, mode = 'CASH') => {
     setPaymentSplits((p) => [...p, {
       key: nextPayKey(),
@@ -942,7 +954,7 @@ export function NewSalePage() {
       return;
     }
     setPaymentSplits((p) => p.map((s) => (s.key === split.key ? {
-      ...s, mode, advanceId: undefined,
+      ...s, mode, advanceId: undefined, meta: undefined,
       amount: mode === 'STORE_CREDIT' ? Math.round(Math.min(creditAvailable, Math.max(total - others, 0)) * 100) / 100 : s.amount,
     } : s)));
   };
@@ -1056,8 +1068,13 @@ export function NewSalePage() {
   const categoryRows = Object.entries(categoryTotals);
 
   const mutation = useMutation({
-    mutationFn: (data: any) => (isEdit ? apiPut(`/sales/invoices/${editId}`, { ...buildBody(data), payments: undefined, estimateIds: undefined, reason: editReason.trim() || undefined })
-      : apiPost('/sales/invoices', buildBody(data))),
+    mutationFn: (data: any) => {
+      // A leg missing a required terminal / bank is stopped here with its own message; the server checks it again.
+      const bad = !isEdit && collectPayment ? paymentSplits.find((s) => Number(s.amount) > 0 && splitMetaError(s)) : undefined;
+      if (bad) return Promise.reject(Object.assign(new Error('payment details'), { response: { data: { error: `${PAYMENT_MODES.find((m) => m.value === bad.mode)?.label ?? bad.mode} payment: ${splitMetaError(bad)}` } } }));
+      return (isEdit ? apiPut(`/sales/invoices/${editId}`, { ...buildBody(data), payments: undefined, estimateIds: undefined, reason: editReason.trim() || undefined })
+      : apiPost('/sales/invoices', buildBody(data)));
+    },
     onSuccess: (res: any) => {
       const inv = res?.data ?? res;
       qc.invalidateQueries({ queryKey: ['sales-invoices'] });
@@ -1106,6 +1123,7 @@ export function NewSalePage() {
               ...(p.mode === 'CUSTOMER_ADVANCE' && { advanceId: p.advanceId }),
               referenceNo: p.referenceNo || undefined,
               notes: p.notes || undefined,
+              ...legMetaPayload(p.mode, p.meta ?? blankMeta(), payOptions),
               ...(p.mode === 'OLD_GOLD' && {
                 oldGold: {
                   description: p.og.description.trim(),
@@ -1583,6 +1601,22 @@ export function NewSalePage() {
                                       </IconButton>
                                     </TableCell>
                                   </TableRow>
+                                  {(() => {
+                                    const f = fieldsFor(p.mode, payOptions);
+                                    const any = f.terminal || f.provider || f.authCode || f.cheque;
+                                    if (!any && !(payOptionsLoading && p.mode !== 'CASH') ) return null;
+                                    if (['OLD_GOLD', 'STORE_CREDIT', 'CUSTOMER_ADVANCE', 'CASH'].includes(p.mode)) return null;
+                                    return (
+                                      <TableRow sx={{ '& td': { bgcolor: 'action.hover' } }}>
+                                        <TableCell colSpan={6}>
+                                          <Grid container spacing={1.5} alignItems="flex-start">
+                                            <PaymentLegFields mode={p.mode} value={p.meta ?? blankMeta()} onChange={(patch) => updateSplitMeta(p.key, patch)} options={payOptions}
+                                              isLoading={payOptionsLoading} isError={payOptionsError} showErrors error={splitMetaError(p)} sm={3} />
+                                          </Grid>
+                                        </TableCell>
+                                      </TableRow>
+                                    );
+                                  })()}
                                   {p.mode === 'CUSTOMER_ADVANCE' && (
                                     <TableRow sx={{ '& td': { bgcolor: 'action.hover' } }}>
                                       <TableCell colSpan={6}>

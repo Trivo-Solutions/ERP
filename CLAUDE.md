@@ -1084,6 +1084,19 @@ the new status `AWAITING_APPROVAL` (hidden from the billing search) and a `Disco
 and sends it as `approvalIds`, so the manager's one approval also covers the bill. The server answers 409 `APPROVAL_REASON_REQUIRED` when a reason is missing.
 Tests: `modules/offers/discountApproval.test.ts`, `offerApproval.test.ts`, `estimateApproval.test.ts`, `saleOffer.test.ts`.
 
+**Payment Configuration & Collection (2026-10-15).** Company-owned `PaymentProvider` (bank / UPI provider / acquirer — category and supported methods are separate things),
+`BranchPaymentProvider` (which branch collects through which) and `PosTerminal` (code, TID, optional MID, branch, methods) — migration
+`20261015100000_payment_configuration` (RLS + composite FKs, RESTRICT, no cascades; TID unique per company+provider+COALESCE(mid) — **not** globally; not `HardwareDevice`, which is a scale/RFID
+reader). Nullable per-leg metadata (provider/terminal ids + **snapshots** of name/code/TID/MID, auth code, cheque no./date/bank, and `InvoicePayment.branchId`) sits on the two
+existing leg tables `invoice_payments` and `customer_advance_payments` — **no parallel ledger**: `applyPayment`, `recordClientPayment` and `createCustomerAdvance` call one shared
+validator (`shared/paymentMetadata.ts: resolvePaymentLegMeta`) before their unchanged accounting. Cash takes none; card needs a branch-assigned active terminal; UPI's provider/terminal are optional;
+transfer needs a provider — **required only once the branch has such a terminal/provider configured** (so legacy CARD/BANK_TRANSFER payloads keep working for an unconfigured branch; a *supplied* id is always
+validated). A UTR/auth code is metadata, never proof of settlement (no gateway integration exists). Permissions `paymentConfig:view`/`paymentConfig:manage` (SUPER_ADMIN only until granted — **an
+already-provisioned company's roles need them added via the Role Editor, and users must log in again**); `/options` rides `payment:create`/`payment:view`. UI: `/settings/payment-config`
+(`PaymentConfigPage.tsx`) and `components/sales/PaymentLegFields.tsx` on New Sale splits, Customer Advances, invoice Record Payment and the Clients on-account dialog. Not covered: supplier
+payments (money OUT), `SalesReturn` refunds (no payment leg is recorded), the metal/Material Purchase flow (credits the customer's account; no payment legs), and the memo/wholesale conversion.
+Tests: `modules/paymentConfig/paymentConfig.test.ts`, `test/http.paymentConfig.test.ts`, client `test/paymentConfig.test.tsx`. See API.md's Payment Configuration section.
+
 ---
 
 ## 8. Known follow-ups / control gaps

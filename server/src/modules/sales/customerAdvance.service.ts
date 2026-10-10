@@ -10,6 +10,7 @@ import { assertBranchAccessible, assertOwnedByCompany } from '../../middleware/t
 import { applyPayment } from './sales.service';
 import { lockAdvances, loadSpendableAdvance } from './customerAdvanceApply';
 import { PAYMENT_MODE_CUSTOMER_ADVANCE } from '../../shared/constants';
+import { resolvePaymentLegMeta, pickPaymentMeta, PaymentLegMeta, PaymentLegMetaInput } from '../../shared/paymentMetadata';
 
 // Customer Advances, Phase 2: money received before any invoice. A LIABILITY (ledger 2400) — never AR, never
 // Client.currentBalance, never Store Credit, never an InvoicePayment. Applying one to an invoice is Phase 3 (bottom of this file).
@@ -38,7 +39,14 @@ const advanceInclude = {
   branch: { select: { id: true, name: true, branchCode: true } },
   createdBy: { select: { id: true, name: true } },
   reversedBy: { select: { id: true, name: true } },
-  payments: { select: { id: true, mode: true, amount: true, referenceNo: true }, orderBy: { createdAt: 'asc' as const } },
+  payments: {
+    select: {
+      id: true, mode: true, amount: true, referenceNo: true,
+      providerId: true, terminalId: true, providerName: true, terminalCode: true, terminalTid: true, terminalMid: true,
+      authCode: true, chequeNumber: true, chequeDate: true, chequeBank: true,
+    },
+    orderBy: { createdAt: 'asc' as const },
+  },
 } satisfies Prisma.CustomerAdvanceInclude;
 
 type AdvanceRow = Prisma.CustomerAdvanceGetPayload<{ include: typeof advanceInclude }>;
@@ -52,20 +60,21 @@ function present(a: AdvanceRow) {
     client: a.client, branch: a.branch,
     amount: Number(a.amount), appliedAmount: Number(a.appliedAmount), refundedAmount: Number(a.refundedAmount),
     availableAmount: available, mode: a.mode, referenceNo: a.referenceNo, notes: a.notes,
-    payments: a.payments.map((p) => ({ id: p.id, mode: p.mode, amount: Number(p.amount), referenceNo: p.referenceNo })),
+    // Provider / terminal fields are the snapshot taken when the receipt was recorded (null for legacy rows).
+    payments: a.payments.map((p) => ({ id: p.id, mode: p.mode, amount: Number(p.amount), referenceNo: p.referenceNo, providerId: p.providerId, terminalId: p.terminalId, providerName: p.providerName, terminalCode: p.terminalCode, terminalTid: p.terminalTid, terminalMid: p.terminalMid, authCode: p.authCode, chequeNumber: p.chequeNumber, chequeDate: p.chequeDate, chequeBank: p.chequeBank })),
     createdBy: a.createdBy, createdAt: a.createdAt, status,
     reversedAt: a.reversedAt, reversedBy: a.reversedBy, reversalReason: a.reversalReason,
   };
 }
 export type AdvanceView = ReturnType<typeof present>;
 
-export type AdvancePaymentInput = { mode: string; amount: number; referenceNo?: string };
+export type AdvancePaymentInput = PaymentLegMetaInput & { mode: string; amount: number; referenceNo?: string };
 
 // Validates and normalises the payment lines (a mode may repeat, e.g. two UPI payments), each > 0 with at most 2 decimals.
-function normalisePayments(data: { amount?: number; mode?: string; referenceNo?: string; payments?: AdvancePaymentInput[] }) {
-  const raw = Array.isArray(data.payments) && data.payments.length > 0
+function normalisePayments(data: { amount?: number; mode?: string; referenceNo?: string; payments?: AdvancePaymentInput[] } & PaymentLegMetaInput) {
+  const raw: AdvancePaymentInput[] = Array.isArray(data.payments) && data.payments.length > 0
     ? data.payments
-    : [{ mode: data.mode as string, amount: data.amount as number, referenceNo: data.referenceNo }];
+    : [{ mode: data.mode as string, amount: data.amount as number, referenceNo: data.referenceNo, ...pickPaymentMeta(data as Record<string, unknown>) }];
   if (raw.length > MAX_PAYMENT_LINES) throw new AppError(`At most ${MAX_PAYMENT_LINES} payment lines`, 400);
   return raw.map((r) => {
     const amount = typeof r?.amount === 'string' ? Number(r.amount) : r?.amount;
@@ -75,7 +84,8 @@ function normalisePayments(data: { amount?: number; mode?: string; referenceNo?:
     const mode = String(r.mode ?? '').trim().toUpperCase();
     if (!(ADVANCE_MODES as readonly string[]).includes(mode)) throw new AppError(`Payment mode must be one of ${ADVANCE_MODES.join(', ')}`, 400);
     const referenceNo = r.referenceNo ? String(r.referenceNo).trim().slice(0, 120) || undefined : undefined;
-    return { mode, amount, referenceNo: mode === 'CASH' ? undefined : referenceNo };
+    // Each leg keeps its OWN provider / terminal data (two UPI legs stay two independent records).
+    return { mode, amount, referenceNo: mode === 'CASH' ? undefined : referenceNo, meta: pickPaymentMeta(r as Record<string, unknown>) };
   });
 }
 
@@ -90,7 +100,7 @@ function ledgerAmounts(lines: { mode: string; amount: number }[]) {
 }
 
 export async function createCustomerAdvance(
-  data: { clientId: string; branchId: string; amount?: number; mode?: string; referenceNo?: string; payments?: AdvancePaymentInput[]; notes?: string; idempotencyKey?: string },
+  data: { clientId: string; branchId: string; amount?: number; mode?: string; referenceNo?: string; payments?: AdvancePaymentInput[]; notes?: string; idempotencyKey?: string } & PaymentLegMetaInput,
   ctx: TenantContext, userId: string,
 ): Promise<{ advance: AdvanceView; replayed: boolean }> {
   for (const k of ['clientId', 'branchId'] as const) {
@@ -115,7 +125,8 @@ export async function createCustomerAdvance(
     : Promise.resolve(null);
   const replay = (existing: AdvanceRow) => {
     // Same key reused for a different request is a client bug, not a retry — never hand back the wrong record.
-    const sig = (xs: { mode: string; amount: Prisma.Decimal | number }[]) => xs.map((x) => `${x.mode}:${paise(x.amount)}`).sort().join(",");
+    const sig = (xs: { mode: string; amount: Prisma.Decimal | number; terminalId?: string | null; meta?: PaymentLegMetaInput }[]) =>
+      xs.map((x) => `${x.mode}:${paise(x.amount)}:${x.terminalId ?? x.meta?.terminalId ?? ''}`).sort().join(",");
     const sameLines = sig(existing.payments) === sig(lines);
     if (existing.clientId !== data.clientId || paise(existing.amount) !== paise(amount) || existing.mode !== mode || !sameLines) {
       throw new AppError('This idempotency key was already used for a different advance', 409);
@@ -132,12 +143,15 @@ export async function createCustomerAdvance(
       // Sec 269ST counts only the cash part of a split receipt.
       const cashPart = rupees(lines.filter((l) => l.mode === 'CASH').reduce((sum, l) => sum + paise(l.amount), 0));
       if (cashPart > 0) await assertCashLimit(tx, ctx.companyId, data.clientId, { paymentDate: advanceDate, amount: cashPart, mode: 'CASH' });
+      // Provider / terminal metadata per leg, validated against this branch's configuration before anything is written.
+      const legMeta: PaymentLegMeta[] = [];
+      for (const l of lines) legMeta.push(await resolvePaymentLegMeta(tx, ctx.companyId, data.branchId, l.mode, l.meta));
       const advanceNumber = await nextDocumentNumber(ctx.companyId, 'ADV', 'ADV', tx, gstFinancialYear(advanceDate));
       const row = await tx.customerAdvance.create({
         data: {
           companyId: ctx.companyId, branchId: data.branchId, clientId: data.clientId, advanceNumber, advanceDate,
           amount, mode, referenceNo, notes, createdById: userId, idempotencyKey,
-          payments: { create: lines.map((l) => ({ mode: l.mode, amount: l.amount, referenceNo: l.referenceNo })) },
+          payments: { create: lines.map((l, i) => ({ mode: l.mode, amount: l.amount, referenceNo: l.referenceNo, ...legMeta[i] })) },
         },
         include: advanceInclude,
       });

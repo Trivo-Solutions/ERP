@@ -4,6 +4,7 @@ import { requirePermission } from '../../middleware/rbac';
 import { resolveTenantContext, assertBranchAccessible } from '../../middleware/tenant';
 import { AppError } from '../../middleware/error';
 import { parseDate, parseOptionalDate } from '../../shared/parseDate';
+import { pickPaymentMeta } from '../../shared/paymentMetadata';
 import * as svc from './sales.service';
 import * as advanceSvc from './customerAdvance.service';
 import * as salesReportSvc from './salesReport.service';
@@ -294,7 +295,7 @@ salesRouter.get('/advances', requirePermission('payment:view'), async (req: Requ
 salesRouter.post('/advances', requirePermission('payment:create'), async (req: Request, res: Response) => {
   const b = req.body ?? {};
   const { advance, replayed } = await advanceSvc.createCustomerAdvance(
-    { clientId: b.clientId, branchId: b.branchId, amount: b.amount, mode: b.mode, referenceNo: b.referenceNo, payments: b.payments, notes: b.notes, idempotencyKey: b.idempotencyKey },
+    { clientId: b.clientId, branchId: b.branchId, amount: b.amount, mode: b.mode, referenceNo: b.referenceNo, payments: b.payments, notes: b.notes, idempotencyKey: b.idempotencyKey, ...pickPaymentMeta(b) },
     req.tenant!, req.user!.userId,
   );
   res.status(replayed ? 200 : 201).json({ success: true, data: advance, replayed });
