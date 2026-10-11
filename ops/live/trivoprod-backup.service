@@ -1,0 +1,6 @@
+[Unit]
+Description=TRIVO live nightly backup
+After=docker.service
+[Service]
+Type=oneshot
+ExecStart=/opt/trivo-prod/ops/live/backup-prod.sh

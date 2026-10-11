@@ -1,0 +1,108 @@
+# TRIVO — LIVE production stack (one client-facing deployment), kept fully separate from staging.
+#
+# Compose project name must be `trivoprod` (see `name:`) so nothing here shares a container, network or volume with the
+# staging project (`trivo`). It has its OWN Postgres container + volume (database `trivo_prod`), its own Redis, and publishes
+# only on loopback ports different from staging (api 3101, web 8180). Public routing is a host-nginx decision, made last.
+#
+# Secrets come from ./.env (compose interpolation) and ./server/.env.production — both chmod 600, never in git.
+# Procedure: DEPLOY.md §2–§6 with `-f docker-compose.live.yml`:
+#   up -d postgres redis  ->  --profile setup run --rm db-bootstrap  ->  --profile deploy run --rm migrate
+#   ->  up -d --build server client
+name: trivoprod
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: trivoprod_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: postgres
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  db-bootstrap:
+    image: postgres:16-alpine
+    profiles: ["setup"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      TRIVO_DB: ${TRIVO_DB:-trivo_prod}
+      OWNER_PW: ${OWNER_PW:?set OWNER_PW}
+      RUNTIME_PW: ${RUNTIME_PW:?set RUNTIME_PW}
+      PLATFORM_PW: ${PLATFORM_PW:?set PLATFORM_PW}
+      BACKUP_PW: ${BACKUP_PW:-}
+    volumes:
+      - ./server/prisma/production-rls-roles.sql:/sql/production-rls-roles.sql:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - psql -h postgres -U postgres -d postgres -v ON_ERROR_STOP=1 -v db="$$TRIVO_DB" -v owner_pw="$$OWNER_PW" -v runtime_pw="$$RUNTIME_PW" -v platform_pw="$$PLATFORM_PW" -v backup_pw="$$BACKUP_PW" -f /sql/production-rls-roles.sql
+
+  migrate:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    profiles: ["deploy"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${OWNER_DATABASE_URL:?set OWNER_DATABASE_URL (the trivo_owner connection string)}
+    command:
+      - sh
+      - -c
+      - npx prisma migrate deploy && npx prisma db execute --file prisma/db-secure.sql --schema prisma/schema.prisma
+
+  redis:
+    image: redis:7-alpine
+    container_name: trivoprod_redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: trivoprod_server
+    restart: unless-stopped
+    env_file:
+      - server/.env.production
+    ports:
+      - "127.0.0.1:3101:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  client:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-}
+    container_name: trivoprod_client
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8180:80"
+    depends_on:
+      - server
+
+volumes:
+  pg_data:
+  redis_data:

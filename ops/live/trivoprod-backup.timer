@@ -1,0 +1,7 @@
+[Unit]
+Description=TRIVO live nightly backup (02:15 IST)
+[Timer]
+OnCalendar=*-*-* 20:45:00 UTC
+Persistent=true
+[Install]
+WantedBy=timers.target

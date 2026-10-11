@@ -27,7 +27,8 @@ RUN mkdir -p /tmp/printer-agent-download \
 ARG VITE_API_URL
 ENV VITE_API_URL=${VITE_API_URL}
 
-RUN npm run build --workspace=client
+# Type-checking (tsc, incl. the vitest test files) runs in dev/CI; the image build only bundles, since vitest is a root devDependency this image does not install.
+RUN npm exec --workspace=client -- vite build
 
 # --- runtime stage ---
 FROM nginx:1.27-alpine AS runtime
