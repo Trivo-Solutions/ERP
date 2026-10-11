@@ -133,6 +133,10 @@ export async function resolvePaymentLegMeta(
     if (mode === 'BANK_TRANSFER' && await branchHasActiveProvider(tx, companyId, branchId, 'BANK_TRANSFER')) {
       throw new AppError('Select the bank / provider for this bank transfer', 400);
     }
+    // A branch can collect UPI through several banks: once any is set up the collector must say which one.
+    if (mode === 'UPI' && await branchHasActiveProvider(tx, companyId, branchId, 'UPI')) {
+      throw new AppError('Select the bank / provider this UPI payment was received in', 400);
+    }
     return {};
   }
   const inp = input as PaymentLegMetaInput;
@@ -166,6 +170,9 @@ export async function resolvePaymentLegMeta(
   if (chequeBank) out.chequeBank = chequeBank;
 
   if (!providerId && !terminalId) {
+    if (branchId && mode === 'UPI' && await branchHasActiveProvider(tx, companyId, branchId, 'UPI')) {
+      throw new AppError('Select the bank / provider this UPI payment was received in', 400);
+    }
     // Only an auth code / cheque details were sent: the same "configured branch" rules still apply.
     if (branchId && mode === 'CARD' && await branchHasActiveTerminal(tx, companyId, branchId, 'CARD')) {
       throw new AppError('Select the POS terminal used for this card payment', 400);

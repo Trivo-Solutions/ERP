@@ -46,12 +46,16 @@ describe('payment leg fields follow the selected method', () => {
     expect(fieldsFor('CARD', OPTIONS)).toMatchObject({ terminalRequired: true });
   });
 
-  it('upi offers only UPI providers and an OPTIONAL terminal, never forcing a POS', () => {
+  it('upi asks for the bank (several can take UPI at a branch) and never forces a POS terminal', () => {
     const f = fieldsFor('UPI', OPTIONS);
     expect(f.providers.map((p) => p.id)).toEqual(['p-upi', 'p-sbi']);
     expect(f.terminal).toBe(false); // the only terminal is card-only
-    expect(f.providerRequired).toBe(false);
-    expect(legMetaError('UPI', blankMeta(), OPTIONS)).toBe('');
+    expect(f.providerRequired).toBe(true);
+    expect(legMetaError('UPI', blankMeta(), OPTIONS)).toMatch(/bank/i);
+    expect(legMetaError('UPI', { ...blankMeta(), providerId: 'p-upi' }, OPTIONS)).toBe('');
+    expect(leg('UPI', OPTIONS)).toContain('Bank / provider');
+    expect(leg('UPI', OPTIONS)).not.toContain('POS terminal');
+    expect(leg('UPI', EMPTY)).toContain('No bank is set up for UPI');
   });
 
   it('bank transfer requires a provider that serves transfers', () => {

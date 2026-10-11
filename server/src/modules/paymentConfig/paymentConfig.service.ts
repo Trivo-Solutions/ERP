@@ -276,6 +276,7 @@ export async function getCollectionOptions(ctx: TenantContext, branchId: string)
       // The same switches resolvePaymentLegMeta applies on save, so the UI can mark the field required up front.
       requireTerminalForCard: terminals.some((t) => t.supportedMethods.includes('CARD')),
       requireProviderForBankTransfer: providers.some((p) => p.supportedMethods.includes('BANK_TRANSFER')),
+      requireProviderForUpi: providers.some((p) => p.supportedMethods.includes('UPI')),
     };
   });
 }

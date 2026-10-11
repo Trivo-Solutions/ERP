@@ -9,7 +9,7 @@ export interface OptionProvider { id: string; name: string; shortCode?: string |
 export interface OptionTerminal { id: string; code: string; name: string; tid: string; mid?: string | null; supportedMethods: string[]; providerId: string; providerName: string }
 export interface CollectionOptions {
   branchId: string; providers: OptionProvider[]; terminals: OptionTerminal[];
-  requireTerminalForCard: boolean; requireProviderForBankTransfer: boolean;
+  requireTerminalForCard: boolean; requireProviderForBankTransfer: boolean; requireProviderForUpi?: boolean;
 }
 
 export interface LegFields {
@@ -31,7 +31,8 @@ export function fieldsFor(mode: string, options: CollectionOptions | null | unde
       // Card is taken on a physical machine: the terminal is the thing to choose (it carries its own acquirer).
       return { ...none, terminal: terminals.length > 0, terminalRequired: options.requireTerminalForCard, terminals, authCode: true };
     case 'UPI':
-      return { ...none, provider: providers.length > 0, providers, terminal: terminals.length > 0, terminals };
+      // Several banks can take UPI at one branch, so the bank is a required choice once any is set up.
+      return { ...none, provider: providers.length > 0, providerRequired: providers.length > 0 && options.requireProviderForUpi !== false, providers, terminal: terminals.length > 0, terminals };
     case 'BANK_TRANSFER':
       return { ...none, provider: providers.length > 0, providerRequired: options.requireProviderForBankTransfer, providers };
     case 'CHEQUE':

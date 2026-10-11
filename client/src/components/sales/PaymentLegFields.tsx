@@ -35,9 +35,11 @@ interface Props {
   error?: string;
   /** Grid item sizes; the host screen decides the density. */
   xs?: number; sm?: number;
+  /** Dense layout for grid rows: no blank helper line under each field (it only shows when there is an error). */
+  compact?: boolean;
 }
 
-export function PaymentLegFields({ mode, value, onChange, options, isLoading, isError, showErrors, error, xs = 12, sm = 4 }: Props) {
+export function PaymentLegFields({ mode, value, onChange, options, isLoading, isError, showErrors, error, xs = 12, sm = 4, compact }: Props) {
   const f = fieldsFor(mode, options);
   const m = mode.toUpperCase();
   if (isLoading && m !== 'CASH') {
@@ -46,7 +48,12 @@ export function PaymentLegFields({ mode, value, onChange, options, isLoading, is
   if (isError && m !== 'CASH') {
     return <Grid item xs={12}><span role="alert" style={{ fontSize: 12, color: '#b71c1c' }}>Could not load this branch&apos;s providers and terminals. You can still save; the server checks the payment.</span></Grid>;
   }
+  const blank = compact ? undefined : ' ';
   const bad = !!(showErrors && error);
+  // Nothing to choose from: say why, so a missing bank is understood as a setup gap rather than a missing field.
+  if (options && (m === 'UPI' || m === 'BANK_TRANSFER') && !f.provider) {
+    return <Grid item xs={12}><span role="note" style={{ fontSize: 12, opacity: 0.7 }}>No bank is set up for {m === 'UPI' ? 'UPI' : 'bank transfers'} at this branch (Payment Setup &gt; Branch availability).</span></Grid>;
+  }
   const authBad = bad && !!value.authCode && /approval|auth|card number/i.test(error ?? '');
   return (
     <>
@@ -55,7 +62,7 @@ export function PaymentLegFields({ mode, value, onChange, options, isLoading, is
           <SelectField size="small" label={f.terminalRequired ? 'POS terminal' : 'POS terminal (optional)'} required={f.terminalRequired}
             value={value.terminalId} onChange={(e) => onChange({ terminalId: e.target.value })} emptyLabel="Select terminal"
             options={f.terminals.map((t) => ({ value: t.id, label: `${t.code} · ${t.providerName} · TID ${t.tid}` }))}
-            error={bad && f.terminalRequired && !value.terminalId} helperText={bad && f.terminalRequired && !value.terminalId ? error : ' '} />
+            error={bad && f.terminalRequired && !value.terminalId} helperText={bad && f.terminalRequired && !value.terminalId ? error : blank} />
         </Grid>
       )}
       {f.provider && (
@@ -63,29 +70,29 @@ export function PaymentLegFields({ mode, value, onChange, options, isLoading, is
           <SelectField size="small" label={f.providerRequired ? 'Bank / provider' : 'Bank / provider (optional)'} required={f.providerRequired}
             value={value.providerId} onChange={(e) => onChange({ providerId: e.target.value })} emptyLabel="Select"
             options={f.providers.map((p) => ({ value: p.id, label: p.shortCode ? `${p.name} (${p.shortCode})` : p.name }))}
-            error={bad && f.providerRequired && !value.providerId} helperText={bad && f.providerRequired && !value.providerId ? error : ' '} />
+            error={bad && f.providerRequired && !value.providerId} helperText={bad && f.providerRequired && !value.providerId ? error : blank} />
         </Grid>
       )}
       {f.authCode && (
         <Grid item xs={xs} sm={sm}>
           <TextField size="small" fullWidth label="Approval / auth code" value={value.authCode} InputLabelProps={{ shrink: true }}
             onChange={(e) => onChange({ authCode: e.target.value })} inputProps={{ maxLength: 30, autoComplete: 'off' }}
-            error={authBad} helperText={authBad ? error : ' '} />
+            error={authBad} helperText={authBad ? error : blank} />
         </Grid>
       )}
       {f.cheque && (
         <>
           <Grid item xs={xs} sm={sm}>
             <TextField size="small" fullWidth label="Cheque no." value={value.chequeNumber} InputLabelProps={{ shrink: true }}
-              onChange={(e) => onChange({ chequeNumber: e.target.value })} inputProps={{ maxLength: 30 }} helperText=" " />
+              onChange={(e) => onChange({ chequeNumber: e.target.value })} inputProps={{ maxLength: 30 }} helperText={blank} />
           </Grid>
           <Grid item xs={xs} sm={sm}>
             <TextField size="small" fullWidth type="date" label="Cheque date" value={value.chequeDate} InputLabelProps={{ shrink: true }}
-              onChange={(e) => onChange({ chequeDate: e.target.value })} helperText=" " />
+              onChange={(e) => onChange({ chequeDate: e.target.value })} helperText={blank} />
           </Grid>
           <Grid item xs={xs} sm={sm}>
             <TextField size="small" fullWidth label="Cheque bank" value={value.chequeBank} InputLabelProps={{ shrink: true }}
-              onChange={(e) => onChange({ chequeBank: e.target.value })} inputProps={{ maxLength: 80 }} helperText=" " />
+              onChange={(e) => onChange({ chequeBank: e.target.value })} inputProps={{ maxLength: 80 }} helperText={blank} />
           </Grid>
         </>
       )}

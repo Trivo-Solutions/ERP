@@ -25,8 +25,10 @@ import { MaterialPricingDialog, MaterialPricingEntry, applyOfferToBreakdown, rem
 import { BelowOfferApprovalDialog, ApprovalNeed } from './BelowOfferApprovalDialog';
 import { SaleSummary, SaleFigures } from './SaleSummary';
 import { useAuthStore } from '../../store/auth.store';
-import { PaymentLegFields, usePaymentOptions } from '../../components/sales/PaymentLegFields';
-import { LegMeta, blankMeta, fieldsFor, legMetaPayload, legMetaError } from '../../utils/paymentLegMeta';
+import { usePaymentOptions } from '../../components/sales/PaymentLegFields';
+import { PaymentLegBankCell, PaymentLegDetailCell } from '../../components/sales/PaymentLegCells';
+import { useResizableColumns } from '../../hooks/useResizableColumns';
+import { LegMeta, blankMeta, legMetaPayload, legMetaError } from '../../utils/paymentLegMeta';
 import { usePageShortcuts, focusFirstField } from '../../hooks/usePageShortcuts';
 import { DataTable, DataTableColumn } from '../../components/common/DataTable';
 
@@ -327,6 +329,8 @@ export function NewSalePage() {
   const branchId = watch('branchId');
   // Active providers / terminals of the billing branch; the server re-validates whatever each split names.
   const { options: payOptions, isLoading: payOptionsLoading, isError: payOptionsError } = usePaymentOptions(branchId || undefined);
+  // Payment table columns: date, amount, mode, reference, bank/POS, details, remarks, delete. Drag a header edge to resize.
+  const payCols = useResizableColumns([160, 140, 270, 200, 230, 230, 180, 48]);
 
   // HSN codes/rates and whether this customer is same-state (CGST + SGST) or inter-state (IGST) — what the server will
   // apply, so the bill can be previewed before it exists. Falls back to 3% / inter-state until it arrives.
@@ -1542,15 +1546,14 @@ export function NewSalePage() {
                       {collectPayment && (
                         <Box sx={{ mt: 1 }}>
                           <Box sx={{ overflowX: 'auto' }}>
-                            <Table size="small" sx={{ width: '100%', '& th, & td': { px: 1, whiteSpace: 'nowrap' }, '& td:nth-of-type(4), & td:nth-of-type(5)': { width: '50%' } }}>
+                            <Table size="small" sx={{ tableLayout: 'fixed', width: payCols.total, minWidth: '100%', '& th, & td': { px: 1, py: 0.75, whiteSpace: 'nowrap', verticalAlign: 'middle' }, '& th': { fontWeight: 700, position: 'relative' } }}>
+                              <colgroup>{payCols.widths.map((w, i) => <col key={i} style={{ width: w }} />)}</colgroup>
                               <TableHead>
                                 <TableRow>
-                                  <TableCell>Transaction Date</TableCell>
-                                  <TableCell align="right">Amount</TableCell>
-                                  <TableCell>Mode</TableCell>
-                                  <TableCell>Reference #</TableCell>
-                                  <TableCell>Remarks</TableCell>
-                                  <TableCell sx={{ width: 48 }} />
+                                  {['Transaction Date', 'Amount', 'Mode', 'Reference #', 'Bank / POS', 'Details', 'Remarks'].map((h, i) => (
+                                    <TableCell key={h} align={i === 1 ? 'right' : 'left'}>{h}{payCols.handle(i)}</TableCell>
+                                  ))}
+                                  <TableCell />
                                 </TableRow>
                               </TableHead>
                               <TableBody>
@@ -1559,7 +1562,7 @@ export function NewSalePage() {
                                   <TableRow>
                                     <TableCell>
                                       <TextField size="small" type="date" value={p.paymentDate}
-                                        InputLabelProps={{ shrink: true }} sx={{ width: 145 }}
+                                        InputLabelProps={{ shrink: true }} sx={{ width: 150 }}
                                         onChange={(e) => updatePaymentSplit(p.key, 'paymentDate', e.target.value)} />
                                     </TableCell>
                                     <TableCell align="right">
@@ -1568,14 +1571,14 @@ export function NewSalePage() {
                                         <Typography sx={{ fontFamily: 'monospace', fontWeight: 700 }}>{fmt(oldGoldValue(p))}</Typography>
                                       ) : (
                                         <TextField size="small" type="number" value={p.amount}
-                                          inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right', width: 100 } }}
+                                          inputProps={{ step: 0.01, min: 0, style: { textAlign: 'right' } }} sx={{ width: 125 }}
                                           error={p.mode === 'STORE_CREDIT' && creditBlocked}
                                           onChange={(e) => updatePaymentSplit(p.key, 'amount', Number(e.target.value))} />
                                       )}
                                     </TableCell>
                                     <TableCell>
                                       {/* Native select: arrow keys / type-ahead change it without opening it (CLAUDE.md §10). */}
-                                      <SelectField size="small" fullWidth={false} value={p.mode} sx={{ width: 230 }}
+                                      <SelectField size="small" fullWidth={false} value={p.mode} sx={{ width: 270 }}
                                         onChange={(e) => changePaymentMode(p, e.target.value)}>
                                         {PAYMENT_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
                                         <option value="METAL" disabled={!selectedClientId || !branchId}>Metal — buy old gold → Store Credit</option>
@@ -1588,11 +1591,18 @@ export function NewSalePage() {
                                       </SelectField>
                                     </TableCell>
                                     <TableCell>
-                                      <TextField size="small" fullWidth value={p.referenceNo} sx={{ minWidth: 120 }}
+                                      <TextField size="small" fullWidth value={p.referenceNo} sx={{ minWidth: 180 }}
                                         onChange={(e) => updatePaymentSplit(p.key, 'referenceNo', e.target.value)} />
                                     </TableCell>
                                     <TableCell>
-                                      <TextField size="small" fullWidth value={p.notes} sx={{ minWidth: 120 }}
+                                      <PaymentLegBankCell mode={p.mode} value={p.meta ?? blankMeta()} onChange={(patch) => updateSplitMeta(p.key, patch)} options={payOptions}
+                                        isLoading={payOptionsLoading} isError={payOptionsError} showErrors error={splitMetaError(p)} />
+                                    </TableCell>
+                                    <TableCell>
+                                      <PaymentLegDetailCell mode={p.mode} value={p.meta ?? blankMeta()} onChange={(patch) => updateSplitMeta(p.key, patch)} options={payOptions} showErrors error={splitMetaError(p)} />
+                                    </TableCell>
+                                    <TableCell>
+                                      <TextField size="small" fullWidth value={p.notes} sx={{ minWidth: 180 }}
                                         onChange={(e) => updatePaymentSplit(p.key, 'notes', e.target.value)} />
                                     </TableCell>
                                     <TableCell>
@@ -1601,25 +1611,9 @@ export function NewSalePage() {
                                       </IconButton>
                                     </TableCell>
                                   </TableRow>
-                                  {(() => {
-                                    const f = fieldsFor(p.mode, payOptions);
-                                    const any = f.terminal || f.provider || f.authCode || f.cheque;
-                                    if (!any && !(payOptionsLoading && p.mode !== 'CASH') ) return null;
-                                    if (['OLD_GOLD', 'STORE_CREDIT', 'CUSTOMER_ADVANCE', 'CASH'].includes(p.mode)) return null;
-                                    return (
-                                      <TableRow sx={{ '& td': { bgcolor: 'action.hover' } }}>
-                                        <TableCell colSpan={6}>
-                                          <Grid container spacing={1.5} alignItems="flex-start">
-                                            <PaymentLegFields mode={p.mode} value={p.meta ?? blankMeta()} onChange={(patch) => updateSplitMeta(p.key, patch)} options={payOptions}
-                                              isLoading={payOptionsLoading} isError={payOptionsError} showErrors error={splitMetaError(p)} sm={3} />
-                                          </Grid>
-                                        </TableCell>
-                                      </TableRow>
-                                    );
-                                  })()}
                                   {p.mode === 'CUSTOMER_ADVANCE' && (
                                     <TableRow sx={{ '& td': { bgcolor: 'action.hover' } }}>
-                                      <TableCell colSpan={6}>
+                                      <TableCell colSpan={8}>
                                         <Stack direction="row" spacing={1.5} alignItems="center" useFlexGap sx={{ whiteSpace: 'normal' }}>
                                           <SelectField size="small" fullWidth={false} label="Advance" value={p.advanceId ?? ''} sx={{ flex: 1, minWidth: 0 }}
                                             emptyLabel="—"
@@ -1642,7 +1636,7 @@ export function NewSalePage() {
                                   )}
                                   {p.mode === 'OLD_GOLD' && (
                                     <TableRow sx={{ '& td': { bgcolor: 'action.hover' } }}>
-                                      <TableCell colSpan={6}>
+                                      <TableCell colSpan={8}>
                                         <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" useFlexGap>
                                           <TextField size="small" label="Old item" value={p.og.description} sx={{ width: 170 }}
                                             InputLabelProps={{ shrink: true }}

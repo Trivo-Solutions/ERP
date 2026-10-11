@@ -300,6 +300,30 @@ describe('Payment Configuration & Collection', () => {
       await removeAllocation(A.ctx, A.branch.id, noUpi.id);
     });
 
+    it('UPI must name the bank once the branch has UPI banks set up (several banks can take UPI)', async () => {
+      const t = await createTestTenant(`UPI${suffix}`, []); // a fresh company/branch, so no earlier allocation interferes
+      try {
+        const c = (await prisma.client.create({ data: { companyId: t.company.id, clientCode: `PCU-${suffix}`, name: 'U', type: 'RETAIL', panNumber: 'ABCDE1234F' } })).id;
+        clientIds.push(c);
+        const upi = (p: unknown[]) => bill(c, 1000, p, t);
+        await expect(upi([pay('UPI', 1030, { referenceNo: 'U1' })])).resolves.toBeTruthy(); // nothing set up: legacy payload still fine
+        const hdfc = await createProvider(t.ctx, { name: 'HDFC', category: 'BANK', supportedMethods: ['UPI'] });
+        const sbi = await createProvider(t.ctx, { name: 'SBI', category: 'BANK', supportedMethods: ['UPI'] });
+        await allocateProvider(t.ctx, t.branch.id, hdfc.id); await allocateProvider(t.ctx, t.branch.id, sbi.id);
+        await expect(upi([pay('UPI', 1030, { referenceNo: 'U2' })])).rejects.toMatchObject({ statusCode: 400 });
+        await expect(upi([pay('UPI', 1030, { referenceNo: 'U2', providerId: '' })])).rejects.toMatchObject({ statusCode: 400 });
+        expect((await getCollectionOptions(t.ctx, t.branch.id)).requireProviderForUpi).toBe(true);
+        const inv = await upi([pay('UPI', 500, { providerId: hdfc.id, referenceNo: 'U3' }), pay('UPI', 530, { providerId: sbi.id, referenceNo: 'U4' })]);
+        expect((await legs(inv.id)).map((r) => r.providerName)).toEqual(['HDFC', 'SBI']);
+      } finally {
+        const pays = await prisma.invoicePayment.findMany({ where: { companyId: t.company.id }, select: { id: true } });
+        await cleanupJournalEntries(pays.map((p) => p.id));
+        await prisma.invoicePayment.deleteMany({ where: { companyId: t.company.id } });
+        await cleanupTestTenant(t);
+        await prisma.user.deleteMany({ where: { email: t.user.email } });
+      }
+    });
+
     it('cheque number / date / bank are captured on a cheque leg', async () => {
       const c = await mkClient(A);
       const inv = await bill(c, 1000, [pay('CHEQUE', 1030, { chequeNumber: '000123', chequeDate: '2026-10-20', chequeBank: 'Axis Bank' })]);
