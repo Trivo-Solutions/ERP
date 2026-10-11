@@ -90,8 +90,8 @@ describe('Role editor (createRole / updateRole)', () => {
   let companyB: TestTenant;
 
   beforeAll(async () => {
-    companyA = await createTestTenant(`ROLA${suffix}`, ['role:view', 'role:create', 'role:edit', 'role:delete']);
-    companyB = await createTestTenant(`ROLB${suffix}`, ['role:view', 'role:create', 'role:edit', 'role:delete']);
+    companyA = await createTestTenant(`ROLA${suffix}`, ['role:view', 'role:create', 'role:edit', 'role:delete', 'sales:view', 'invoice:create', 'tag:view', 'tag:create']);
+    companyB = await createTestTenant(`ROLB${suffix}`, ['role:view', 'role:create', 'role:edit', 'role:delete', 'sales:view', 'invoice:create', 'tag:view', 'tag:create']);
   });
 
   afterAll(async () => {

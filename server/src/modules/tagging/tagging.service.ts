@@ -476,6 +476,7 @@ export async function assertTagSaleRatesForSave(ctx: TenantContext, body: any, o
   for (const m of rows) {
     if (m?.materialType !== 'METAL' && !isNum(m?.saleRate) && !isNum(m?.saleAmount) && !m?.stoneGradeId) missing.push(`${m?.code ?? 'material'} sale rate`);
   }
+  if (missing.length > 0) throw new AppError(`Sale rates are required before a tag is saved - missing: ${missing.join(', ')}`, 400);
   if (!opts.partial) {
     // A real piece has a real weight: refuse blank/zero, and a net weight above gross. (createTag derives either from the
     // METAL rows when the form sends none, so the same derivation is applied here.)
@@ -486,7 +487,6 @@ export async function assertTagSaleRatesForSave(ctx: TenantContext, body: any, o
     if (!(net > 0)) throw new AppError('Net weight is required and must be greater than 0', 400);
     if (net > gross + 1e-9) throw new AppError('Net weight cannot exceed gross weight', 400);
   }
-  if (missing.length > 0) throw new AppError(`Sale rates are required before a tag is saved - missing: ${missing.join(', ')}`, 400);
   if (rows.some((m) => m?.materialType === 'METAL') && body.metalKarat) {
     if (!(await resolveLiveMetalRate(ctx.companyId, String(body.metalKarat)))) {
       throw new AppError(`No metal rate has been entered for ${body.metalKarat} - enter it under Metal Rates first`, 409);
