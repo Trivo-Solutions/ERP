@@ -77,9 +77,10 @@ authRouter.get('/me', authenticate, resolveTenantContext, async (req: Request, r
 });
 
 authRouter.post('/change-password', credentialLimiter, authenticate, async (req: Request, res: Response) => {
-  const { current, next } = req.body;
-  await authService.changePassword(req.user!.userId, current, next);
-  res.json({ success: true, message: 'Password changed' });
+  const { current, next } = req.body ?? {};
+  const tokens = await authService.changePassword(
+    { userId: req.user!.userId, companyId: req.user!.companyId, companyUserId: req.user!.companyUserId }, current, next);
+  res.json({ success: true, message: 'Password changed', data: tokens });
 });
 
 // ─── Members of the caller's own company ──────────────────────────────────────

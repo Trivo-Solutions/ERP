@@ -118,6 +118,7 @@ import { SettingsPage } from './pages/Settings/SettingsPage';
 import { CompanyUsersPage } from './pages/Settings/CompanyUsersPage';
 import { RoleEditorPage } from './pages/Settings/RoleEditorPage';
 import { PaymentConfigPage } from './pages/Settings/PaymentConfigPage';
+import { ChangePasswordPage } from './pages/Account/ChangePasswordPage';
 import { HardwarePage } from './pages/Hardware/HardwarePage';
 import { useTabActive } from './components/Layout/TabActiveContext';
 import { RequirePermission } from './components/auth/RequirePermission';
@@ -259,6 +260,7 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="hardware" element={<RequirePermission permission="hardware:manage"><HardwarePage /></RequirePermission>} />
       <Route path="settings/users" element={<RequirePermission permission="user:manage"><CompanyUsersPage /></RequirePermission>} />
       <Route path="settings/roles" element={<RequirePermission permission="role:view"><RoleEditorPage /></RequirePermission>} />
+      <Route path="account/password" element={<ChangePasswordPage />} />
       <Route path="settings/payment-config" element={<RequirePermission permission="paymentConfig:view"><PaymentConfigPage /></RequirePermission>} />
       <Route path="settings" element={<RequirePermission permission="system:config"><SettingsPage /></RequirePermission>} />
       <Route path="*" element={<UnknownPage />} />

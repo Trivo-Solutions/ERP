@@ -714,6 +714,9 @@ model User {
   // Platform-level only — never exposed to a company (it would reveal activity in OTHER companies).
   // A company sees CompanyUser.lastLoginAt instead, which is that company's own.
   lastLogin DateTime?
+  // Set whenever the password changes. Any access/refresh token issued before this instant (whole seconds) is rejected,
+  // so changing a password signs out every other session. NULL = never changed since the account was created.
+  passwordChangedAt DateTime?
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 

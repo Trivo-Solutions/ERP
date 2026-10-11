@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import { assertCanGrant } from '../../shared/grantGuard';
 import { AppError } from '../../middleware/error';
 import { assertOwnedByCompany } from '../../middleware/tenant';
 import { createAuditEntry } from '../../middleware/audit';
@@ -18,6 +19,7 @@ export async function createRole(
   if (!isValidPermissionList(data.permissions)) {
     throw new AppError('One or more permissions are not recognised', 400);
   }
+  assertCanGrant(ctx.permissions, data.permissions);
   try {
     const role = await tenantQuery(ctx.companyId, (tx) => tx.role.create({
       data: { companyId: ctx.companyId, name: data.name, displayName: data.displayName, permissions: data.permissions },
@@ -49,6 +51,7 @@ export async function updateRole(
   if (data.permissions !== undefined && !isValidPermissionList(data.permissions)) {
     throw new AppError('One or more permissions are not recognised', 400);
   }
+  if (data.permissions !== undefined) assertCanGrant(ctx.permissions, data.permissions, existing.permissions);
 
   try {
     const role = await tenantQuery(ctx.companyId, (tx) => tx.role.update({

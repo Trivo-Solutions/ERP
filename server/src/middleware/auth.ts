@@ -4,6 +4,7 @@ import { env } from '../config/env';
 import { prisma } from '../config/database';
 import { AppError } from './error';
 import { BranchAccess, tenantQuery } from '../shared/tenantContext';
+import { isIssuedBeforePasswordChange } from '../modules/auth/auth.service';
 
 export interface JwtPayload {
   userId: string;
@@ -60,6 +61,10 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
     membership.userId !== payload.userId || membership.companyId !== payload.companyId
   ) {
     throw new AppError('User not found or deactivated', 401);
+  }
+  // Signed out by a password change made after this token was issued.
+  if (isIssuedBeforePasswordChange((payload as JwtPayload & { iat?: number }).iat, membership.user.passwordChangedAt)) {
+    throw new AppError('Your password was changed — please sign in again', 401);
   }
 
   req.user = {

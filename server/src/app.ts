@@ -8,6 +8,7 @@ import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
 import { env } from './config/env';
 import { logger } from './config/logger';
+import { parseTrustProxy } from './shared/trustProxy';
 import { errorHandler, notFound } from './middleware/error';
 import { rejectClientTenantSelectors } from './middleware/tenant';
 
@@ -48,10 +49,11 @@ import { platformRouter } from './modules/platform/platform.router';
 const app = express();
 
 // Security
-if (env.TRUST_PROXY !== undefined && env.TRUST_PROXY !== '') {
-  // '1' / '2' = hop count; 'true'/'false'; anything else is passed through as an address/subnet list.
-  const v = env.TRUST_PROXY;
-  app.set('trust proxy', /^d+$/.test(v) ? Number(v) : v === 'true' ? true : v === 'false' ? false : v);
+const trustProxy = parseTrustProxy(env.TRUST_PROXY);
+if (trustProxy !== undefined) {
+  // Hop count, boolean, or an address/range list - see shared/trustProxy.ts. A malformed value throws here, at start-up.
+  app.set('trust proxy', trustProxy);
+  if (trustProxy === true) logger.warn('TRUST_PROXY=true trusts every forwarded hop: a caller can forge its own address and dodge rate limits');
 }
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({

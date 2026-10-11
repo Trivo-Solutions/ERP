@@ -7,6 +7,7 @@ import { env } from '../../config/env';
 import { AppError } from '../../middleware/error';
 import type { JwtPayload } from '../../middleware/auth';
 import { assertOwnedByCompany } from '../../middleware/tenant';
+import { assertCanGrant } from '../../shared/grantGuard';
 import { createAuditEntry } from '../../middleware/audit';
 import { newInvitationToken, parseInvitationToken, hashInvitationToken } from './invitationToken';
 import { tenantQuery, tenantTransaction, runAsPlatform } from '../../shared/tenantContext';
@@ -42,7 +43,7 @@ function issueTokens(membership: {
   id: string; userId: string; companyId: string; roleId: string; allBranches: boolean;
   role: { name: string; permissions: string[] };
   user: { email: string };
-}, branchAccess: BranchAccess) {
+}, branchAccess: BranchAccess, issuedAt?: number) {
   const payload: JwtPayload = {
     userId: membership.userId,
     email: membership.user.email,
@@ -53,9 +54,11 @@ function issueTokens(membership: {
     permissions: membership.role.permissions,
     branchAccess,
   };
-  const accessToken = jwt.sign(payload, env.JWT_SECRET, { expiresIn: env.JWT_EXPIRES_IN as any });
+  // issuedAt (seconds) is only passed right after a password change — see changePassword.
+  const iat = issuedAt === undefined ? {} : { iat: issuedAt };
+  const accessToken = jwt.sign({ ...payload, ...iat }, env.JWT_SECRET, { expiresIn: env.JWT_EXPIRES_IN as any });
   const refreshToken = jwt.sign(
-    { userId: membership.userId, companyUserId: membership.id, companyId: membership.companyId },
+    { userId: membership.userId, companyUserId: membership.id, companyId: membership.companyId, ...iat },
     env.JWT_REFRESH_SECRET,
     { expiresIn: env.JWT_REFRESH_EXPIRES_IN as any }
   );
@@ -124,7 +127,7 @@ export async function login(companyCode: string, identifier: string, password: s
 }
 
 export async function refreshTokens(refreshToken: string) {
-  let payload: { userId: string; companyUserId: string; companyId?: string };
+  let payload: { userId: string; companyUserId: string; companyId?: string; iat?: number };
   try {
     payload = jwt.verify(refreshToken, env.JWT_REFRESH_SECRET) as typeof payload;
   } catch {
@@ -141,6 +144,7 @@ export async function refreshTokens(refreshToken: string) {
   if (!membership || membership.userId !== payload.userId || !membership.isActive || !membership.user.isActive || !membership.company.isActive) {
     throw new AppError('Invalid refresh token', 401);
   }
+  if (isIssuedBeforePasswordChange(payload.iat, membership.user.passwordChangedAt)) throw new AppError('Invalid refresh token', 401);
 
   const branchAccess = await resolveBranchAccess(membership.id, membership.companyId, membership.allBranches);
   const { accessToken } = issueTokens(membership, branchAccess);
@@ -149,12 +153,52 @@ export async function refreshTokens(refreshToken: string) {
 
 // The password belongs to the GLOBAL login identity, so a person who is a member of several
 // companies has one password for all of them. (Per-company passwords would be a different model.)
-export async function changePassword(userId: string, current: string, next: string) {
-  const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+// A token (access or refresh) issued at or before the second of the user's last password change is dead. passwordChangedAt
+// is stored truncated to the second; the caller's replacement tokens are minted one second later, so they outlive the cut-off.
+export function isIssuedBeforePasswordChange(iat: number | undefined, passwordChangedAt: Date | null | undefined): boolean {
+  if (!passwordChangedAt) return false;
+  return (iat ?? 0) <= Math.floor(passwordChangedAt.getTime() / 1000);
+}
+
+export const MIN_PASSWORD_LENGTH = 12;
+export const MAX_PASSWORD_LENGTH = 128;
+
+// Policy for a password the person chooses for themselves. Deliberately simple and explainable (length is what matters);
+// refuses the obvious: reuse of the current one, or the account's own e-mail/name.
+export function assertAcceptablePassword(next: unknown, ctx: { current: string; email: string; name: string }): asserts next is string {
+  if (typeof next !== 'string') throw new AppError('A new password is required', 400);
+  if (next.length < MIN_PASSWORD_LENGTH) throw new AppError(`The new password must be at least ${MIN_PASSWORD_LENGTH} characters`, 400);
+  if (next.length > MAX_PASSWORD_LENGTH) throw new AppError(`The new password must be at most ${MAX_PASSWORD_LENGTH} characters`, 400);
+  if (next === ctx.current) throw new AppError('The new password must be different from the current one', 400);
+  const lower = next.toLowerCase();
+  if (lower.includes(ctx.email.toLowerCase()) || (ctx.name.trim().length >= 4 && lower.includes(ctx.name.trim().toLowerCase()))) {
+    throw new AppError('The new password must not contain your e-mail or name', 400);
+  }
+  if (new Set(next).size < 5) throw new AppError('The new password is too repetitive', 400);
+}
+
+// The password belongs to the GLOBAL login identity, so a person who is a member of several
+// companies has one password for all of them. (Per-company passwords would be a different model.)
+// On success every previously issued token (this and any other device, any company) is revoked, and the CALLER gets
+// fresh tokens for the company they are signed in to, so their own session carries on.
+export async function changePassword(actor: { userId: string; companyId: string; companyUserId: string }, current: unknown, next: unknown) {
+  if (typeof current !== 'string' || current.length === 0) throw new AppError('The current password is required', 400);
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: actor.userId } });
   const valid = await bcrypt.compare(current, user.password);
   if (!valid) throw new AppError('Current password incorrect', 400);
+  assertAcceptablePassword(next, { current, email: user.email, name: user.name });
   const hashed = await bcrypt.hash(next, 12);
-  await prisma.user.update({ where: { id: userId }, data: { password: hashed } });
+  const changedAt = new Date(Math.floor(Date.now() / 1000) * 1000);
+  await prisma.user.update({ where: { id: actor.userId }, data: { password: hashed, passwordChangedAt: changedAt } });
+
+  const membership = await tenantQuery(actor.companyId, (tx) => tx.companyUser.findFirstOrThrow({
+    where: { id: actor.companyUserId, companyId: actor.companyId },
+    include: { user: true, role: true },
+  }));
+  await createAuditEntry('users', actor.userId, actor.userId, 'PASSWORD_CHANGE', undefined, { changed: true }, actor.companyId);
+  const branchAccess = await resolveBranchAccess(membership.id, membership.companyId, membership.allBranches);
+  const { accessToken, refreshToken } = issueTokens(membership, branchAccess, Math.floor(changedAt.getTime() / 1000) + 1);
+  return { accessToken, refreshToken };
 }
 
 // ─── Memberships (a person inside ONE company) ────────────────────────────────
@@ -214,7 +258,10 @@ export async function updateCompanyUser(
 ) {
   // Layer 2: the membership being edited, and any role it is moved to, must be this company's own.
   await assertOwnedByCompany('companyUser', companyUserId, ctx.companyId, 'User');
-  if (data.roleId) await assertOwnedByCompany('role', data.roleId, ctx.companyId, 'Role');
+  if (data.roleId) {
+    await assertOwnedByCompany('role', data.roleId, ctx.companyId, 'Role');
+    await assertCanAssignRole(ctx, data.roleId);
+  }
   if (data.isActive === false && companyUserId === ctx.companyUserId) {
     throw new AppError('You cannot deactivate your own account', 400);
   }
@@ -261,8 +308,14 @@ export async function resetMemberPassword(ctx: TenantContext, companyUserId: str
     throw new AppError('This person also belongs to another company and has one shared password — they must change it themselves', 409);
   }
   const hashed = await bcrypt.hash(newPassword, 12);
-  await runAsPlatform((p) => p.user.update({ where: { id: member.userId }, data: { password: hashed } }));
+  await runAsPlatform((p) => p.user.update({ where: { id: member.userId }, data: { password: hashed, passwordChangedAt: new Date(Math.floor(Date.now() / 1000) * 1000) } }));
   await createAuditEntry('company_users', companyUserId, ctx.userId, 'PASSWORD_RESET', undefined, { reset: true }, ctx.companyId);
+}
+
+// A role may only be handed to someone by a person who holds every permission it carries (see shared/grantGuard.ts).
+async function assertCanAssignRole(ctx: TenantContext, roleId: string) {
+  const role = await tenantQuery(ctx.companyId, (tx) => tx.role.findFirstOrThrow({ where: { id: roleId, companyId: ctx.companyId }, select: { permissions: true } }));
+  assertCanGrant(ctx.permissions, role.permissions);
 }
 
 // ─── Invitations ──────────────────────────────────────────────────────────────
@@ -291,6 +344,7 @@ export async function createInvitation(
 
   // Layer 2: role and every branch named must be this company's own.
   await assertOwnedByCompany('role', data.roleId, ctx.companyId, 'Role');
+  await assertCanAssignRole(ctx, data.roleId);
   for (const branchId of branchIds) await assertOwnedByCompany('branch', branchId, ctx.companyId, 'Branch');
 
   const employeeId = blankToNull(data.employeeId) ?? null;

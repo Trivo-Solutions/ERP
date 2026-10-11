@@ -4,7 +4,7 @@ import {
   Box, List, ListItemButton, ListItemIcon, ListItemText,
   Collapse, Typography, Divider, Avatar, Tooltip,
 } from '@mui/material';
-import { ExpandLess, ExpandMore, Logout } from '@mui/icons-material';
+import { ExpandLess, ExpandMore, Logout, VpnKey } from '@mui/icons-material';
 import { useAuthStore } from '../../store/auth.store';
 import { usePermissions } from '../../hooks/usePermissions';
 import { NAV_ITEMS } from './navItems';
@@ -162,6 +162,12 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
             {user?.role}{company?.code ? ` · ${company.code}` : ''}
           </Typography>
         </Box>
+        <Tooltip title="Change password">
+          <VpnKey
+            sx={{ color: 'rgba(255,255,255,0.4)', fontSize: 18, cursor: 'pointer', '&:hover': { color: '#FFF' } }}
+            onClick={() => { openPath('/account/password'); onNavigate?.(); }}
+          />
+        </Tooltip>
         <Tooltip title="Logout">
           <Logout
             sx={{ color: 'rgba(255,255,255,0.4)', fontSize: 18, cursor: 'pointer', '&:hover': { color: '#FF6B6B' } }}

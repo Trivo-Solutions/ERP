@@ -59,6 +59,9 @@ async function main() {
   // reasoning); role/branch-access live on the CompanyUser membership instead. allBranches: true
   // for both seeded users — this is the one company that exists at seed time, with one branch,
   // so there is nothing to meaningfully restrict yet.
+  // DEV/DEMO DATA ONLY (the SEA demo company with well-known logins). Never run against a live database — a real company is
+  // created with provisionCompany / npm run company:provision, which generates its own credentials.
+  if (process.env.NODE_ENV === 'production') throw new Error('prisma/seed.ts is dev-only demo data; refusing to run with NODE_ENV=production');
   const adminPass = await bcrypt.hash('Admin@123', 12);
   const defaultPass = await bcrypt.hash('Welcome@123', 12);
 
