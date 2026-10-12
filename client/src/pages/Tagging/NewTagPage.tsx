@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { usePageShortcuts, focusFirstField } from '../../hooks/usePageShortcuts';
+import { useAuthStore } from '../../store/auth.store';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Box, Card, Grid, TextField, Typography, Button, Stack,
@@ -276,6 +277,20 @@ export function NewTagPage() {
     if (activeRow.vaPercent != null) setValue('costVaPercent', String(activeRow.vaPercent));
   }, [selectedLot, activeRow, setValue]);
   const chooseLot = (id: string) => setLotId(id);
+
+  // Identity fields that carry over from the previous tag, so inwarding a batch doesn't re-pick them every
+  // time. A per-browser convenience only (never sent anywhere), keyed by company + user so a shared machine
+  // never offers one login's choices to another. Each stays an ordinary editable field.
+  const authUserId = useAuthStore((s) => s.user?.id);
+  const authCompanyId = useAuthStore((s) => s.company?.id);
+  const rememberKey = authUserId && authCompanyId ? `trivo:newTag:identity:${authCompanyId}:${authUserId}` : null;
+  const saveRemembered = (data: any) => {
+    if (!rememberKey) return;
+    try {
+      const { branchId, manufacturerId, categoryId, makeType, stockTypeId } = data;
+      localStorage.setItem(rememberKey, JSON.stringify({ branchId, manufacturerId, categoryId, makeType, stockTypeId }));
+    } catch { /* storage unavailable — nothing to remember */ }
+  };
 
   useEffect(() => {
     if (!editTag || appliedTagId.current === editTag.id) return;
@@ -833,8 +848,9 @@ export function NewTagPage() {
         ? apiPatch(`/tagging/tags/${editTagId}`, payload)
         : apiPost('/tagging/tags', payload);
     },
-    onSuccess: (res: any) => {
+    onSuccess: (res: any, submitted: any) => {
       const tag = (res as any)?.data ?? res;
+      if (!isEditMode) saveRemembered(submitted);
       qc.invalidateQueries({ queryKey: ['jewelry-tags'] });
       qc.invalidateQueries({ queryKey: ['purchase-lots'] });
       qc.invalidateQueries({ queryKey: ['jewelry-tag', tag.id] });
@@ -875,13 +891,45 @@ export function NewTagPage() {
     onError: (e: any) => enqueueSnackbar(e.message ?? 'Print failed', { variant: 'error', action: printAgentSnackbarAction(e) }),
   });
 
+  // The remembered values that are still usable: skipped silently when the branch/category/stock type/
+  // manufacturer is gone from (or no longer offered in) this user's lists, or the category isn't in the bag.
+  const readRemembered = (): Record<string, string> => {
+    if (!rememberKey) return {};
+    let saved: any;
+    try { saved = JSON.parse(localStorage.getItem(rememberKey) ?? '{}'); } catch { return {}; }
+    const ok: Record<string, string> = {};
+    if (branchList.some((b: any) => b.id === saved.branchId)) ok.branchId = saved.branchId;
+    if (manufacturerList.some((m: any) => m.id === saved.manufacturerId)) ok.manufacturerId = saved.manufacturerId;
+    if (stockTypeList.some((s: any) => s.id === saved.stockTypeId)) ok.stockTypeId = saved.stockTypeId;
+    if (catList.some((c: any) => c.id === saved.categoryId) && (lotRows.length === 0 || rowsFor(saved.categoryId).length > 0)) ok.categoryId = saved.categoryId;
+    if (MAKE_TYPES.includes(saved.makeType)) ok.makeType = saved.makeType;
+    return ok;
+  };
+
+  // Opening a fresh New Tag form: fill the remembered fields once the lists they're checked against have loaded,
+  // and only into fields still at their default — never over something already picked or a purchase lot's values.
+  const rememberedApplied = useRef(false);
+  useEffect(() => {
+    if (isEditMode || rememberedApplied.current || lotId) return;
+    if (!branches || !categories || !stockTypes || !clients) return;
+    rememberedApplied.current = true;
+    const remembered = readRemembered();
+    (Object.keys(remembered) as Array<'branchId' | 'manufacturerId' | 'categoryId' | 'makeType' | 'stockTypeId'>).forEach((k) => {
+      const untouched = k === 'makeType' ? getValues(k) === EMPTY.makeType : !getValues(k);
+      if (untouched) setValue(k, remembered[k]);
+    });
+  }, [branches, categories, stockTypes, clients]);
+
   const handleSaveAndNew = () => {
     setCreatedTag(null);
     setTagImage(null);
     // A bag being tagged piece after piece keeps its karat and branch for the next piece.
     appliedMcVaKey.current = '';   // the next piece starts from the bag's rates again
     const onlyRow = selectedLot?.categories?.length === 1 ? selectedLot.categories[0] : null;
-    reset(selectedLot ? { ...EMPTY, branchId: selectedLot.branchId || '', manufacturerId: lotManufacturerId, ...(onlyRow && { categoryId: onlyRow.categoryId, metalKarat: onlyRow.karat }) } : EMPTY);
+    const remembered = readRemembered();
+    reset(selectedLot
+      ? { ...EMPTY, ...remembered, branchId: selectedLot.branchId || remembered.branchId || '', manufacturerId: lotManufacturerId || remembered.manufacturerId || '', ...(onlyRow && { categoryId: onlyRow.categoryId, metalKarat: onlyRow.karat }) }
+      : { ...EMPTY, ...remembered });
     setActiveTab(0);
     // Editing a tag and hitting "Save & New" starts a genuinely new tag, not another edit of the
     // same one — leave the /:id/edit route so the next submit POSTs instead of re-PATCHing this
@@ -897,7 +945,12 @@ export function NewTagPage() {
     if (tagLocked || mutation.isPending) return;
     formRef.current?.requestSubmit();   // runs the form's own validation, which jumps to the offending tab
   };
-  const goTab = (n: number) => { setActiveTab(n); focusFirstField(formRef.current); };
+  // Identity's first field is Branch (the lot picker can sit above it), so that tab focuses it by name.
+  const goTab = (n: number) => {
+    setActiveTab(n);
+    if (n === 0) window.setTimeout(() => setFocus('branchId'), 60);
+    else focusFirstField(formRef.current);
+  };
   usePageShortcuts({
     'ctrl+s': () => { if (!createdTag) saveFromKeyboard(); },
     'ctrl+enter': () => {

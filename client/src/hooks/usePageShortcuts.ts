@@ -33,7 +33,7 @@ export function usePageShortcuts(map: Record<string, ((e: KeyboardEvent) => void
 /** After a wizard-style tab change: put the cursor in the first field of the new tab. */
 export function focusFirstField(form: HTMLElement | null) {
   window.setTimeout(() => {
-    const el = Array.from(form?.querySelectorAll<HTMLElement>('input:not([type=hidden]):not([disabled]), textarea:not([disabled])') ?? [])
+    const el = Array.from(form?.querySelectorAll<HTMLElement>('input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled])') ?? [])
       .find((x) => !x.closest('.MuiTabs-root') && x.offsetParent !== null);
     el?.focus();
   }, 60);
