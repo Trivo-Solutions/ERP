@@ -197,6 +197,7 @@ export async function getDeadStock(companyId: string, asOfDate?: Date) {
       id: true, tagNumber: true, name: true, costPrice: true, updatedAt: true, ...LIVE_VALUE_TAG_SELECT,
       branch: { select: { name: true } },
       category: { select: { name: true } },
+      createdBy: { select: { name: true } },
     },
   }));
   const liveRates = await loadLiveRates(companyId, tags.map((t) => t.metalKarat));
@@ -206,6 +207,7 @@ export async function getDeadStock(companyId: string, asOfDate?: Date) {
     return {
       id: t.id, tagNumber: t.tagNumber, name: t.name,
       branchName: t.branch.name, categoryName: t.category?.name ?? 'Uncategorized',
+      enteredBy: t.createdBy?.name ?? '',
       sellingValue: liveSaleValue(t, liveRates) ?? 0, priced: liveSaleValue(t, liveRates) !== null, costValue: Number(t.costPrice),
       daysInStock,
       bucket: daysInStock <= 90 ? '0-90' : daysInStock <= 180 ? '91-180' : daysInStock <= 365 ? '181-365' : '365+',
@@ -282,6 +284,7 @@ export async function getStockBook(ctx: TenantContext, filters: {
       collection: { select: { name: true } },
       stockType: { select: { name: true } },
       manufacturer: { select: { name: true } },
+      createdBy: { select: { name: true } },
       saleMcRate: true, saleVaPercent: true,
       materials: { select: { materialType: true, weight: true, pieces: true, saleRate: true } },
     },
@@ -309,6 +312,7 @@ export async function getStockBook(ctx: TenantContext, filters: {
       category: t.category?.name ?? 'Uncategorized', subCategory: t.subCategory?.name ?? '',
       collection: t.collection?.name ?? '', stockType: t.stockType?.name ?? '',
       manufacturer: t.manufacturer?.name ?? '',
+      enteredBy: t.createdBy?.name ?? '',
       makeType: t.makeType, metalType: t.metalType, metalKarat: t.metalKarat ?? '',
       huid: t.huid ?? '', settingType: t.settingType ?? '',
       qty: 1,
@@ -367,6 +371,7 @@ export async function listTags(ctx: TenantContext, filters: {
         collection: { select: { name: true } },
         stockType: { select: { name: true } },
         manufacturer: { select: { name: true } },
+        createdBy: { select: { name: true } },
       },
       orderBy: { createdAt: 'desc' },
       skip: (page - 1) * limit,

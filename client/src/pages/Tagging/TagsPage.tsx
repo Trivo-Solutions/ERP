@@ -293,6 +293,11 @@ export function TagsPage() {
             render: (t: any) => <Typography fontSize={12}>{t.manufacturer?.name || '—'}</Typography>,
           },
           {
+            key: 'enteredBy', label: 'Entry By', width: 130,
+            filterValue: (t: any) => t.createdBy?.name ?? '',
+            render: (t: any) => <Typography fontSize={12}>{t.createdBy?.name || '—'}</Typography>,
+          },
+          {
             key: 'metal', label: 'Metal / Karat', width: 130,
             filterValue: (t: any) => `${t.metalType} ${t.metalKarat ?? ''}`.trim(),
             render: (t: any) => <Chip label={`${t.metalType} ${t.metalKarat ?? ''}`} size="small" />,

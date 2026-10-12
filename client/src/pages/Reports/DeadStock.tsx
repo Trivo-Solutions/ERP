@@ -39,6 +39,7 @@ export function DeadStock() {
             { header: 'Name', value: (r: any) => r.name },
             { header: 'Branch', value: (r: any) => r.branchName },
             { header: 'Category', value: (r: any) => r.categoryName },
+            { header: 'Entry By', value: (r: any) => r.enteredBy },
             { header: 'Days in Stock', value: (r: any) => r.daysInStock },
             { header: 'Bucket', value: (r: any) => r.bucket },
             { header: 'Cost Value', value: (r: any) => r.costValue },
@@ -53,19 +54,20 @@ export function DeadStock() {
           <Table size="small">
             <TableHead>
               <TableRow>
-                <TableCell>Tag #</TableCell><TableCell>Name</TableCell><TableCell>Branch</TableCell><TableCell>Category</TableCell>
+                <TableCell>Tag #</TableCell><TableCell>Name</TableCell><TableCell>Branch</TableCell><TableCell>Category</TableCell><TableCell>Entry By</TableCell>
                 <TableCell align="right">Days in Stock</TableCell><TableCell>Bucket</TableCell>
                 <TableCell align="right">Cost</TableCell><TableCell align="right">Selling</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {isLoading ? <TableRow><TableCell colSpan={8} align="center" sx={{ py: 4 }}>Loading...</TableCell></TableRow>
+              {isLoading ? <TableRow><TableCell colSpan={9} align="center" sx={{ py: 4 }}>Loading...</TableCell></TableRow>
                 : rows.map((r) => (
                   <TableRow key={r.id} hover>
                     <TableCell sx={{ fontFamily: 'monospace', fontWeight: 700, color: '#44C47A', fontSize: 12 }}>{r.tagNumber}</TableCell>
                     <TableCell>{r.name}</TableCell>
                     <TableCell sx={{ fontSize: 12 }}>{r.branchName}</TableCell>
                     <TableCell sx={{ fontSize: 12 }}>{r.categoryName}</TableCell>
+                    <TableCell sx={{ fontSize: 12 }}>{r.enteredBy || '—'}</TableCell>
                     <TableCell align="right" sx={{ fontFamily: 'monospace' }}>{r.daysInStock}</TableCell>
                     <TableCell><Chip label={r.bucket} size="small" color={BUCKET_COLOR[r.bucket]} /></TableCell>
                     <TableCell align="right" sx={{ fontFamily: 'monospace' }}>{money(r.costValue)}</TableCell>

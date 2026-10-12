@@ -72,6 +72,7 @@ const DIMENSIONS: Dimension[] = [
   dimension('metalKarat', 'Karat', false),
   dimension('settingType', 'Setting'),
   dimension('manufacturer', 'Manufacturer'),
+  dimension('enteredBy', 'Entry By'),
 ];
 const DIM_BY_KEY = new Map(DIMENSIONS.map((d) => [d.key, d]));
 
