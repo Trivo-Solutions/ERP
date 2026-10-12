@@ -365,6 +365,16 @@ Dated offers on the **sale** rates (making charge, VA, stone, metal). Nothing he
 | GET | `/exchanges` | `sales:view` | List old-gold exchanges (D4) |
 | POST | `/exchanges` | `invoice:create` | Create an old-gold exchange — credits client balance + Metal Vault |
 
+### User preferences — `/user-preferences` (saved table layouts)
+
+A member's own column layout (order / hidden / widths) per data table, stored per **membership** (user × company): another user, or the same login in another company, never sees it. Any authenticated member manages their own (no permission string; the owner is always the caller, never a request field). `tableId` is the `DataTable`'s id (`[A-Za-z0-9._:-]`, ≤120); layout shape is whitelisted and clamped server-side.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/user-preferences/table-layouts` | All of my layouts in this company, keyed by `tableId` |
+| PUT | `/user-preferences/table-layouts/:tableId` | Body `{ layout: { order, hidden, widths } }` — upsert |
+| DELETE | `/user-preferences/table-layouts/:tableId` | Back to page defaults (idempotent) |
+
 ### Finance — `/finance` (live — F1–F4, H4–H5)
 
 | Method | Path | Permission | Description |

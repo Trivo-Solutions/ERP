@@ -126,6 +126,7 @@ model Company {
   photographyCaptureCommands  PhotographyCaptureCommand[]
   customerAdvancePayments     CustomerAdvancePayment[]
   paymentProviders            PaymentProvider[]
+  userTableLayouts            UserTableLayout[]
   branchPaymentProviders      BranchPaymentProvider[]
   posTerminals                PosTerminal[]
   customerAdvanceApplications CustomerAdvanceApplication[]
@@ -647,6 +648,7 @@ model CompanyUser {
 
   branchAccess       UserBranchAccess[]
   acceptedInvitation CompanyInvitation?
+  tableLayouts       UserTableLayout[]
 
   @@unique([companyId, userId])
   @@unique([companyId, username])
@@ -5210,4 +5212,26 @@ model DiscountApproval {
   @@index([usedInvoiceId])
   @@index([estimateId])
   @@map("discount_approvals")
+}
+
+// A member's saved column layout (order / hidden / widths) for one data table. Personal preference data: owned by ONE
+// membership (CompanyUser) of ONE company - the same person in two companies has two independent layouts, and two users
+// of one company never see each other's. companyId is tied to the membership by a COMPOSITE foreign key, so the database
+// itself refuses a layout pointing at another company's member. Deleted with its membership (it is not business data).
+model UserTableLayout {
+  id            String      @id @default(cuid())
+  companyId     String
+  company       Company     @relation(fields: [companyId], references: [id])
+  companyUserId String
+  companyUser   CompanyUser @relation(fields: [companyUserId, companyId], references: [id, companyId], onDelete: Cascade)
+  // The client's stable DataTable id (e.g. "sales-invoices"). Free text, validated for shape only.
+  tableId       String
+  // { order: string[], hidden: string[], widths: Record<string, number> } - shape-checked on write.
+  layout        Json
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@unique([companyUserId, tableId])
+  @@index([companyId])
+  @@map("user_table_layouts")
 }

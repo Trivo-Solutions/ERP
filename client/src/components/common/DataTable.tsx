@@ -4,8 +4,10 @@ import {
   IconButton, Popover, TextField, Checkbox, FormControlLabel, Menu, MenuItem,
   Divider, Button, Stack, TablePagination,
 } from '@mui/material';
-import { FilterList, FilterAltOff, Download } from '@mui/icons-material';
+import { FilterList, FilterAltOff, Download, SaveOutlined } from '@mui/icons-material';
 import { exportToCsv } from '../../utils/exportToCsv';
+import { useSavedTableLayouts } from '../../hooks/useSavedTableLayouts';
+import { resolveLayout, defaultLayout, layoutSignature, toSavedLayout } from '../../utils/tableLayout';
 
 export interface DataTableColumn {
   key: string;
@@ -33,8 +35,9 @@ export interface DataTableColumn {
 }
 
 export interface DataTableProps {
-  // Stable, unique-per-table string — used as the localStorage key for the user's column
-  // order/visibility layout. Two tables sharing a tableId would clobber each other's layout.
+  // Stable, unique-per-table string — the key the signed-in user's saved column layout (order,
+  // visibility, widths) is stored under, per user and per company, on the server. Two tables sharing
+  // a tableId would clobber each other's layout.
   tableId: string;
   columns: DataTableColumn[];
   rows: any[];
@@ -73,43 +76,17 @@ export interface DataTableProps {
   maxHeight?: string | number;
 }
 
-const STORAGE_PREFIX = 'datatable:';
 const DEFAULT_COLUMN_WIDTH = 160;
 const MIN_COLUMN_WIDTH = 60;
-
-function loadColumnState(tableId: string, columns: DataTableColumn[]) {
-  const validKeys = columns.map((c) => c.key);
-  let storedOrder: string[] = [];
-  let storedHidden: string[] = [];
-  let storedWidths: Record<string, number> = {};
-  try {
-    const raw = localStorage.getItem(STORAGE_PREFIX + tableId);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      storedOrder = Array.isArray(parsed.order) ? parsed.order : [];
-      storedHidden = Array.isArray(parsed.hidden) ? parsed.hidden : [];
-      storedWidths = parsed.widths && typeof parsed.widths === 'object' ? parsed.widths : {};
-    }
-  } catch {
-    // Corrupt/foreign localStorage value — fall back to defaults below.
-  }
-  // Reconcile against the current columns prop: drop stale keys (removed in a later code
-  // change), append any new keys at the end — so a saved layout never breaks on a column change.
-  const order = storedOrder.filter((k) => validKeys.includes(k));
-  const missing = validKeys.filter((k) => !order.includes(k));
-  const hidden = new Set(storedHidden.filter((k) => validKeys.includes(k)));
-  // Columns the saved layout has never seen (all of them, on first visit) start hidden if they are defaultHidden.
-  columns.forEach((c) => { if (c.defaultHidden && missing.includes(c.key)) hidden.add(c.key); });
-  const widths: Record<string, number> = {};
-  validKeys.forEach((k) => { if (typeof storedWidths[k] === 'number') widths[k] = storedWidths[k]; });
-  return { order: [...order, ...missing], hidden, widths };
-}
 
 export function DataTable({
   tableId, columns, rows, isLoading, getRowId, selectedId, selectedIds, onRowClick,
   emptyLabel, scrollable = true, footer, csvFileName, exportRef, onColumnOrderChange, sortable, pageSizeOptions, maxHeight,
 }: DataTableProps) {
-  const initial = useMemo(() => loadColumnState(tableId, columns), [tableId]);
+  // The layout is the signed-in member's own, saved on the server per company (see useSavedTableLayouts). Changes the
+  // user makes (drag, hide, resize) apply at once but are only remembered when they press "Save layout".
+  const saved = useSavedTableLayouts();
+  const initial = useMemo(() => resolveLayout(saved.layouts?.[tableId], columns), []); // eslint-disable-line react-hooks/exhaustive-deps
   const [columnOrder, setColumnOrder] = useState<string[]>(initial.order);
   const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(initial.hidden);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(initial.widths);
@@ -123,13 +100,41 @@ export function DataTable({
   const [filterDraft, setFilterDraft] = useState<Set<string>>(new Set());
   const [filterSearch, setFilterSearch] = useState('');
 
+  // Apply the saved layout once it has arrived, and again whenever the page switches this table to another tableId
+  // (e.g. a report's per-view tables). Until then the table shows the page defaults.
+  const appliedFor = useRef<string | null>(saved.isLoaded ? tableId : null);
   useEffect(() => {
+    if (!saved.isLoaded || appliedFor.current === tableId) return;
+    appliedFor.current = tableId;
+    const l = resolveLayout(saved.layouts?.[tableId], columns);
+    setColumnOrder(l.order); setHiddenColumns(l.hidden); setColumnWidths(l.widths);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saved.isLoaded, tableId]);
+
+  // "Unsaved" = what is on screen differs from what the server holds for this table (or the page defaults if nothing is saved).
+  const savedSignature = layoutSignature(resolveLayout(saved.layouts?.[tableId], columns));
+  const currentLayout = resolveLayout({ order: columnOrder, hidden: Array.from(hiddenColumns), widths: columnWidths }, columns);
+  const layoutDirty = layoutSignature(currentLayout) !== savedSignature;
+  const hasSavedLayout = !!saved.layouts?.[tableId];
+  const [layoutBusy, setLayoutBusy] = useState(false);
+  const [layoutNote, setLayoutNote] = useState<{ text: string; error: boolean } | null>(null);
+  async function saveLayout() {
+    setContextMenu(null);
+    setLayoutBusy(true);
     try {
-      localStorage.setItem(STORAGE_PREFIX + tableId, JSON.stringify({ order: columnOrder, hidden: Array.from(hiddenColumns), widths: columnWidths }));
+      await saved.save(tableId, toSavedLayout(currentLayout, columns));
+      setLayoutNote({ text: 'Layout saved', error: false });
     } catch {
-      // localStorage unavailable (private browsing, quota) — layout just won't persist.
+      setLayoutNote({ text: 'Could not save layout', error: true });
+    } finally {
+      setLayoutBusy(false);
     }
-  }, [tableId, columnOrder, hiddenColumns, columnWidths]);
+  }
+  useEffect(() => {
+    if (!layoutNote) return;
+    const t = setTimeout(() => setLayoutNote(null), 3000);
+    return () => clearTimeout(t);
+  }, [layoutNote]);
 
   const onOrderRef = useRef(onColumnOrderChange);
   onOrderRef.current = onColumnOrderChange;
@@ -232,11 +237,23 @@ export function DataTable({
       return next;
     });
   }
-  function resetColumns() {
-    setColumnOrder(columns.map((c) => c.key));
-    setHiddenColumns(new Set(columns.filter((c) => c.defaultHidden).map((c) => c.key)));
-    setColumnWidths({});
+  // Back to the page's own layout; also forgets the user's saved one so it does not come back on the next visit.
+  async function resetColumns() {
+    const d = defaultLayout(columns);
+    setColumnOrder(d.order);
+    setHiddenColumns(d.hidden);
+    setColumnWidths(d.widths);
     setContextMenu(null);
+    if (!hasSavedLayout) return;
+    setLayoutBusy(true);
+    try {
+      await saved.reset(tableId);
+      setLayoutNote({ text: 'Layout reset', error: false });
+    } catch {
+      setLayoutNote({ text: 'Could not reset saved layout', error: true });
+    } finally {
+      setLayoutBusy(false);
+    }
   }
 
   // ── Column resize (drag the handle at a header's right edge) ─────────────
@@ -457,6 +474,15 @@ export function DataTable({
               Export CSV
             </Button>
           )}
+          {layoutDirty && (
+            <Button size="small" startIcon={<SaveOutlined sx={{ fontSize: 14 }} />} disabled={layoutBusy} onClick={saveLayout}
+              title="Remember this column order, visibility and widths for your login in this company">
+              Save layout
+            </Button>
+          )}
+          {layoutNote && (
+            <Typography variant="caption" role="status" color={layoutNote.error ? 'error' : 'success.main'}>{layoutNote.text}</Typography>
+          )}
         </Stack>
         {pageSize > 0 && (
           <TablePagination component="div" count={sortedRows.length} page={safePage} onPageChange={(_, p) => setPage(p)}
@@ -488,7 +514,8 @@ export function DataTable({
         </MenuItem>
         <MenuItem dense onClick={() => { autoFitAllColumns(); setContextMenu(null); }}>Auto-fit all columns</MenuItem>
         <Divider />
-        <MenuItem dense onClick={resetColumns}>Reset columns</MenuItem>
+        <MenuItem dense disabled={!layoutDirty || layoutBusy} onClick={saveLayout}>Save layout</MenuItem>
+        <MenuItem dense disabled={layoutBusy} onClick={resetColumns}>Reset columns</MenuItem>
       </Menu>
 
       {/* Per-column Excel-style filter: search + checkbox list of distinct values */}

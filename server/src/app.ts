@@ -40,6 +40,7 @@ import { estimationRouter } from './modules/tagging/estimation.router';
 import { mastersRouter } from './modules/masters/masters.router';
 import { offerRouter } from './modules/offers/offer.router';
 import { paymentConfigRouter } from './modules/paymentConfig/paymentConfig.router';
+import { userPreferencesRouter } from './modules/userPreferences/userPreferences.router';
 import { gstRouter } from './modules/gst/gst.router';
 import { gstIntegrationRouter } from './modules/gst/integration/gstIntegration.router';
 import { photographyRouter } from './modules/photography/photography.router';
@@ -120,6 +121,7 @@ app.use(`${API}/estimation`, estimationRouter);
 app.use(`${API}/masters`, mastersRouter);
 app.use(`${API}/offers`, offerRouter);
 app.use(`${API}/payment-config`, paymentConfigRouter);
+app.use(`${API}/user-preferences`, userPreferencesRouter);
 // GST Phase C — GST master/utility services (GSTIN validate/lookup, HSN/SAC search). Deliberately its
 // own top-level namespace, not nested under /finance — these are cross-module utilities future
 // Customer/Supplier/Product masters and Sales/Purchase will call directly, not a finance report.
