@@ -29,6 +29,7 @@ const STATUS_CONFIG: Record<string, { label: string; color: ChipProps['color'] }
   ISSUED: { label: 'Issued', color: 'info' },
   PARTIALLY_PAID: { label: 'Partial Paid', color: 'warning' },
   PAID: { label: 'Paid', color: 'success' },
+  VOID: { label: 'Void', color: 'error' },
 
   // Memo
   OUT: { label: 'Out', color: 'warning' },

@@ -251,6 +251,13 @@ salesRouter.post('/invoices/:id/void', requirePermission('invoice:void'), async 
   res.json({ success: true, data: result });
 });
 
+// "Delete bill": reverses every live receipt, then voids the bill (see deleteInvoice). One permission so an admin can
+// delegate it on its own; the individual invoice:void / payment:reverse permissions are not also required.
+salesRouter.post('/invoices/:id/delete', requirePermission('invoice:delete'), async (req: Request, res: Response) => {
+  const result = await svc.deleteInvoice(req.params.id, req.tenant!, req.user!.userId, req.body?.reason);
+  res.json({ success: true, data: result });
+});
+
 // J3 Decision 1/2: reverse a receipt (never edit/delete the original row) — see reverseInvoicePayment.
 // SUPER_ADMIN-only initially, same posture as invoice:void.
 salesRouter.post('/payments/:id/reverse', requirePermission('payment:reverse'), async (req: Request, res: Response) => {

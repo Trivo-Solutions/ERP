@@ -5,7 +5,7 @@ import {
   Grid, MenuItem, TextField, Drawer, Stack, Divider, IconButton, CircularProgress, Checkbox, Tooltip,
   FormControlLabel,
 } from '@mui/material';
-import { Add, Close, Edit as EditIcon, Payment as PaymentIcon, Print, Undo } from '@mui/icons-material';
+import { Add, Close, Delete as DeleteIcon, Edit as EditIcon, Payment as PaymentIcon, Print, Undo } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm, Controller } from 'react-hook-form';
 import { useSnackbar } from 'notistack';
@@ -18,6 +18,7 @@ import { printInvoice } from '../../utils/printInvoice';
 import { printCreditNote } from '../../utils/printCreditNote';
 import { useAuthStore } from '../../store/auth.store';
 import { PermissionGate } from '../../components/auth/PermissionGate';
+import { DeleteBillDialog } from '../../components/sales/DeleteBillDialog';
 import { PaymentLegFields, usePaymentOptions } from '../../components/sales/PaymentLegFields';
 import { LegMeta, blankMeta, legMetaPayload, legMetaError } from '../../utils/paymentLegMeta';
 
@@ -206,6 +207,7 @@ function InvoiceDrawer({ invoiceId, onClose, onEdit }: { invoiceId: string; onCl
   const { enqueueSnackbar } = useSnackbar();
   const qc = useQueryClient();
   const canCreateCN = useAuthStore((s) => s.hasPermission('creditNote:create'));
+  const [deleting, setDeleting] = useState(false);
 
   const { data, isLoading } = useQuery({
     queryKey: ['invoice-detail', invoiceId],
@@ -256,6 +258,14 @@ function InvoiceDrawer({ invoiceId, onClose, onEdit }: { invoiceId: string; onCl
               <Button size="small" startIcon={<Print />} onClick={() => printInvoice(invoice)}>
                 Print
               </Button>
+            )}
+            {/* Delete bill - its own permission (invoice:delete), assignable in Roles & Permissions. The server re-checks it. */}
+            {invoice && invoice.status !== 'VOID' && (
+              <PermissionGate permission="invoice:delete">
+                <Button size="small" color="error" startIcon={<DeleteIcon />} onClick={() => setDeleting(true)}>
+                  Delete
+                </Button>
+              </PermissionGate>
             )}
             <IconButton onClick={onClose}><Close /></IconButton>
           </Stack>
@@ -466,6 +476,7 @@ function InvoiceDrawer({ invoiceId, onClose, onEdit }: { invoiceId: string; onCl
           </>
         )}
       </Box>
+      <DeleteBillDialog invoiceId={invoiceId} open={deleting} onClose={() => setDeleting(false)} onDeleted={onClose} />
     </Drawer>
   );
 }
@@ -478,6 +489,8 @@ export function SalesInvoices() {
   // Editing an issued invoice is its own permission (SUPER_ADMIN, or a role that was granted it) — the server enforces it too.
   const canEdit = useAuthStore((s) => s.hasPermission('invoice:edit'));
   const canCreateInvoice = useAuthStore((s) => s.hasPermission('invoice:create'));
+  const canDelete = useAuthStore((s) => s.hasPermission('invoice:delete'));
+  const [deleteId, setDeleteId] = useState('');
   const editInvoice = (id: string) => navigate(`/sales/invoices/${id}/edit`);
   // Invoice-date range (both ends inclusive), sent to the server. Empty = the latest 50; a range lifts that cap.
   const [from, setFrom] = useState('');
@@ -589,15 +602,27 @@ export function SalesInvoices() {
           { key: 'createdAt', label: 'Created', width: 150, defaultHidden: true,
             filterValue: (inv: any) => isoDay(inv.createdAt),
             render: (inv: any) => <Typography sx={{ fontSize: 12 }}>{new Date(inv.createdAt).toLocaleString('en-IN', { dateStyle: 'short', timeStyle: 'short' })}</Typography> },
-          ...(canEdit ? [{
-            key: 'actions', label: 'Actions', width: 80, hideable: false, filterable: false, align: 'center' as const,
+          ...(canEdit || canDelete ? [{
+            key: 'actions', label: 'Actions', width: canEdit && canDelete ? 100 : 80, hideable: false, filterable: false, align: 'center' as const,
             render: (inv: any) => (
-              <Tooltip title="Edit invoice">
-                <IconButton size="small" aria-label={`Edit invoice ${inv.invoiceNumber}`}
-                  onClick={(e) => { e.stopPropagation(); editInvoice(inv.id); }}>
-                  <EditIcon fontSize="small" />
-                </IconButton>
-              </Tooltip>
+              <Stack direction="row" justifyContent="center">
+                {canEdit && (
+                  <Tooltip title="Edit invoice">
+                    <IconButton size="small" aria-label={`Edit invoice ${inv.invoiceNumber}`}
+                      onClick={(e) => { e.stopPropagation(); editInvoice(inv.id); }}>
+                      <EditIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
+                {canDelete && inv.status !== 'VOID' && (
+                  <Tooltip title="Delete bill">
+                    <IconButton size="small" color="error" aria-label={`Delete invoice ${inv.invoiceNumber}`}
+                      onClick={(e) => { e.stopPropagation(); setDeleteId(inv.id); }}>
+                      <DeleteIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
+              </Stack>
             ),
           }] : []),
         ]}
@@ -605,6 +630,7 @@ export function SalesInvoices() {
 
       {selectedInvoiceId && <InvoiceDrawer invoiceId={selectedInvoiceId} onClose={() => setSelectedInvoiceId('')}
         onEdit={canEdit ? () => editInvoice(selectedInvoiceId) : undefined} />}
+      {deleteId && <DeleteBillDialog invoiceId={deleteId} open onClose={() => setDeleteId('')} />}
     </Box>
   );
 }

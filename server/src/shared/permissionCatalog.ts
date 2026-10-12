@@ -188,7 +188,7 @@ export const PERMISSION_CATALOG: PermissionCatalogGroup[] = [
       {
         key: 'invoice', label: 'Invoicing',
         // J3 Decision 5: invoice:void is a whole-invoice reversal, distinct from invoice:edit (amend).
-        capabilities: [cap('invoice:create'), cap('invoice:edit'), cap('invoice:void')],
+        capabilities: [cap('invoice:create'), cap('invoice:edit'), cap('invoice:void'), cap('invoice:delete')],
       },
       {
         key: 'payment', label: 'Payments & Receipts',
