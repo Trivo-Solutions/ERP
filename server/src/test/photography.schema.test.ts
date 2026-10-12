@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { platformPrisma as prisma } from '../config/database';
 import { createTestTenant, cleanupTestTenant, TestTenant, withForcedRls } from './fixtures';
 import { PERMISSION_CATALOG } from '../shared/permissionCatalog';
-
+import { createHash } from 'crypto';
 // ═══════════════════════════════════════════════════════════════════════════
 // Photography — Phase 1 (schema only; migration 20261009110000_photography_data_model). Fixtures write with the
 // platform role (BYPASSRLS) on purpose: every refusal below must come from the DATABASE (composite FK / CHECK /
@@ -16,6 +16,9 @@ describe('Photography Phase 1 — schema, constraints and isolation', () => {
   let seq = 0;
   const key = () => `K-${suffix}-${seq++}`;
   const sha = '0'.repeat(63) + '1';
+  // station_credentials.tokenHash is globally UNIQUE (and must be 64 lowercase hex). A literal such as 'f'.repeat(64) collides with
+  // a row left by any earlier or concurrent run, so every hash in this file is derived from this run's own suffix.
+  const hash = (label: string) => createHash('sha256').update(`${suffix}:${label}`).digest('hex');
 
   const station = (t: TestTenant, over: Record<string, unknown> = {}) => prisma.photographyStation.create({
     data: { companyId: t.company.id, branchId: t.branch.id, name: `ST-${suffix}-${seq++}`, registeredById: t.user.id, ...over } as any,
@@ -78,7 +81,7 @@ describe('Photography Phase 1 — schema, constraints and isolation', () => {
   });
   it('rejects a credential whose station belongs to another company', async () => {
     await expect(prisma.stationCredential.create({
-      data: { companyId: B.company.id, stationId: ids.stA, tokenHash: 'a'.repeat(64), scopes: [], createdById: B.user.id },
+      data: { companyId: B.company.id, stationId: ids.stA, tokenHash: hash('a'), scopes: [], createdById: B.user.id },
     })).rejects.toThrow(/foreign key/i);
   });
   it('a tag with images cannot be deleted (nothing cascades)', async () => {
@@ -89,7 +92,7 @@ describe('Photography Phase 1 — schema, constraints and isolation', () => {
     await image(A, ids.tagA2, { stationId: st.id });
     await expect(prisma.photographyStation.delete({ where: { id: st.id } })).rejects.toThrow(/foreign key/i);
     const st2 = await station(A);
-    await prisma.stationCredential.create({ data: { companyId: A.company.id, stationId: st2.id, tokenHash: 'b'.repeat(64), scopes: ['x'], createdById: A.user.id } });
+    await prisma.stationCredential.create({ data: { companyId: A.company.id, stationId: st2.id, tokenHash: hash('b'), scopes: ['x'], createdById: A.user.id } });
     await expect(prisma.photographyStation.delete({ where: { id: st2.id } })).rejects.toThrow(/foreign key/i);
   });
 
@@ -136,13 +139,13 @@ describe('Photography Phase 1 — schema, constraints and isolation', () => {
   });
   it('credential token hash is unique and must be a SHA-256 hex digest; revocation needs a revoker', async () => {
     const mk = (over: Record<string, unknown> = {}) => prisma.stationCredential.create({
-      data: { companyId: A.company.id, stationId: ids.stA, tokenHash: 'c'.repeat(64), scopes: [], createdById: A.user.id, ...over } as any,
+      data: { companyId: A.company.id, stationId: ids.stA, tokenHash: hash('c'), scopes: [], createdById: A.user.id, ...over } as any,
     });
     await mk();
     await expect(mk()).rejects.toThrow(/unique/i);
     await expect(mk({ tokenHash: 'not-a-hash' })).rejects.toThrow(/check/i);
-    await expect(mk({ tokenHash: 'd'.repeat(64), revokedAt: new Date() })).rejects.toThrow(/check/i);
-    await expect(mk({ tokenHash: 'e'.repeat(64), revokedAt: new Date(), revokedById: A.user.id })).resolves.toBeTruthy();
+    await expect(mk({ tokenHash: hash('d'), revokedAt: new Date() })).rejects.toThrow(/check/i);
+    await expect(mk({ tokenHash: hash('e'), revokedAt: new Date(), revokedById: A.user.id })).resolves.toBeTruthy();
   });
   it('CHECK: enumerated states are enforced', async () => {
     await expect(image(A, ids.tagA, { imageType: 'FRONT' })).rejects.toThrow(/check/i);
@@ -188,7 +191,7 @@ describe('Photography Phase 1 — schema, constraints and isolation', () => {
           : (await prisma.stationCredential.findFirst({ where: { companyId: A.company.id } }))!.id;
       const foreign = table === 'tag_images' ? (await prisma.tagImage.findFirst({ where: { companyId: B.company.id } }))!.id
         : table === 'photography_stations' ? ids.stB
-          : (await prisma.stationCredential.create({ data: { companyId: B.company.id, stationId: ids.stB, tokenHash: 'f'.repeat(64), scopes: [], createdById: B.user.id } })).id;
+          : (await prisma.stationCredential.create({ data: { companyId: B.company.id, stationId: ids.stB, tokenHash: hash('f'), scopes: [], createdById: B.user.id } })).id;
       await withForcedRls([table], async (tx) => {
         await tx.$executeRaw`SELECT set_config('app.tenant_company_id', ${A.company.id}, true)`;
         const rows: any[] = await tx.$queryRawUnsafe(`SELECT id FROM "${table}" WHERE id IN ($1, $2)`, own, foreign);
@@ -217,7 +220,7 @@ describe('Photography Phase 1 — schema, constraints and isolation', () => {
     await withForcedRls(['station_credentials'], async (tx) => {
       await tx.$executeRaw`SELECT set_config('app.tenant_company_id', ${A.company.id}, true)`;
       await expect(tx.$executeRaw`INSERT INTO station_credentials (id, "companyId", "stationId", "tokenHash", scopes, "createdById")
-        VALUES (${'sc' + suffix}, ${B.company.id}, ${ids.stB}, ${'9'.repeat(64)}, ARRAY[]::text[], ${B.user.id})`).rejects.toThrow(/row-level security|policy/i);
+        VALUES (${'sc' + suffix}, ${B.company.id}, ${ids.stB}, ${hash('9')}, ARRAY[]::text[], ${B.user.id})`).rejects.toThrow(/row-level security|policy/i);
     });
   });
 
@@ -229,5 +232,15 @@ describe('Photography Phase 1 — schema, constraints and isolation', () => {
     // assert the eight real ones are all present rather than that they are the only ones.
     expect(perms).toEqual(expect.arrayContaining(['photography:capture', 'photography:delete', 'photography:manage_cameras', 'photography:manage_settings', 'photography:manage_stations',
       'photography:restore', 'photography:review', 'photography:view']));
+  });
+
+  it('derives its token hashes per run: valid sha-256 hex, distinct per label, different from another run', () => {
+    const other = (label: string) => createHash('sha256').update(`other-run:${label}`).digest('hex');
+    for (const l of ['a', 'b', 'c', 'd', 'e', 'f', '9']) {
+      expect(hash(l)).toMatch(/^[0-9a-f]{64}$/);
+      expect(hash(l)).not.toBe(other(l));
+      expect(hash(l)).not.toBe(l.repeat(64)); // never the old fixed literal
+    }
+    expect(new Set(['a', 'b', 'c', 'd', 'e', 'f', '9'].map(hash)).size).toBe(7);
   });
 });

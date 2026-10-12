@@ -251,6 +251,7 @@ export async function cleanupTestTenant(t: TestTenant) {
   await prisma.posTerminal.deleteMany({ where: { companyId } });
   await prisma.branchPaymentProvider.deleteMany({ where: { companyId } });
   await prisma.paymentProvider.deleteMany({ where: { companyId } });
+  // user_table_layouts rows are removed with their membership (ON DELETE CASCADE from company_users).
   await prisma.userBranchAccess.deleteMany({ where: { companyId } });
   await prisma.companyUser.deleteMany({ where: { companyId } });
   await prisma.branch.deleteMany({ where: { companyId } });
@@ -332,14 +333,20 @@ export async function purgeCompany(companyId: string): Promise<void> {
     `SELECT DISTINCT table_name FROM information_schema.columns
      WHERE table_schema = 'public' AND column_name = 'companyId' AND table_name <> 'companies'`);
   let pending = tables.map((t) => t.table_name);
+  const lastError = new Map<string, string>();
   for (let pass = 0; pass < 12 && pending.length > 0; pass++) {
     const stillPending: string[] = [];
     for (const t of pending) {
       try { await prisma.$executeRawUnsafe(`DELETE FROM "${t}" WHERE "companyId" = $1`, companyId); }
-      catch { stillPending.push(t); }
+      catch (e) { lastError.set(t, String((e as Error).message).trim().split(/\r?\n/).filter(Boolean).pop() ?? String(e)); stillPending.push(t); }
     }
     if (stillPending.length === pending.length) break; // no progress
     pending = stillPending;
+  }
+  // Never carry on past a table that could not be cleared: the company delete below would only fail later with a less
+  // useful message, and a swallowed error here is exactly how fixtures get silently abandoned. Say which table and why.
+  if (pending.length > 0) {
+    throw new Error(`purgeCompany(${companyId}) could not clear: ${pending.map((t) => `${t} [${lastError.get(t)}]`).join('; ')}`);
   }
   // The tag_history trigger logs the deletion of every tag above, so it is cleared AFTER them (it is
   // append-only for the app, but the test fixtures run as the owner/platform role).

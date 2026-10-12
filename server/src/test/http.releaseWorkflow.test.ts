@@ -19,6 +19,7 @@ const r2 = (n: number) => Math.round(n * 100) / 100;
 
 describe('release workflow: rate -> tag -> stock -> estimate -> bill, over HTTP', () => {
   const created: string[] = [];
+  const createdUsers: Array<{ companyId: string; userId: string }> = [];
   const A: Record<string, any> = {}; const B: Record<string, any> = {};
   let a: ReturnType<typeof apiWith>; let b: ReturnType<typeof apiWith>;
   const today = businessDayString();
@@ -30,6 +31,7 @@ describe('release workflow: rate -> tag -> stock -> estimate -> bill, over HTTP'
     const email = `${code.toLowerCase()}${DOMAIN}`;
     const r = await provisionCompany({ code, name: `Release ${tag}`, admin: { email, name: 'Owner Person', password: PASSWORD } });
     created.push(r.company.id);
+    createdUsers.push({ companyId: r.company.id, userId: (r.admin as any).userId });
     const login = await request(app).post('/api/v1/auth/login').send({ companyCode: code, identifier: email, password: PASSWORD });
     expect(login.status).toBe(200);
     into.token = login.body.data.accessToken; into.companyId = r.company.id; into.branchId = r.branch.id;
@@ -60,11 +62,25 @@ describe('release workflow: rate -> tag -> stock -> estimate -> bill, over HTTP'
   };
 
   beforeAll(async () => { a = await bringUp(A, 'RLA'); b = await bringUp(B, 'RLB'); }, 120_000);
+  // Cleanup removes ONLY what this run created: the companies it provisioned and the two logins it made, both tracked by id
+  // the moment they exist (so a run that dies half-way through bringUp still cleans up what it had). Nothing is discovered by
+  // e-mail domain, and no tag or company is deleted "to make a user deletable": a login still referenced after its company has
+  // been purged is reported with the exact reference, never forced.
   afterAll(async () => {
-    const members = await prisma.companyUser.findMany({ where: { user: { email: { endsWith: DOMAIN } } }, select: { companyId: true } });
-    for (const id of new Set([...created, ...members.map((m) => m.companyId)])) await purgeCompany(id);
-    await prisma.user.deleteMany({ where: { email: { endsWith: DOMAIN } } });
+    const problems: string[] = [];
+    const purged = new Set<string>();
+    for (const id of created) {
+      try { await purgeCompany(id); purged.add(id); } catch (e) { problems.push((e as Error).message); }
+    }
+    // A login is only removed once the company it created data in is gone; otherwise leave it and say why.
+    const safeUsers = createdUsers.filter((u) => purged.has(u.companyId)).map((u) => u.userId);
+    for (const userId of safeUsers) {
+      try { await prisma.user.delete({ where: { id: userId } }); }
+      catch (e) { problems.push(`user ${userId} still referenced: ${String((e as Error).message).trim().split(/\r?\n/).filter(Boolean).pop()}`); }
+    }
+    for (const u of createdUsers.filter((x) => !purged.has(x.companyId))) problems.push(`user ${u.userId} kept: its company ${u.companyId} was not purged`);
     await prisma.$disconnect();
+    if (problems.length) throw new Error(`release-workflow cleanup left fixtures behind:\n - ${problems.join('\n - ')}`);
   });
 
   it('1-2. enter the metal rate, then tag the ring (and refuse a tag with a sale rate left blank)', async () => {

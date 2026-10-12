@@ -27,3 +27,22 @@ if (!url.includes(allowed)) {
 if (rlsEnvFile && !(process.env.PLATFORM_DATABASE_URL ?? '').includes('trivo_rlstest')) {
   throw new Error('RLS test mode requires PLATFORM_DATABASE_URL to point at trivo_rlstest as the platform role.');
 }
+
+// Fail FAST, before any fixture is created, when the test database has not been migrated to this checkout (see
+// src/test/schemaPreflight.ts for why a missing table mid-suite is so costly).
+import fs from 'fs';
+import { beforeAll } from 'vitest';
+import { PrismaClient } from '@prisma/client';
+import { expectedTables, findMissingTables, behindMessage } from '../src/test/schemaPreflight';
+
+beforeAll(async () => {
+  const expected = expectedTables(fs.readFileSync(path.resolve(__dirname, '../prisma/schema.prisma'), 'utf8'));
+  const client = new PrismaClient({ datasources: { db: { url: process.env.PLATFORM_DATABASE_URL ?? process.env.DATABASE_URL } } });
+  try {
+    const rows = await client.$queryRaw<{ relname: string }[]>`SELECT relname FROM pg_class WHERE relkind = 'r' AND relnamespace = 'public'::regnamespace`;
+    const missing = findMissingTables(expected, rows.map((r) => r.relname));
+    if (missing.length > 0) throw new Error(behindMessage(missing));
+  } finally {
+    await client.$disconnect();
+  }
+}, 30_000);
