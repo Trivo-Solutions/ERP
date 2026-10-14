@@ -110,8 +110,12 @@ financeRouter.get('/reports/client-ledger/:clientId', requirePermission('report:
 // H4: day-book — one day's company-wide sales/payments/returns/exchanges rollup. J4-D1: named
 // explicitly in Decision 1 as sensitive.
 financeRouter.get('/reports/day-book', requirePermission('report:day_book'), async (req: Request, res: Response) => {
-  const dateStr = qs(req, 'date') ?? new Date().toISOString();
-  const data = await svc.getDayBook(req.tenant!.companyId, new Date(dateStr));
+  const dateStr = qs(req, 'date');
+  // A bare 'YYYY-MM-DD' is an India calendar day: pin it to noon IST so it can never land on a neighbouring day
+  // whatever timezone the server runs in (new Date('2026-10-12') is UTC midnight, i.e. the 11th in the Americas).
+  const at = !dateStr ? new Date() : /^\d{4}-\d{2}-\d{2}$/.test(dateStr) ? new Date(`${dateStr}T12:00:00.000+05:30`) : new Date(dateStr);
+  if (Number.isNaN(at.getTime())) throw new AppError('Invalid date', 400);
+  const data = await svc.getDayBook(req.tenant!.companyId, at);
   res.json({ success: true, data });
 });
 

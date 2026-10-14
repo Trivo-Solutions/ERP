@@ -428,6 +428,8 @@ export async function searchBillableEstimates(ctx: TenantContext, q?: string) {
         { customerName: { contains: term, mode: 'insensitive' } },
         { customerPhone: { contains: term } },
         { tag: { name: { contains: term, mode: 'insensitive' } } },
+        { tag: { category: { is: { name: { contains: term, mode: 'insensitive' } } } } },
+        { tag: { subCategory: { is: { name: { contains: term, mode: 'insensitive' } } } } },
         { tag: { tagNumber: { contains: term, mode: 'insensitive' } } },
         { tag: { huid: { contains: term, mode: 'insensitive' } } },
       ],

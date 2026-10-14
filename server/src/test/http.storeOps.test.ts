@@ -99,6 +99,8 @@ describe('HTTP: the store-operations loop (Phase I)', () => {
       expect(tag.body.data.status).toBe('IN_STOCK');
       expect(Number(tag.body.data.costPrice)).toBe(40000);
       A.tagId = tag.body.data.id;
+      // the server derives the stored name from the category now; stamp the legacy text this test searches by
+      await prisma.jewelryTag.update({ where: { id: A.tagId }, data: { name: 'Temple ring' } });
       // A bought-in piece is only sellable once its SALE making charge / VA are set on the tag (the GRN's are cost-side).
       await prisma.jewelryTag.update({ where: { id: A.tagId }, data: { saleMcRate: 0, saleVaPercent: 0 } });
       A.tagNumber = tag.body.data.tagNumber;

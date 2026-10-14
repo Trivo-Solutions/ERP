@@ -8,7 +8,12 @@ import * as lots from './purchaseLot.service';
 import * as history from './tagHistory.service';
 import * as tagTx from './tagTransactions.service';
 import * as repair from './returnRepair.service';
+import * as reclass from './tagReclassification.service';
 import { parseOptionalDate } from '../../shared/parseDate';
+import { randomUUID } from 'crypto';
+
+// Correlation id for audit rows: the caller's own x-request-id when it sent one, else a fresh one.
+const requestIdOf = (req: Request) => (typeof req.headers['x-request-id'] === 'string' && req.headers['x-request-id'].slice(0, 100)) || randomUUID();
 
 export const taggingRouter = Router();
 taggingRouter.use(authenticate, resolveTenantContext);
@@ -119,13 +124,23 @@ taggingRouter.get('/tags/:id/transactions', requirePermission('tag:view'), async
 // Stage 2: generates the TSPL for one tag on demand; the client POSTs the returned string to the
 // local print agent running on the counter PC (this server never talks to the printer itself).
 taggingRouter.get('/tags/:id/print', requirePermission('tag:view'), async (req: Request, res: Response) => {
-  const data = await svc.getTagPrintTspl(req.tenant!, req.params.id, req.query.templateId as string | undefined);
+  const data = await svc.getTagPrintTspl(req.tenant!, req.params.id, req.query.templateId as string | undefined,
+    { userId: req.user!.userId, requestId: requestIdOf(req) });
   res.json({ success: true, data });
 });
 
 // Designer preview: resolved bound-field values for one tag (the client draws the layout itself).
 taggingRouter.get('/tags/:id/preview-values', requirePermission('tag:view'), async (req: Request, res: Response) => {
   res.json({ success: true, data: await svc.getTagPreviewValues(req.tenant!, req.params.id) });
+});
+
+// Approved classification correction (tag:reclassify): the owner names each tag and the sub-category it really is.
+// Preview is a read-only dry run; apply is all-or-nothing, needs a reason + reference + confirm:true, and audits every tag.
+taggingRouter.post('/tags/reclassify/preview', requirePermission('tag:reclassify'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await reclass.previewTagReclassification(req.tenant!, req.body?.items) });
+});
+taggingRouter.post('/tags/reclassify', requirePermission('tag:reclassify'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await reclass.applyTagReclassification(req.tenant!, req.user!.userId, req.body ?? {}) });
 });
 
 taggingRouter.post('/tags', requirePermission('tag:create'), async (req: Request, res: Response) => {
@@ -310,7 +325,8 @@ taggingRouter.post('/repairs/:id/retag', requirePermission('retag:create'), asyn
 // Same tag, same number: records the reprint and hands back the label to print (the client posts it to the print agent).
 taggingRouter.post('/tags/:id/reprint', requirePermission('retag:reprint'), async (req: Request, res: Response) => {
   const tag = await repair.reprintTag(req.params.id, req.body?.reason, req.tenant!, req.user!.userId);
-  const print = await svc.getTagPrintTspl(req.tenant!, req.params.id, q(req.body?.templateId));
+  const print = await svc.getTagPrintTspl(req.tenant!, req.params.id, q(req.body?.templateId),
+    { userId: req.user!.userId, requestId: requestIdOf(req), reprint: true });
   res.json({ success: true, data: { tag, print } });
 });
 

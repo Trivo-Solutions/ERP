@@ -391,7 +391,7 @@ A member's own column layout (order / hidden / widths) per data table, stored pe
 | GET | `/reports/client-ledger/:clientId` | `report:financial_view` | One client's full statement, running balance (F4) |
 | GET | `/reports/supplier-ledger/:supplierId` | `report:financial_view` | One supplier's statement — purchases, returns, payments, running payable (I2) |
 | GET | `/reports/purchase-gst-summary` | `report:financial_view` | Input tax credit: HSN-wise net of returns + bill-wise, for a period (I2) |
-| GET | `/reports/day-book` | `report:financial_view` | One day's company-wide sales/payments/returns/exchanges (H4) |
+| GET | `/reports/day-book` | `report:financial_view` | One day's company-wide sales/payments/returns/exchanges (H4); money in by mode = payments + advances received, money out = advances reversed that day, net movement (`moneyIn`, `moneyOut`, `net`) |
 | GET | `/reports/gst-summary` | `report:financial_view` | HSN-wise GST summary for a period, filing prep (H5) |
 | GET | `/cost-centers` | `finance:view` | List cost centers |
 

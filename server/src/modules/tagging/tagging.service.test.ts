@@ -562,6 +562,9 @@ describe('createTagFromGrnItem (finished-goods intake)', () => {
       );
       soldId = sold.id;
       createdTagIds.push(soldId);
+      // createTag now derives the stored name from the category / sub-category (a client name is ignored), so stamp the
+      // searchable text the way a legacy tag carries it — the status filter is what these tests are about.
+      await prisma.jewelryTag.updateMany({ where: { id: { in: [inStockId, soldId] } }, data: { name: searchName } });
       await prisma.jewelryTag.update({ where: { id: soldId }, data: { status: 'SOLD' } });
     });
 

@@ -45,7 +45,11 @@ function TagLabel({ tag }: { tag: any }) {
         <Typography sx={{ fontSize: 9, letterSpacing: 1, color: '#444' }}>{tag.tagNumber ?? ''}</Typography>
       </Box>
       <Divider sx={{ my: 1 }} />
-      <Typography sx={{ fontWeight: 700, fontSize: 13, mb: 0.5 }} noWrap>{tag.name || 'Item Name'}</Typography>
+      {/* Read from the saved category / sub-category (the saved ids resolved server-side), never from free text. */}
+      <Typography sx={{ fontWeight: 700, fontSize: 13, mb: 0.5 }} noWrap>
+        {[tag.category?.name, tag.subCategory?.name].filter(Boolean).join(' › ') || tag.name || 'Item'}
+        {tag.subCategory?.code ? ` (${tag.subCategory.code})` : ''}
+      </Typography>
       <Grid container spacing={0.5}>
         <Grid item xs={6}><Typography variant="caption" color="text.secondary">Make</Typography>
           <Typography sx={{ fontSize: 12, fontWeight: 600 }}>{tag.makeType || '—'}</Typography></Grid>
@@ -416,13 +420,8 @@ export function NewTagPage() {
   });
   const settingTypeList: any[] = (settingTypes as any)?.data ?? (settingTypes as any) ?? [];
 
-  // No standalone "Item Name" field in the UI (matches the counter-inward form this page is
-  // modeled on) — the tag's required `name` is derived from Classification instead, falling
-  // back to make/karat so it's never blank.
-  const selectedCategory = catList.find((c: any) => c.id === selectedCatId);
-  const selectedSubCategory = subCatList.find((s: any) => s.id === watchedValues.subCategoryId);
-  const derivedName = selectedSubCategory?.name || selectedCategory?.name
-    || `${watchedValues.makeType} ${watchedValues.metalKarat || ''}`.trim();
+  // There is no "Item Name" at all: the piece's category + sub-category (the two ids saved with it) are the
+  // only classification. The server derives the stored legacy `name` from them, so nothing is sent here.
 
   const { data: matCodes } = useQuery({ queryKey: ['master-material-codes'], queryFn: () => apiGet<any>('/masters/material-codes') });
   const materialCodes: any[] = (matCodes as any)?.data ?? (matCodes as any) ?? [];
@@ -798,7 +797,6 @@ export function NewTagPage() {
       const payload: any = {
         branchId:     data.branchId,
         makeType:     data.makeType,
-        name:         derivedName,
         metalType:    data.makeType,
         metalKarat:   data.metalKarat || undefined,
         grossWeight:  totalGrossWt || Number(data.grossWeight || 0),
@@ -884,10 +882,15 @@ export function NewTagPage() {
 
   const printLabelMutation = useMutation({
     mutationFn: async () => {
-      const { tspl } = await apiGet<{ tspl: string }>(`/tagging/tags/${createdTag.id}/print`);
+      const { tspl, resolved, warnings } = await apiGet<{ tspl: string; resolved?: any; warnings?: { message: string }[] }>(`/tagging/tags/${createdTag.id}/print`);
       await printTsplViaAgent(tspl);
+      return { resolved, warnings };
     },
-    onSuccess: () => enqueueSnackbar('Label sent to printer', { variant: 'success' }),
+    onSuccess: (r: any) => {
+      const sub = r?.resolved?.subCategory;
+      enqueueSnackbar(`Label sent to printer — ${[r?.resolved?.category?.name, sub ? `${sub.name} (${sub.code ?? ''})` : null].filter(Boolean).join(' › ')}`, { variant: 'success' });
+      for (const w of r?.warnings ?? []) enqueueSnackbar(w.message, { variant: 'warning', autoHideDuration: 12000 });
+    },
     onError: (e: any) => enqueueSnackbar(e.message ?? 'Print failed', { variant: 'error', action: printAgentSnackbarAction(e) }),
   });
 

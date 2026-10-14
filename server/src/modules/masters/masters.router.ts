@@ -140,17 +140,17 @@ mastersRouter.get('/subcategories', requirePermission('masters:view'), async (re
 });
 
 mastersRouter.post('/subcategories', requirePermission('masters:create'), async (req: Request, res: Response) => {
-  const item = await createSubCategory(req.tenant!.companyId, req.body ?? {});
+  const item = await createSubCategory(req.tenant!.companyId, req.body ?? {}, req.user!.userId);
   res.status(201).json({ success: true, data: item });
 });
 
 mastersRouter.patch('/subcategories/:id', requirePermission('masters:edit'), async (req: Request, res: Response) => {
-  const item = await updateSubCategory(req.tenant!.companyId, req.params.id, req.body ?? {});
+  const item = await updateSubCategory(req.tenant!.companyId, req.params.id, req.body ?? {}, req.user!.userId);
   res.json({ success: true, data: item });
 });
 
 mastersRouter.delete('/subcategories/:id', requirePermission('masters:delete'), async (req: Request, res: Response) => {
-  await deleteSubCategory(req.tenant!.companyId, req.params.id);
+  await deleteSubCategory(req.tenant!.companyId, req.params.id, req.user!.userId);
   res.json({ success: true, message: 'Sub-category deleted' });
 });
 
@@ -160,12 +160,12 @@ mastersRouter.get('/subcategories/:id/categories', requirePermission('masters:vi
 
 // Link an EXISTING sub-category to another category (no new sub-category row is ever created here).
 mastersRouter.post('/subcategories/:id/categories', requirePermission('masters:edit'), async (req: Request, res: Response) => {
-  const data = await linkSubCategory(req.tenant!.companyId, req.params.id, req.body?.categoryId);
+  const data = await linkSubCategory(req.tenant!.companyId, req.params.id, req.body?.categoryId, req.user!.userId);
   res.status(201).json({ success: true, data });
 });
 
 mastersRouter.delete('/subcategories/:id/categories/:categoryId', requirePermission('masters:edit'), async (req: Request, res: Response) => {
-  const data = await unlinkSubCategory(req.tenant!.companyId, req.params.id, req.params.categoryId);
+  const data = await unlinkSubCategory(req.tenant!.companyId, req.params.id, req.params.categoryId, req.user!.userId);
   res.json({ success: true, data });
 });
 

@@ -19,7 +19,7 @@ const ACTION_LABELS: Record<string, string> = {
   adjust: 'Adjust', approve: 'Approve', split: 'Split', issue: 'Issue', return: 'Return',
   verify: 'Verify', inspect: 'Inspect', post: 'Post', transfer: 'Transfer', doc: 'Export',
   config: 'Configure', estimate: 'Estimate', invoice: 'Invoice',
-  deactivate: 'Deactivate/Reactivate', void: 'Void', reverse: 'Reverse', cancel: 'Cancel',
+  deactivate: 'Deactivate/Reactivate', reclassify: 'Correct Category / Sub-category', void: 'Void', reverse: 'Reverse', cancel: 'Cancel',
   // J4: split out of a broader existing action (report:view, po:approve) — kept as its own label
   // rather than folded into the existing one so the Role Editor shows it as a distinct grant.
   financial_view: 'View (Financial Detail)', approve_high_value: 'Approve (High Value, >₹5,00,000)',
@@ -150,7 +150,7 @@ export const PERMISSION_CATALOG: PermissionCatalogGroup[] = [
   },
   {
     label: 'Jewelry Tagging', items: [
-      { key: 'tag', label: 'Tags & Inventory / Stock Lookup', capabilities: [cap('tag:view'), cap('tag:create')] },
+      { key: 'tag', label: 'Tags & Inventory / Stock Lookup', capabilities: [cap('tag:view'), cap('tag:create'), cap('tag:reclassify')] },
       {
         key: 'tagTemplate', label: 'Tag Label Designer',
         capabilities: [cap('tagTemplate:view'), cap('tagTemplate:create'), cap('tagTemplate:edit')],

@@ -8,6 +8,7 @@ import { CREDIT_SETTLEMENT_MODES, PAYMENT_MODE_CUSTOMER_ADVANCE } from '../../sh
 import { getStarterPackage, type StarterAccount } from '../platform/starterPackage';
 import { splitGst } from '../../shared/gstSplit';
 import { round2 } from '../../shared/inputGst';
+import { startOfBusinessDay, endOfBusinessDay } from '../../shared/businessDay';
 
 // ═══════════════════════════════════════════════════
 // Phase 2 of the multi-tenant migration: every report/query in this file is now company-scoped.
@@ -509,11 +510,13 @@ export async function getSupplierLedger(ctx: TenantContext, supplierId: string, 
 }
 
 // H4: one day's company-wide rollup.
+// The day is the India business day of `date` (shared/businessDay.ts) — not the server machine's own
+// timezone, which used to decide where "midnight" fell.
 export async function getDayBook(companyId: string, date: Date) {
-  const start = new Date(date); start.setHours(0, 0, 0, 0);
-  const end = new Date(date); end.setHours(23, 59, 59, 999);
+  const start = startOfBusinessDay(date);
+  const end = endOfBusinessDay(date);
 
-  const [invoices, payments, returns, exchanges, creditNotes, debitNotes, salesDebitNotes] = await tenantBatch(companyId, (tx) => [
+  const [invoices, payments, returns, exchanges, karats, creditNotes, debitNotes, salesDebitNotes, advances, reversedAdvances] = await tenantBatch(companyId, (tx) => [
     tx.salesInvoice.findMany({
       // J3.5 Finding 1: a voided invoice keeps its original invoiceDate — without this exclusion it
       // would inflate that day's sales total forever, however long after that day it was voided.
@@ -524,7 +527,11 @@ export async function getDayBook(companyId: string, date: Date) {
       // Money received only — an applied customer advance is cash booked on the day it was received (not here); old gold / store credit settlements are already in the exchanges / returns below.
       // Not reversed (J3 Decision 1) — a reversed payment moved no money for this day's rollup either.
       where: { companyId, paymentDate: { gte: start, lte: end }, mode: { notIn: [...CREDIT_SETTLEMENT_MODES, PAYMENT_MODE_CUSTOMER_ADVANCE] }, reversedAt: null },
-      select: { mode: true, amount: true },
+      select: {
+        paymentNumber: true, mode: true, amount: true, invoiceId: true,
+        client: { select: { name: true } }, invoice: { select: { invoiceNumber: true } },
+      },
+      orderBy: { paymentDate: 'asc' },
     }),
     tx.salesReturn.findMany({
       where: { companyId, returnDate: { gte: start, lte: end } },
@@ -532,8 +539,14 @@ export async function getDayBook(companyId: string, date: Date) {
     }),
     tx.oldGoldExchange.findMany({
       where: { companyId, exchangeDate: { gte: start, lte: end } },
-      select: { exchangeNumber: true, valuedAmount: true },
+      select: {
+        exchangeNumber: true, valuedAmount: true, karat: true, metalType: true, grossWeight: true,
+        netWeight: true, fineWeight: true, description: true, client: { select: { name: true } },
+      },
     }),
+    // Only used to tell a gold row from a silver one when the exchange itself carries no metalType
+    // (a plain exchange written before Material Purchase existed) — karat codes are company masters.
+    tx.karatMaster.findMany({ where: { companyId }, select: { code: true, metalType: true } }),
     // G2c follow-up: same reporting gap as getClientLedger — a standalone Credit Note moves money
     // (a customer-balance credit) on the day it's issued and belongs in this rollup; a return-linked
     // one is excluded so it isn't counted twice alongside its own SalesReturn row above.
@@ -556,13 +569,150 @@ export async function getDayBook(companyId: string, date: Date) {
       where: { companyId, debitNoteDate: { gte: start, lte: end }, status: { not: 'CANCELLED' } },
       select: { debitNoteNumber: true, totalAmount: true },
     }),
+    // Customer advances taken today. Money-in for the till, but never part of Client.currentBalance
+    // (an advance is its own liability, applied to a bill later) — so it is reported beside, not inside, the balance net.
+    // A reversed advance is STILL listed here, on the day it was taken: the cash was in the till at that day's close, and a
+    // later reversal must not rewrite a closed day. The reversal itself is the money-out query below.
+    tx.customerAdvance.findMany({
+      where: { companyId, advanceDate: { gte: start, lte: end } },
+      select: {
+        advanceNumber: true, mode: true, amount: true, appliedAmount: true, refundedAmount: true, reversedAt: true,
+        client: { select: { name: true } },
+        // The per-mode legs are what actually came in (a split advance has mode 'SPLIT' on the header).
+        payments: { select: { mode: true, amount: true } },
+      },
+      orderBy: { advanceDate: 'asc' },
+    }),
+    // Advance reversals that happened today, whatever day the advance was taken: cash paid back out today (this is also the
+    // date reverseCustomerAdvance posts its journal on). A reversal is whole-advance and once-only (reversedAt is claimed
+    // by a count-checked update, and an applied/refunded advance cannot be reversed), so each advance appears here at most
+    // once, for its full amount, by the modes it came in through (its payment legs are never edited or deleted).
+    tx.customerAdvance.findMany({
+      where: { companyId, reversedAt: { gte: start, lte: end } },
+      select: {
+        advanceNumber: true, advanceDate: true, mode: true, amount: true, reversedAt: true, reversalReason: true,
+        client: { select: { name: true } },
+        payments: { select: { mode: true, amount: true } },
+      },
+      orderBy: { reversedAt: 'asc' },
+    }),
   ]);
 
   const byMode = new Map<string, number>();
   for (const p of payments) byMode.set(p.mode, (byMode.get(p.mode) ?? 0) + Number(p.amount));
 
+  // Money in by payment mode = receipts + advances taken today, in integer paise (no float drift).
+  // Modes are only trimmed/upper-cased — never remapped — so an unusual mode (CHEQUE, BANK_TRANSFER...)
+  // stays its own row instead of being folded into Cash/UPI/Card, and the rows always add up to the total.
+  // Applying an earlier advance to a bill is an InvoicePayment of mode CUSTOMER_ADVANCE, already excluded above.
+  const toPaise = (n: unknown) => Math.round(Number(n) * 100);
+  const modeKey = (m: string) => String(m ?? '').trim().toUpperCase() || 'UNKNOWN';
+  const modeMap = new Map<string, { receipts: number; advances: number; out: number }>();
+  const addMode = (mode: string, field: 'receipts' | 'advances' | 'out', amountPaise: number) => {
+    const key = modeKey(mode);
+    const cur = modeMap.get(key) ?? { receipts: 0, advances: 0, out: 0 };
+    cur[field] += amountPaise;
+    modeMap.set(key, cur);
+  };
+  // The modes an advance actually came in through: its payment legs (never edited or deleted, so a reversal can rely on
+  // them). A row from before legs existed has one header mode — that IS what was recorded. A header of 'SPLIT' with no legs
+  // cannot be allocated, so it is reported as its own UNKNOWN mode rather than guessed (never folded into Cash).
+  const legsOf = (a: { mode: string; amount: Prisma.Decimal; payments: { mode: string; amount: Prisma.Decimal }[] }) =>
+    a.payments.length > 0 ? a.payments : [{ mode: a.mode === 'SPLIT' ? 'UNKNOWN' : a.mode, amount: a.amount }];
+  for (const p of payments) addMode(p.mode, 'receipts', toPaise(p.amount));
+  const advanceRows = advances.map((a) => {
+    const legs = legsOf(a);
+    for (const l of legs) addMode(l.mode, 'advances', toPaise(l.amount));
+    return {
+      advanceNumber: a.advanceNumber, client: a.client.name, mode: a.mode, amount: Number(a.amount),
+      payments: legs.map((l) => ({ mode: modeKey(l.mode), amount: Number(l.amount) })),
+      applied: Number(a.appliedAmount),
+      reversed: a.reversedAt != null, reversedAt: a.reversedAt,
+      // A reversed advance holds nothing any more.
+      available: a.reversedAt ? 0 : (toPaise(a.amount) - toPaise(a.appliedAmount) - toPaise(a.refundedAmount)) / 100,
+    };
+  });
+  // Money OUT today = advances reversed today (see the query). Reported against the modes they came in by.
+  const outByMode = new Map<string, number>();
+  const reversalRows = reversedAdvances.map((a) => {
+    const legs = legsOf(a);
+    for (const l of legs) {
+      addMode(l.mode, 'out', toPaise(l.amount));
+      outByMode.set(modeKey(l.mode), (outByMode.get(modeKey(l.mode)) ?? 0) + toPaise(l.amount));
+    }
+    return {
+      advanceNumber: a.advanceNumber, client: a.client.name, amount: Number(a.amount),
+      payments: legs.map((l) => ({ mode: modeKey(l.mode), amount: Number(l.amount) })),
+      // The query only returns rows whose reversedAt falls in today's range, so it is never null here.
+      originalDate: a.advanceDate, reversedAt: a.reversedAt as Date, reason: a.reversalReason,
+    };
+  });
+  const RECOGNISED_MODES = ['CASH', 'UPI', 'CARD'];
+  const moneyInModes = Array.from(modeMap.entries())
+    .map(([mode, v]) => ({
+      mode, receipts: v.receipts / 100, advances: v.advances / 100, total: (v.receipts + v.advances) / 100,
+      out: v.out / 100, net: (v.receipts + v.advances - v.out) / 100,
+      recognised: RECOGNISED_MODES.includes(mode),
+    }))
+    .sort((a, b) => Number(b.recognised) - Number(a.recognised) || a.mode.localeCompare(b.mode));
+  const receiptsPaise = payments.reduce((s, p) => s + toPaise(p.amount), 0);
+  const advancesPaise = advances.reduce((s, a) => s + toPaise(a.amount), 0);
+  const outPaise = reversedAdvances.reduce((s, a) => s + toPaise(a.amount), 0);
+
+  const karatMetal = new Map(karats.map((k) => [k.code, k.metalType]));
+  const exchangeRows = exchanges.map((e) => {
+    const metal = (e.metalType ?? karatMetal.get(e.karat) ?? 'GOLD').toUpperCase();
+    const net = Number(e.netWeight);
+    return {
+      exchangeNumber: e.exchangeNumber, client: e.client.name, description: e.description, metalType: metal, karat: e.karat,
+      grossWeight: Number(e.grossWeight), netWeight: net,
+      // Fine weight is only stored for a tested-purity Material Purchase; otherwise the net weight is the best figure.
+      fineWeight: e.fineWeight != null ? Number(e.fineWeight) : net,
+      amount: Number(e.valuedAmount),
+    };
+  });
+  const metalMap = new Map<string, { metalType: string; count: number; grossWeight: number; netWeight: number; fineWeight: number; amount: number }>();
+  for (const r of exchangeRows) {
+    const m = metalMap.get(r.metalType) ?? { metalType: r.metalType, count: 0, grossWeight: 0, netWeight: 0, fineWeight: 0, amount: 0 };
+    m.count += 1; m.grossWeight += r.grossWeight; m.netWeight += r.netWeight; m.fineWeight += r.fineWeight; m.amount += r.amount;
+    metalMap.set(r.metalType, m);
+  }
+
+  const salesTotal = invoices.reduce((s, i) => s + Number(i.totalAmount), 0);
+  const returnsTotal = returns.reduce((s, r) => s + Number(r.totalAmount), 0);
+  const creditNotesTotal = creditNotes.reduce((s, cn) => s + Number(cn.totalAmount), 0);
+  const salesDebitNotesTotal = salesDebitNotes.reduce((s, d) => s + Number(d.totalAmount), 0);
+  const exchangesTotal = exchangeRows.reduce((s, e) => s + e.amount, 0);
+  const paymentsTotal = payments.reduce((s, p) => s + Number(p.amount), 0);
+  const netSales = salesTotal + salesDebitNotesTotal - returnsTotal - creditNotesTotal;
+
   return {
     date: start,
+    // Same four things that move a customer's balance in getClientLedger (plus the standalone notes),
+    // so a day's figures line up with the sum of that day's ledger lines.
+    net: {
+      sales: salesTotal, salesDebitNotes: salesDebitNotesTotal, returns: returnsTotal, creditNotes: creditNotesTotal,
+      netSales, collected: paymentsTotal, metalExchanged: exchangesTotal,
+      balanceChange: netSales - paymentsTotal - exchangesTotal,
+      advancesReceived: advancesPaise / 100,
+      totalMoneyIn: (receiptsPaise + advancesPaise) / 100,
+      totalMoneyOut: outPaise / 100,
+      netMoneyMovement: (receiptsPaise + advancesPaise - outPaise) / 100,
+    },
+    // Money out: advances reversed today (J3 Decision 1 as superseded for advances). Gross moneyIn above is never reduced by it.
+    // Invariant: sum of moneyIn.byMode[].out = moneyOut.total, and sum of byMode[].net = net.netMoneyMovement.
+    moneyOut: {
+      count: reversalRows.length, total: outPaise / 100,
+      byMode: Array.from(outByMode.entries()).map(([m, p]) => ({ mode: m, amount: p / 100 })),
+      rows: reversalRows,
+    },
+    // Invariant: total = receiptsTotal + advancesTotal = sum of byMode[].total (every mode kept, none dropped).
+    moneyIn: {
+      receiptsTotal: receiptsPaise / 100, advancesTotal: advancesPaise / 100, total: (receiptsPaise + advancesPaise) / 100,
+      byMode: moneyInModes,
+      otherModesTotal: moneyInModes.filter((m) => !m.recognised).reduce((s, m) => s + Math.round(m.total * 100), 0) / 100,
+    },
+    metalExchange: { count: exchangeRows.length, totalAmount: exchangesTotal, byMetal: Array.from(metalMap.values()) },
     sales: {
       count: invoices.length,
       totalAmount: invoices.reduce((s, i) => s + Number(i.totalAmount), 0),
@@ -572,6 +722,17 @@ export async function getDayBook(companyId: string, date: Date) {
       count: payments.length,
       total: payments.reduce((s, p) => s + Number(p.amount), 0),
       byMode: Array.from(byMode.entries()).map(([mode, total]) => ({ mode, total })),
+      // One row per receipt; invoiceNumber null = a standalone payment on account (F2).
+      rows: payments.map((p) => ({
+        paymentNumber: p.paymentNumber, client: p.client.name, mode: p.mode, amount: Number(p.amount),
+        invoiceNumber: p.invoice?.invoiceNumber ?? null,
+      })),
+      onAccountTotal: payments.filter((p) => !p.invoiceId).reduce((s, p) => s + Number(p.amount), 0),
+    },
+    advances: {
+      count: advances.length,
+      totalAmount: advancesPaise / 100,
+      rows: advanceRows,
     },
     returns: {
       count: returns.length,
@@ -580,8 +741,8 @@ export async function getDayBook(companyId: string, date: Date) {
     },
     exchanges: {
       count: exchanges.length,
-      totalAmount: exchanges.reduce((s, e) => s + Number(e.valuedAmount), 0),
-      rows: exchanges.map((e) => ({ exchangeNumber: e.exchangeNumber, amount: Number(e.valuedAmount) })),
+      totalAmount: exchangesTotal,
+      rows: exchangeRows,
     },
     creditNotes: {
       count: creditNotes.length,

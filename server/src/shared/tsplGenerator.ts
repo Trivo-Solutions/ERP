@@ -1,5 +1,6 @@
 import { JewelryTag, Prisma } from '@prisma/client';
 import { AppError } from '../middleware/error';
+import { resolveTagClassification } from './tagClassification';
 
 // Accepts a Prisma Decimal directly (as read off a TagTemplate row) alongside a plain
 // number/string, so callers don't need to pre-convert before calling generateTsplForTag.
@@ -111,7 +112,9 @@ function resolveBoundField(tag: TagForPrint, field: string): string {
   }
   switch (field as BoundField) {
     case 'tagNumber':        return tag.tagNumber;
-    case 'name':             return tag.name;
+    // Never the stored free-text name on its own: that copy goes stale when a master is renamed. The live
+    // sub-category (else category) name; the stored name only for a legacy tag with no classification at all.
+    case 'name':             return resolveTagClassification(tag).displayName;
     case 'makeType':         return tag.makeType ?? '';
     case 'metalType':        return tag.metalType ?? '';
     case 'metalKarat':       return tag.metalKarat ?? '';

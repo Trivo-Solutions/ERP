@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../../config/database';
 import { AppError } from '../../middleware/error';
 import { assertSubCategoryForCategory } from '../../shared/subCategory';
+import { resolveTagClassification, deriveTagName, diagnoseTemplateLiterals, TemplateWarning } from '../../shared/tagClassification';
 import { createAuditEntry } from '../../middleware/audit';
 import { FINISHED_GOODS_MATERIAL_TYPE } from '../../shared/constants';
 import { isValidKarat } from '../../shared/karatMaster';
@@ -307,7 +308,7 @@ export async function getStockBook(ctx: TenantContext, filters: {
       stonePieces += m.pieces ?? 0;
     }
     return {
-      id: t.id, tagNumber: t.tagNumber, name: t.name, status: t.status,
+      id: t.id, tagNumber: t.tagNumber, name: resolveTagClassification(t).displayName, status: t.status,
       branchId: t.branch.id, branchName: t.branch.name, branchCode: t.branch.branchCode,
       category: t.category?.name ?? 'Uncategorized', subCategory: t.subCategory?.name ?? '',
       collection: t.collection?.name ?? '', stockType: t.stockType?.name ?? '',
@@ -379,7 +380,9 @@ export async function listTags(ctx: TenantContext, filters: {
     })),
     tenantQuery(ctx.companyId, (_tx) => _tx.jewelryTag.count({ where })),
   ]);
-  return { tags, total, page, limit, pages: Math.ceil(total / limit) };
+  // `name` is the live classification (sub-category, else category); the stored legacy text rides along as `storedName`.
+  const live = tags.map((t) => ({ ...t, storedName: t.name, name: resolveTagClassification(t).displayName }));
+  return { tags: live, total, page, limit, pages: Math.ceil(total / limit) };
 }
 
 export async function getTag(ctx: TenantContext, id: string) {
@@ -387,6 +390,8 @@ export async function getTag(ctx: TenantContext, id: string) {
     where: { id },
     include: {
       branch: true,
+      category: { select: { id: true, code: true, name: true, isActive: true } },
+      subCategory: { select: { id: true, code: true, name: true, isActive: true } },
       size: { select: { id: true, code: true, name: true, isActive: true } },
       design: { select: { designCode: true, name: true } },
       jobCard: { select: { jobNumber: true, status: true } },
@@ -416,7 +421,7 @@ export async function getTag(ctx: TenantContext, id: string) {
   // Today's price for the piece (live gold + its own stored rates); null when it cannot be priced. `sellingPrice` stays the
   // figure from the day it was tagged.
   const liveRates = await loadLiveRates(ctx.companyId, [tag.metalKarat]);
-  return { ...tag, liveSellingPrice: liveSaleValue(tag, liveRates) };
+  return { ...tag, storedName: tag.name, name: resolveTagClassification(tag).displayName, liveSellingPrice: liveSaleValue(tag, liveRates) };
 }
 
 /**
@@ -499,8 +504,43 @@ export async function assertTagSaleRatesForSave(ctx: TenantContext, body: any, o
   }
 }
 
+// ─── Classification (category + sub-category) is the ONLY authority for what a piece is ───────────────────────
+// The tag's (categoryId, subCategoryId) pair is validated against the masters on every create / edit; the stored
+// `name` is derived by the SERVER from those validated rows — a client-supplied name is never trusted as
+// classification. A rejected pair is audited (CLASSIFICATION_REJECTED) so a bad attempt leaves a trace.
+
+async function validateClassification(
+  ctx: TenantContext, userId: string, recordId: string,
+  categoryId: string | null | undefined, subCategoryId: string | null | undefined, requireActive: boolean,
+) {
+  try {
+    await assertSubCategoryForCategory(ctx.companyId, categoryId, subCategoryId, requireActive);
+  } catch (err) {
+    if (err instanceof AppError && err.statusCode < 500) {
+      await createAuditEntry('jewelry_tags', recordId, userId, 'CLASSIFICATION_REJECTED', undefined,
+        { categoryId: categoryId ?? null, subCategoryId: subCategoryId ?? null, reason: err.message }, ctx.companyId);
+    }
+    throw err;
+  }
+}
+
+async function loadClassification(companyId: string, categoryId: string | null | undefined, subCategoryId: string | null | undefined) {
+  const [category, subCategory] = await Promise.all([
+    categoryId ? tenantQuery(companyId, (tx) => tx.productCategory.findFirst({ where: { id: categoryId, companyId }, select: { id: true, name: true, code: true } })) : null,
+    subCategoryId ? tenantQuery(companyId, (tx) => tx.subCategory.findFirst({ where: { id: subCategoryId, companyId }, select: { id: true, name: true, code: true } })) : null,
+  ]);
+  return { category, subCategory };
+}
+
+const classificationAudit = (c: { category: { id: string; name: string; code: string } | null; subCategory: { id: string; name: string; code: string } | null }) => ({
+  categoryId: c.category?.id ?? null, categoryName: c.category?.name ?? null, categoryCode: c.category?.code ?? null,
+  subCategoryId: c.subCategory?.id ?? null, subCategoryName: c.subCategory?.name ?? null, subCategoryCode: c.subCategory?.code ?? null,
+});
+
 export async function createTag(ctx: TenantContext, data: {
-  branchId: string; name: string; makeType?: string;
+  branchId: string;
+  /** Ignored: the server derives the stored name from the validated category / sub-category. */
+  name?: string; makeType?: string;
   metalType: string; metalKarat?: string;
   grossWeight: number; netWeight: number; stoneWeight?: number;
   huid?: string; settingType?: string; costPrice?: number; sellingPrice?: number;
@@ -550,7 +590,7 @@ export async function createTag(ctx: TenantContext, data: {
   // sub-category, collection, material code or stone grade must 404, never attach to this tag.
   // (stockType/category are re-fetched below, scoped to the company, because their codes build
   // the tag number.)
-  await assertSubCategoryForCategory(ctx.companyId, data.categoryId, data.subCategoryId, true);
+  await validateClassification(ctx, userId, 'NEW', data.categoryId, data.subCategoryId, true);
   await assertOwnedIfPresent('collection', data.collectionId, ctx.companyId, 'Collection');
   await assertSizeForCategory(ctx, data.sizeId, data.categoryId);
   assertValidPieceCount(data.noOfPcs);
@@ -571,6 +611,8 @@ export async function createTag(ctx: TenantContext, data: {
   ]);
   if (!stockType) throw new AppError('Stock Type not found', 404);
   if (!category) throw new AppError('Category not found', 404);
+  const classification = await loadClassification(ctx.companyId, data.categoryId, data.subCategoryId);
+  const tagName = deriveTagName(category, classification.subCategory, data.name?.trim() || '');
 
   // C4: a stone row (materialType !== 'METAL') with a stoneGradeId but no explicit saleAmount
   // gets one resolved from the PriceMaster rate card, by weight — before the cost/sale totals
@@ -616,7 +658,7 @@ export async function createTag(ctx: TenantContext, data: {
         companyId:    ctx.companyId,
         tagNumber,
         branchId:     data.branchId,
-        name:         data.name,
+        name:         tagName,
         makeType:     data.makeType ?? 'GOLD',
         metalType:    data.metalType,
         metalKarat:   fromLot ? fromLot.metalKarat : data.metalKarat,
@@ -671,7 +713,8 @@ export async function createTag(ctx: TenantContext, data: {
     return created;
   });
 
-  await createAuditEntry('jewelry_tags', tag.id, userId, 'CREATE', undefined, undefined, ctx.companyId);
+  await createAuditEntry('jewelry_tags', tag.id, userId, 'CREATE', undefined,
+    { tagNumber: tag.tagNumber, ...classificationAudit({ category, subCategory: classification.subCategory }) }, ctx.companyId);
   return tag;
 }
 
@@ -731,7 +774,7 @@ export async function updateTag(id: string, data: {
     const effCategory = data.categoryId ?? existing.categoryId;
     const effSub = data.subCategoryId !== undefined ? data.subCategoryId : existing.subCategoryId;
     if (effSub && (data.subCategoryId !== undefined || data.categoryId !== undefined)) {
-      await assertSubCategoryForCategory(ctx.companyId, effCategory, effSub, data.subCategoryId !== undefined && data.subCategoryId !== existing.subCategoryId);
+      await validateClassification(ctx, userId, id, effCategory, effSub, data.subCategoryId !== undefined && data.subCategoryId !== existing.subCategoryId);
     }
   }
   await assertOwnedIfPresent('collection', data.collectionId, ctx.companyId, 'Collection');
@@ -772,11 +815,23 @@ export async function updateTag(id: string, data: {
     costPrice    = data.costPrice    ?? totalCost;
     sellingPrice = data.sellingPrice ?? totalSale;
   }
+  // The stored name follows the validated classification (never the client's text); an edit that does not
+  // touch category / sub-category leaves the stored text alone.
+  const classificationTouched = data.categoryId !== undefined || data.subCategoryId !== undefined;
+  const effCategoryId = data.categoryId ?? existing.categoryId;
+  const effSubCategoryId = data.subCategoryId !== undefined ? data.subCategoryId : existing.subCategoryId;
+  const [before, after] = await Promise.all([
+    loadClassification(ctx.companyId, existing.categoryId, existing.subCategoryId),
+    classificationTouched ? loadClassification(ctx.companyId, effCategoryId, effSubCategoryId) : null,
+  ]);
+  // (An explicit legacy `name` is honoured only when the edit leaves the classification alone — nothing reads it as
+  // a classification any more, so a free-text rename of the stored copy is harmless.)
+  const newName = after ? deriveTagName(after.category, after.subCategory, existing.name) : data.name;
   const tag = await tenantTransaction(ctx.companyId, async (tx) => {
     const updated = await tx.jewelryTag.update({
       where: { id },
       data: {
-        ...(data.name !== undefined && { name: data.name }),
+        ...(newName !== undefined && { name: newName }),
         ...(data.branchId !== undefined && { branchId: data.branchId }),
         ...(data.makeType !== undefined && { makeType: data.makeType }),
         ...(data.metalType !== undefined && { metalType: data.metalType }),
@@ -833,7 +888,15 @@ export async function updateTag(id: string, data: {
     return updated;
   });
 
-  await createAuditEntry('jewelry_tags', tag.id, userId, 'UPDATE', undefined, undefined, ctx.companyId);
+  const classificationChanged = !!after && (existing.categoryId !== effCategoryId || existing.subCategoryId !== effSubCategoryId);
+  await createAuditEntry('jewelry_tags', tag.id, userId, 'UPDATE',
+    classificationChanged ? { ...classificationAudit(before), name: existing.name } : undefined,
+    classificationChanged && after ? { ...classificationAudit(after), name: newName } : undefined, ctx.companyId);
+  if (classificationChanged && after) {
+    // A dedicated, searchable event for the one change that decides what a label says.
+    await createAuditEntry('jewelry_tags', tag.id, userId, 'CLASSIFICATION_CHANGE',
+      classificationAudit(before), classificationAudit(after), ctx.companyId);
+  }
   return tag;
 }
 
@@ -846,7 +909,7 @@ export async function updateTag(id: string, data: {
 export async function createTagFromGrnItem(data: {
   grnItemId: string;
   branchId?: string;      // default: the branch the GRN was received at (GoodsReceiptNote.branchId)
-  name: string;
+  name?: string;          // ignored: derived server-side from category / sub-category
   makeType?: string;
   metalType: string;
   metalKarat?: string;
@@ -931,7 +994,7 @@ export async function createTagFromGrnItem(data: {
 
   // Layer 2: master ids are company-owned — sub-category/collection are checked here, and the
   // stock type/category are fetched scoped to the company just below.
-  await assertSubCategoryForCategory(ctx.companyId, data.categoryId, data.subCategoryId, true);
+  await validateClassification(ctx, userId, data.grnItemId, data.categoryId, data.subCategoryId, true);
   await assertOwnedIfPresent('collection', data.collectionId, ctx.companyId, 'Collection');
   await assertOwnedIfPresent('client', data.manufacturerId, ctx.companyId, 'Manufacturer');
   const [stockType, category] = await Promise.all([
@@ -940,6 +1003,8 @@ export async function createTagFromGrnItem(data: {
   ]);
   if (!stockType) throw new AppError('Stock Type not found', 404);
   if (!category) throw new AppError('Category not found', 404);
+  const grnClassification = await loadClassification(ctx.companyId, data.categoryId, data.subCategoryId);
+  const grnTagName = deriveTagName(category, grnClassification.subCategory, data.name?.trim() || '');
 
   // Input GST on the supplier's bill (PoItem.taxRate, snapshotted at PO time): CGST+SGST if the
   // supplier is in the company's own state, else IGST. costPrice stays the bare taxable value —
@@ -970,7 +1035,7 @@ export async function createTagFromGrnItem(data: {
           companyId: ctx.companyId,
           tagNumber,
           branchId,
-          name: data.name,
+          name: grnTagName,
           makeType: data.makeType ?? 'GOLD',
           metalType: data.metalType,
           metalKarat: effectiveKarat,
@@ -1045,7 +1110,8 @@ export async function createTagFromGrnItem(data: {
     throw err;
   }
 
-  await createAuditEntry('jewelry_tags', tag.id, userId, 'CREATE', undefined, undefined, ctx.companyId);
+  await createAuditEntry('jewelry_tags', tag.id, userId, 'CREATE', undefined,
+    { tagNumber: tag.tagNumber, ...classificationAudit({ category, subCategory: grnClassification.subCategory }) }, ctx.companyId);
   return tag;
 }
 
@@ -1064,7 +1130,12 @@ export async function retireTag(id: string, ctx: TenantContext, userId: string) 
 // only — printing a tag doesn't change its state, so this reuses tag:view rather than needing a
 // new permission (see tagging.router.ts). TagTemplate is company-owned (Phase 2) — the default
 // template fallback is scoped to THIS company's own default, never another company's.
-export async function getTagPrintTspl(ctx: TenantContext, tagId: string, templateId?: string) {
+export async function getTagPrintTspl(
+  ctx: TenantContext, tagId: string, templateId?: string,
+  // When the caller is a real print/reprint (not a designer test), pass who is printing: the print is then
+  // recorded (PRINT / REPRINT) with the exact template and the values the label carries.
+  audit?: { userId: string; requestId?: string; reprint?: boolean },
+) {
   const tag = await tenantQuery(ctx.companyId, (_tx) => _tx.jewelryTag.findUnique({
     where: { id: tagId },
     include: {
@@ -1100,7 +1171,33 @@ export async function getTagPrintTspl(ctx: TenantContext, tagId: string, templat
     tag,
   );
 
-  return { tspl, templateId: template.id, templateName: template.name };
+  // Exactly what the label will say for category / sub-category: read from the tag's own ids through the live
+  // masters (never the stored name), so the screen can show it BEFORE the print request is sent.
+  const classification = resolveTagClassification(tag);
+  const layout = template.layout as unknown as TagTemplateLayout;
+  const [cats, subs] = await Promise.all([
+    tenantQuery(ctx.companyId, (tx) => tx.productCategory.findMany({ where: { companyId: ctx.companyId }, select: { name: true, code: true } })),
+    tenantQuery(ctx.companyId, (tx) => tx.subCategory.findMany({ where: { companyId: ctx.companyId }, select: { name: true, code: true } })),
+  ]);
+  const masters = [...cats, ...subs];
+  const warnings: TemplateWarning[] = diagnoseTemplateLiterals(layout.elements ?? [], masters, tag.name);
+  const resolved = {
+    tagNumber: tag.tagNumber,
+    category: classification.category,
+    subCategory: classification.subCategory,
+    displayName: classification.displayName,
+    storedName: tag.name,
+  };
+
+  if (audit) {
+    await createAuditEntry('jewelry_tags', tag.id, audit.userId, audit.reprint ? 'REPRINT_LABEL' : 'PRINT_LABEL', undefined, {
+      tagNumber: tag.tagNumber, templateId: template.id, templateName: template.name,
+      templateUpdatedAt: template.updatedAt?.toISOString?.() ?? null,
+      resolved, templateWarnings: warnings.map((w) => w.code), requestId: audit.requestId ?? null,
+    }, ctx.companyId);
+  }
+
+  return { tspl, templateId: template.id, templateName: template.name, resolved, warnings };
 }
 
 // Designer preview: every bound field's resolved value for one tag. Read-only, tag:view, same
@@ -1218,11 +1315,15 @@ export async function searchTags(ctx: TenantContext, query: string, branchId?: s
       OR: [
         { tagNumber: { contains: query, mode: 'insensitive' } },
         { name: { contains: query, mode: 'insensitive' } },
+        // the LIVE classification is searchable too, so a tag is found by what it is now even if its stored text is stale
+        { category: { is: { name: { contains: query, mode: 'insensitive' } } } },
+        { subCategory: { is: { name: { contains: query, mode: 'insensitive' } } } },
         { huid: { contains: query, mode: 'insensitive' } },
       ],
     },
     include: {
       branch: { select: { name: true } }, category: { select: { id: true, name: true } },
+      subCategory: { select: { id: true, name: true } },
       materials: { select: { materialType: true, weight: true, saleRate: true } },
     },
     take: 20,
@@ -1230,7 +1331,7 @@ export async function searchTags(ctx: TenantContext, query: string, branchId?: s
   }));
   // Today's price per piece (live gold + the piece's own stored rates); null when a piece cannot be priced.
   const liveRates = await loadLiveRates(ctx.companyId, rows.map((t) => t.metalKarat));
-  return rows.map(({ materials: _m, ...t }) => ({ ...t, liveSellingPrice: liveSaleValue({ ...t, materials: _m }, liveRates) }));
+  return rows.map(({ materials: _m, ...t }) => ({ ...t, storedName: t.name, name: resolveTagClassification(t).displayName, liveSellingPrice: liveSaleValue({ ...t, materials: _m }, liveRates) }));
 }
 
 // ─── Branch Transfers ─────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ build/
 .env.local
 .env.test
 .env.production
+.env.E2E
 .env.bak*
 *.log
 .DS_Store

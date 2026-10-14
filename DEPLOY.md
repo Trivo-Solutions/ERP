@@ -166,6 +166,39 @@ with `server/.env`). Under Compose: `docker compose -f docker-compose.prod.yml -
   (3) grant `discount:approve` to the store-manager role and `offer:view/create/edit/delete` to whoever manages offers, in the
   Role Editor (no script). Every affected user must log in again to pick up a changed role.
 
+### 9b. Production release record — commit 643c22fd844f4252c706695e779829e5cdd99e30 (2026-10-13)
+
+**Status: deployed and healthy** on the live stack (`/opt/trivo-prod`, project `trivoprod`, host `trivo-e2e`).
+
+- **When** (from container/migration records): migration finished 2026-10-12 20:05:51 UTC; server and client containers recreated
+  20:06:31–20:06:32 UTC (= 2026-10-13 01:36 IST).
+- **Previous source:** `f0289f4` (verified identical to the host tree before the release). **Released:** `643c22f` — Delete Bill
+  (`invoice:delete`), saved table layouts (`UserTableLayout`), Entry By column on tag list / stock book / dead stock, test-only changes.
+  30 files (12 added, 18 modified), copied from a `git archive` of the commit; `.env` and `server/.env.production` untouched.
+  The host has no git checkout — after the copy the deployed `server/src`, `server/prisma` and `client/src` matched the commit (717 files).
+- **Images now live:** server `sha256:712ab40d4d5477a8ed1289038d16095ab5fdc386e6280720842b6903499e7f62`,
+  client `sha256:8fcc68362d4983cfd5f86668527c0fec0a7d84685a64b33e1b74ebce45109232`,
+  migrate `sha256:042e38e0eb9fc2bcabf864c2f0a7f5ad1bd861d6267a0ee34b42291d50b86925`.
+- **Migration:** `20261017100000_user_table_layouts` applied (one new table, RLS + FORCE RLS; no existing rows touched);
+  `prisma migrate status` → 112 migrations, "Database schema is up to date". `db-secure.sql` re-run by the `migrate` service.
+- **Verified:** `ops/live/run-verify.sh` (throwaway database, new images) **73/73** passed; public HTTPS checks passed
+  (SPA 200, `/health` ok, bad login 401, `/api/v1/platform` 404, new routes 401 unauthenticated); all `trivoprod_*` containers
+  healthy; no server errors in the log.
+- **Outstanding — authenticated production checks (need an OSSP login; not yet run):**
+  (1) Delete Bill is refused (403) for a user without `invoice:delete`; (2) a saved table layout persists after a page reload.
+  `invoice:delete` is granted to no starter role — delegate it in the Role Editor (users log in again).
+- **Rollback material (kept; do not clean up):**
+  images `trivoprod-server:pre-643c22f` (`sha256:93029d62a0ccf6a61e01b05a6abb780757a19db21241e1ba089a15f3b3838c2b`),
+  `trivoprod-client:pre-643c22f` (`sha256:0c6f9d1a17958c43bf89e43a346946c621676020de05e52c6621a11a33132d80`),
+  `trivoprod-migrate:pre-643c22f` (`sha256:5393079471eb9b4d920681a23b6d4164ce0774a311d2c26108519907369f2cbd`);
+  source archive `/root/release-rollback/src-pre-643c22f.tgz` (the 18 replaced files, = `f0289f4` versions;
+  sha256 `9e23486e2bd957742a782b41284e8aad47659dc3f6f9372395b90b64aafd317f`).
+  To roll back: restore the archive over `/opt/trivo-prod`, retag the `pre-643c22f` images to `latest`, `up -d` without `--build`.
+  The new table can stay (old code ignores it). `ops/live/rollback.sh` only switches nginx to staging — it is not an application rollback.
+- **Pre-deployment backup:** `/var/backups/trivo-prod/trivo_20261012T195844Z.dump` (taken 2026-10-13 01:28 IST),
+  sha256 `631f9e7ae04646dacfa3ad74b0c9691504da05cd633db81b835fbd3792c0c182` (`.dump.sha256` verified OK) and an AES-256
+  copy `trivo_20261012T195844Z.dump.enc` alongside.
+
 ## 10. Suspending / offboarding a company
 
 `PATCH /api/v1/platform/companies/:id/status {"isActive": false}` (on loopback). Logins fail, existing tokens stop working

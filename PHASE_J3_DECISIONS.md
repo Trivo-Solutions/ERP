@@ -503,3 +503,41 @@ Fully independent, non-blocking, resolvable at any time including after the rest
 ---
 
 ## J3 DECISION SHEET: COMPLETE — AWAITING HUMAN SIGN-OFF
+
+---
+
+## Supersession record — Day Book treatment of reversed customer advances (2026-10-13)
+
+**Supersedes, in part:** the Day Book reporting behaviour that followed from Decision 1 — "every report that sums
+`InvoicePayment` adds `reversedAt IS NULL`, so a reversed receipt is treated as if it never happened" — **for customer
+advances only**. The text of Decision 1 above is left exactly as written, as the historical record.
+
+**What is NOT changed:** Decision 1's schema choice (Option A — flag the original row, never edit or delete it) stands, for
+`InvoicePayment` and for `CustomerAdvance` alike. The advance-reversal journal (Dr 2400 Customer Advances / Cr Cash-or-Bank,
+dated the reversal) is unchanged. The client ledger and `Client.currentBalance` are unchanged (an advance never touches them).
+**`InvoicePayment` reversals are still excluded from the Day Book exactly as before** — that is a separate, still-open question
+(the same cross-day mismatch exists there), deliberately not decided or built here, and it keeps `payments.total` /
+`payments.byMode` receipts-only.
+
+**Previous behaviour (superseded):** a reversed advance was dropped from the Day Book on the day it was taken, and shown nowhere.
+A reversal on a later day therefore rewrote an already-closed day, and the cash that physically left on the reversal day never
+appeared on any day. The ledger (cash in on D, cash out on R) and the Day Book disagreed.
+
+**New rule (approved by the business owner):**
+1. An advance receipt stays on its **original business date** as gross money in, whether or not it is reversed later
+   (`advances.rows[].reversed` marks it; its unused amount is 0).
+2. A reversal is **money out on the actual reversal date** (`CustomerAdvance.reversedAt`, India business day — the same instant
+   the reversal journal is posted), reported once, with advance number, customer, amount, original date and reason, and by the
+   **original payment modes** (the advance's payment lines, which are never edited or deleted). A reversal is whole-advance and
+   once-only, so the full amount is reported exactly once; no partial reversal exists in the data model.
+3. A same-day reversal shows both the inflow and the outflow (net zero); a cross-day reversal changes nothing on the original day.
+4. **Total Money In stays gross** (payments + advances received). New: **Total Money Out** (advance reversals) and
+   **Net Money Movement = Total Money In − Total Money Out**, reconciled per payment mode (`moneyIn.byMode[].out` / `.net`).
+5. An advance with no payment lines is not guessed: a single header mode is used as recorded; a `SPLIT` header with no lines is
+   reported under its own `UNKNOWN` mode, never folded into Cash.
+6. Applying an earlier advance to a bill is not new money in (unchanged). **Refunds are out of scope** — no code writes
+   `refundedAmount` today; they remain undesigned.
+
+**Where:** `finance.service.ts: getDayBook`, `DayBook.tsx`; tests `finance.dayBookMoneyIn.test.ts`, `http.dayBook.test.ts`,
+client `dayBook.test.tsx`. Existing API fields keep their meaning (`payments.total`, `payments.byMode` receipts-only);
+`moneyIn`/`advances`/`net` gained fields, and `advances` now includes reversed advances on the day they were taken.
