@@ -26,12 +26,40 @@ Other letters (`B L P R D E G J S U K M`) appear in GATI code but **no row has t
 ## 3. How a tag's current branch is determined
 
 - [C] `Inward.LocationId`, `FirstLocationId`, `InwardHistory.LocationId`, `JewelTrans.LocationId`, `JewelTransInward.LocationId`: **NULL on every row** (all tables checked). Location is carried by exactly one field: `Inward.BranchNo`.
-- [C] Branch documents are issued from **per-branch books** (`BookMaster.BranchNo`). The books are named "(HO)", "(B2)", "(B3)", "(B4)", "(B5)"; the **HO books have `BookMaster.BranchNo` NULL**. The destination is `JewelTrans.PartyNo` — a mirror party whose name is the *counterpart* branch (e.g. party "01 MANIKONDA" viewed from branch 02).
+- [C] Branch documents are issued from **per-branch books** (`BookMaster.BranchNo`). GATI names them "(HO)", "(B2)", "(B3)", "(B4)", "(B5)"; the book labelled "(HO)" has `BookMaster.BranchNo` NULL. **That label is GATI's, not a verified business identity** — see §3a. The destination is `JewelTrans.PartyNo` — a mirror party whose name is the *counterpart* location (e.g. party "01 MANIKONDA" viewed from branch 02).
 - [C] **Agreement test (all documents that exist):** for the 24,175 `BJWPH` receipts, the clone's `BranchNo` equals the receiving book's branch in 24,175/24,175 (including 3,228 where both are NULL = "Branch Receive (HO)"). For the 24,389 `BJWSL` issues, the source row's `BranchNo` equals the issuing book's branch in 24,389/24,389 (20,504 NULL on "Branch Transfer (HO)"). For every tip whose last history row carries a document book (A via JWSR/PJWAP, C/JWAP, V/BJWSL, X/JWSL — 15,670 tips), **0 disagree**. Destination check: the clone's branch equals the issue document's destination party in 24,055 of the 24,177 transfer clones with 0 mismatches (the other 122 have a retag instance as their source and were excluded from this test).
 - [C] GATI's own code treats NULL as a real branch: `BranchPendingVerification_Report` prints `IsNull(FirmName,'Self')` for a NULL `BranchNo`; `JewelStockReconsilation_Snap_Generate` joins `IsNull(Inw.BranchNo,'') = IsNull(BR_Branch.BranchNo,'')`.
-- [C] There is **no `PartyMst` row that is the head office itself**. "01 MANIKONDA" exists only as mirror/counterpart rows (`0001002464`, `0002000605`, ...). The four inline-branch parties are 02 (Jubilee Hills), 03 (Vansthalipuram), 04 (Vizag), 05 (unnamed). Between them the four inline-branch parties carry 2 distinct GST registrations and one party has none (counts only; no numbers recorded here).
-- **Conclusion [C for the rule, H for the label]:** `BranchNo IS NULL` = the head-office / "Self" location. The *rule* is proven by documents; that the HO is named "01 MANIKONDA" is read from the mirror-party names and still needs the owner's confirmation (Decision 13).
+- [C] There is **no `PartyMst` row for the NULL/Self location itself**. "01 MANIKONDA" exists only as mirror/counterpart rows (`0001002464`, `0002000605`, ...). The four inline-branch parties are 02 (Jubilee Hills), 03 (Vanasthalipuram), 04 (Vizag), 05 (unnamed). Between them they carry 2 distinct GST registrations and one party (05) has none (counts only; no numbers recorded here).
+- **Conclusion [C]:** `BranchNo IS NULL` is a single, consistent source location that GATI's application calls "Self". The source value is preserved as-is (`NULL`); **which of the owner's five physical locations it is** is addressed in §3a and is not settled by this section.
 - [C] No tag was ever created directly at a branch: all 35,372 `R` originals are NULL-branch. Branch stock only ever arrives via `BJWPH` receipt.
+
+## 3a. Source value → physical location (owner clarification 2026-10-14; mapping status marked per row)
+
+Owner's five physical locations: **Manikonda** (retail), **Jubilee Hills** (retail), **Vanasthalipuram** (retail), **Vizag** (retail), **HO / Himayathnagar** (head office). The original source value is always preserved; the approved mapping is a separate, later artifact (D13). Nothing here reclassifies stock or alters any database.
+
+| Source value (preserved) | GATI name / label | Candidate physical location | Status |
+|---|---|---|---|
+| `02` (party `0001002463`) | "02 JUBILEE HILLS" | Jubilee Hills | **Confirmed** (name; own GSTIN prefix 36, Telangana) |
+| `03` (party `0002000604`) | "03 VANSTHALIPURAM" | Vanasthalipuram | **Confirmed** (name; GSTIN prefix 36) |
+| `04` (party `0002001819`) | "04 VIZAG" | Vizag | **Confirmed** (name; GSTIN prefix 37, Andhra Pradesh) |
+| `NULL` ("Self") | mirror parties named "01 MANIKONDA"; GATI book labels "(HO)" | **Manikonda** is supported; HO is *not* supported | **Pending verification** — see below |
+| `05` (party `0002004959`) | "05" (no name, no city, no GSTIN) | unknown; HO/Himayathnagar is a candidate by elimination only | **Pending verification** |
+
+**Evidence on NULL/Self ↔ Manikonda [C facts, H conclusion]:**
+- The three GATI company records (`SJEPlus..Company`: VASD0001, VASD0002, VASS0001) all carry a **Manikonda** address (Hyderabad, Telangana); GATI's "own company" is therefore at Manikonda.
+- All four mirror parties that represent the NULL/Self location from the other branches' side are named "01 MANIKONDA".
+- The NULL/Self location is the **busiest retail seller**: 4,898 `Tax Invoice` + 110 `Estimate Invoice` JWSL documents (₹588.9 M of the ₹1,112.1 M invoiced outside book 98, i.e. more than any branch) — a location that retails to customers, which a pure head office normally does not.
+- The NULL/Self book set additionally holds every **company-wide** book (cash/bank/UPI books, purchases, journals, quotations, purchase orders, metal and stone purchase/sale, repair, approvals). That is consistent with "the original company location also acts as the accounting centre", but it does not by itself say HO.
+- Against HO: the books for NULL/Self are labelled "(HO)" **only** for the two transfer books (`Branch Transfer (HO)`, `Branch Receive (HO)`); no party, book, city or address in `VASDSJEP`/`SJEPlus` contains "Himayathnagar" (0 hits in firm names, cities, address lines, book names, company address).
+- **Therefore:** NULL/Self cannot be called "HO / Himayathnagar" on this evidence, and the earlier statement in this document set that NULL = head office was an over-reading of the "(HO)" book label. It is more likely **Manikonda**, but that remains pending owner confirmation.
+
+**Evidence on `05` ↔ HO/Himayathnagar [C facts, U conclusion]:**
+- For HO: it was created recently (party 2026-09-10; first documents 2026-09-18) and has no sales or customers yet; it receives 731 transfer clones (623 from NULL/Self, 105 from 04, 3 from 02) and has issued 263 onward — a stock hub/pass-through pattern, not a selling one. 0 tags at 05 have ever been sold (statuses: A 468, V 263, I 13).
+- Against HO: it has the **same full retail book template as branches 02–04** (Tax Invoice, Estimate Invoice, Sales Return, Approval, Jewelry Purchase, Stock Reconciliation, Proforma, Customer Material Receive; the "(B5)" suffix is the same pattern as "(B2)", "(B3)", "(B4)") and its Tax Invoice book reuses the *Repair Invoice* prefix, which looks like a copy-and-edit of a branch template. It has no name, no city and no GSTIN, so GATI never recorded what it is. Its own party name does not say HO.
+- **Therefore:** nothing in the source says `05` is HO/Himayathnagar. It is equally consistent with a retail branch that opened in September 2026 and has not yet sold, and `NULL` and `05` are **not** interchangeable on any evidence found. Application logic for treating `05` as HO was not found in any procedure read (`InwardStatusView`, `BranchPendingVerification_Report`, `JewelStockReconsilation_Snap_Generate` treat it like any other branch value).
+- What would settle it (owner or GATI report): the branch list as printed on a GATI branch stock/transfer report, the GST registration (if any) for the HO, and a statement of which value HO users post under.
+
+**Consequence for the classifications in §5:** the counts are unchanged because they were computed on the preserved source value `NULL`; only the *label* changes. Where this file says "NULL/Self", read it as "the source value NULL", not as a confirmed physical location. If the owner confirms NULL = Manikonda, the 9,850 "current stock" rows are Manikonda stock; if the HO is `05`, the 468 stock tips at 05 are HO stock.
 
 ## 4. "Latest valid movement" vs old / reversed / cancelled / deleted
 
@@ -47,35 +75,35 @@ Classes requested by the owner are used where they apply. Two extra labels are n
 
 | Class | Rows | How established | Confidence |
 |---|---:|---|---|
-| **Confirmed current branch = HO** — tip `A` received into HO by a `BJWPH (HO)` document (clone, type W) | 572 | Document trail + book branch NULL; receipt count test above | High [C] |
-| **Confirmed current branch = HO** — tip `A` returned/approval-returned (`PJWAP`/`JWSR`) on an HO-book document | 1,461 | Last history is a document on an HO book; 0 disagree | High [C] |
-| **Confirmed current branch = HO** — tip `A`, retag of an HO tag (type I) | 15 | Retag clone inherits source branch (278/278) | High [C] |
-| **Confirmed current branch = HO (structural)** — tip `A`, original `R`, never moved | 7,672 | No document at all. Evidence is structural only: every original starts at HO, the only way out of HO is a `BJWSL` issue (which would make it `V`), none exists. Physical corroboration is thin: 3 of the 7,672 were scanned in a completed stock-take and 1,182 are in any stock-take snapshot (all 5 stock-takes covered only NULL-branch tags, but no header records a location). | Medium-High, **owner must confirm NULL=HO** and a physical count is recommended |
-| **Confirmed branch of record = HO, physically with a memo party** — tip `C` (approval out) | 129 | Last doc is a `JWAP` on an HO book; custodian is the memo party, not a branch | High for branch of record [C]; where it physically is **is the memo party** |
-| **Confirmed current branch = HO** — tip `T` (split instance) | 1 | Only 1 row; meaning of T is [H] | Low-Medium [H] |
+| **Confirmed current branch = NULL/Self** — tip `A` received into NULL/Self by a `BJWPH (HO)` document (clone, type W) | 572 | Document trail + book branch NULL; receipt count test above | High [C] |
+| **Confirmed current branch = NULL/Self** — tip `A` returned/approval-returned (`PJWAP`/`JWSR`) on a NULL/Self-book document | 1,461 | Last history is a document on a NULL/Self book; 0 disagree | High [C] |
+| **Confirmed current branch = NULL/Self** — tip `A`, retag of a NULL/Self tag (type I) | 15 | Retag clone inherits source branch (278/278) | High [C] |
+| **Confirmed current branch = NULL/Self (structural)** — tip `A`, original `R`, never moved | 7,672 | No document at all. Evidence is structural only: every original starts at NULL/Self, the only way out of NULL/Self is a `BJWSL` issue (which would make it `V`), none exists. Physical corroboration is thin: 3 of the 7,672 were scanned in a completed stock-take and 1,182 are in any stock-take snapshot (all 5 stock-takes covered only NULL-branch tags, but no header records a location). | Medium-High, **owner must confirm NULL=NULL/Self** and a physical count is recommended |
+| **Confirmed branch of record = NULL/Self, physically with a memo party** — tip `C` (approval out) | 129 | Last doc is a `JWAP` on a NULL/Self book; custodian is the memo party, not a branch | High for branch of record [C]; where it physically is **is the memo party** |
+| **Confirmed current branch = NULL/Self** — tip `T` (split instance) | 1 | Only 1 row; meaning of T is [H] | Low-Medium [H] |
 | **Transfer dispatched, receipt not found** — tip `V`, no clone | 63 | `BranchPendingVerification_Report`'s own definition; see §6 | High that the receipt is missing [C]; whether physically in transit [U] |
-| **Sold from HO** — tip `X` (not stock) | 8,248 | `SaleId` → JWSL on an HO book; 0 disagree | High [C] |
+| **Sold from NULL/Self** — tip `X` (not stock) | 8,248 | `SaleId` → JWSL on a NULL/Self book; 0 disagree | High [C] |
 | **Superseded instance (not a stock row)** — `V` with clone | 20,441 | Issued on `BJWSL (HO)`, clone exists; its location *today* is the chain tip's | High [C] |
 | **Superseded instance (not a stock row)** — `I` retag/repair source | 149 | Clone exists, same branch | High [C] |
 | **Total** | **38,751** | 18,161 tips + 20,590 superseded | reconciles |
 
-Owner's other classes: **Confirmed in transit: 0** — GATI has no field or status that distinguishes "in transit" from "dispatched, receipt not recorded"; both are the same pending state (§6), so this class is empty by construction and needs a business rule (Decision 15). **Transfer/receipt history contradictory: 0 among the NULL-branch rows** (every cross-check in §3 agrees); **2 across all branches** (§6, class D2, both at branch 02). **Location unresolved: 0** by the document rules; the only soft population is the 7,672 "never moved" originals that rely on the NULL=HO rule.
+Owner's other classes: **Confirmed in transit: 0** — GATI has no field or status that distinguishes "in transit" from "dispatched, receipt not recorded"; both are the same pending state (§6), so this class is empty by construction and needs a business rule (Decision 15). **Transfer/receipt history contradictory: 0 among the NULL-branch rows** (every cross-check in §3 agrees); **2 across all branches** (§6, class D2, both at branch 02). **Location unresolved: 0** by the document rules; the only soft population is the 7,672 "never moved" originals that rely on the NULL=NULL/Self rule.
 
 ## 6. All branches: the 212 unreceived transfers
 
 - [C] GATI's pending definition (`BranchPendingVerification_Report`): `Status IN ('U','V')`, issue document in a `BJWSL`/`JWBAP` book to a party with `ClientAs_ToBranch=1`, `Inline_ToJewelId IS NULL`. It selects exactly the 212 `V` tips without a clone. `U` has no rows. **No cancelled, deleted or reversed document can be in this set** (deletes are physical, §4).
 - 63 are NULL-branch (issued by HO); 149 are issued by a branch (02: 66, 03: 49, 04: 33, 05: 1).
-- Routes (source → destination): 02→01 62; 01(HO)→03 59; 03→01 48; 04→01 31; 02→05 4; 01(HO)→05 4; 04→05 2; 05→01 1; 03→05 1. Two thirds are branch→HO returns.
+- Routes (source → destination): 02→01 62; NULL→03 59; 03→01 48; 04→01 31; 02→05 4; NULL→05 4; 04→05 2; 05→01 1; 03→05 1. Two thirds are branch→NULL/Self (mirror "01") returns.
 - Age at 2026-10-14 (days since the issue document date): 0–3 d: 61; 8–30 d: 26; 31–90 d: 82; over 90 d: 43. Issue dates run 2026-06-03 to 2026-10-14. The thresholds that would separate "in transit" from "lost / not receipted" are a business decision (Decision 15).
-- **Receipt history contradictory (2 tags, class D2):** two transfer clones at branch 02 (type W, status A, issued from HO on 2026-10-05) exist without any `BJWPH` receipt line — no `PurchaseId`, no `InOutType=0` history row. GATI treats them as received (the clone exists) but no receiving document can be found. This is why completed transfers number 24,177 clones against 24,175 `BJWPH` lines.
+- **Receipt history contradictory (2 tags, class D2):** two transfer clones at branch 02 (type W, status A, issued from NULL/Self on 2026-10-05) exist without any `BJWPH` receipt line — no `PurchaseId`, no `InOutType=0` history row. GATI treats them as received (the clone exists) but no receiving document can be found. This is why completed transfers number 24,177 clones against 24,175 `BJWPH` lines.
 - File: `branch-location-exceptions.csv` (214 data rows: 212 class D1 + 2 class D2; tag ids, branch short codes, issue document number/date, age). It contains no party, customer or personal data. Re-generate from the frozen backup before relying on it: the live source added/changed rows during the session.
 - [C] Money side: BJWSL journals total ₹3,334,695,044.74 over 783 documents and BJWPH ₹3,270,464,992.56 over 741; the ₹64.2 M gap is *not* proven to be these 212 pieces (no per-document valuation was reconciled) [U].
 
 ## 7. Branch inventory (for the TRIVO `Branch` table)
 
-[C] Five locations exist in GATI data: HO (NULL, implicit, name "01 MANIKONDA" by mirror parties), 02 JUBILEE HILLS, 03 VANSTHALIPURAM, 04 VIZAG, 05 (no name). Books exist for all five, and branch 05 is live (468 stock tags, documents from 2026-10). The owner's "four live branches + a fifth to be added" is ambiguous against this (Decision 13).
+[C] Five source location values exist: `NULL` ("Self"), 02 JUBILEE HILLS, 03 VANSTHALIPURAM, 04 VIZAG, 05 (no name). Books exist for all five. Owner clarification (2026-10-14): the business has **five physical locations** — four retail branches (Manikonda, Jubilee Hills, Vanasthalipuram, Vizag) and one Head Office (HO / Himayathnagar). The source-to-business mapping is in §3a; only part of it is verified.
 
-Current stock tips by branch and status (live, unfrozen): HO A 9,720 / C 129 / T 1; 02 A 1,490 / C 2 / T 5; 03 A 4,480 / C 5; 04 A 5,699; 05 A 468. Metal mix: silver 925 (SL925) dominates by weight; gold 22KT/18KT/14KT, silver 999, gold 999. 253 HO `A` tips (78,432 g gross) have no base metal and zero cost [U what they are].
+Current stock tips by branch and status (live, unfrozen): NULL/Self A 9,720 / C 129 / T 1; 02 A 1,490 / C 2 / T 5; 03 A 4,480 / C 5; 04 A 5,699; 05 A 468. Metal mix: silver 925 (SL925) dominates by weight; gold 22KT/18KT/14KT, silver 999, gold 999. 253 NULL/Self `A` tips (78,432 g gross) have no base metal and zero cost [U what they are].
 
 ## 8. Limitations of this investigation
 

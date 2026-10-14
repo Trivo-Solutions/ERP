@@ -16,7 +16,7 @@ Date: 2026-10-14. Scope: `VASDSJEP` only, full history. **No importer exists, no
 
 ## 1. Gate 0 — preconditions (nothing is built until all are true)
 
-1. Owner has answered the blocking decisions: D13 (HO = NULL, branch inventory), D14 (one tag per `JewelCode`), D16 (status/TranType meanings), D17 (loader instead of service replay), D18 (accounting strategy), D19 (document numbers), D20 (GST history), D22 (original cost), D23 (outstanding authority), D27 (target environment).
+1. Owner has answered the blocking decisions: D13 (five locations; NULL/Self and 05 mapping), D14 (one tag per `JewelCode`), D16 (status/TranType meanings), D17 (loader instead of service replay), D18 (accounting strategy), D19 (document numbers), D20 (GST history), D22 (original cost), D23 (outstanding authority), D27 (target environment).
 2. Owner supplied GATI's own stock register, party outstanding and filed GST figures for a named date (the authority the reconciliation checks against).
 3. Approved schema changes written and reviewed: `migration_batches`, `migration_source_map`, `tag_movement_history` (gap-analysis §8). Each with RLS, composite FK, `db-secure.sql`, schema-guard entry and RLS tests (CLAUDE.md §11, §6.12).
 4. A restored copy of the GATI backup exists on a non-production SQL Server instance (hash recorded) and the read-only login works on it.
@@ -27,7 +27,7 @@ Date: 2026-10-14. Scope: `VASDSJEP` only, full history. **No importer exists, no
 
 ### P1 — Prepare configuration (target = staging company)
 Order matters because later steps reference earlier ones by id.
-1. Branches: HO (`isHeadOffice`) + 02, 03, 04, 05 (names per D13). Mirror/counterpart parties are **not** created as branches or clients.
+1. Branches: five rows for the owner's five locations (Manikonda, Jubilee Hills, Vanasthalipuram, Vizag, HO/Himayathnagar); `isHeadOffice` set only on the location D13 confirms as HO; the GATI source value is stored in the source map beside each. Pending rows (NULL/Self, 05) are not created until confirmed. Mirror/counterpart parties are **not** created as branches or clients.
 2. GST registrations and each branch's `gstRegistrationId` (D20) — before any document.
 3. Masters from GATI, copied not referenced: product categories (142) / sub-categories (742), stock types (5), make types (12, D25), karat codes (G22KT→22K, G18KT, G14KT, G999, SL925, SL999 — KaratMaster first), collections/sizes actually used, HSN rows required by documents.
 4. Chart of accounts mapping for the 198 account parties (D18); unmapped accounts listed to the owner, not auto-created.
@@ -40,7 +40,7 @@ Clients (7,318, mirror branch parties excluded), suppliers (272); legacy key to 
 
 ### P3 — Tags (tips only, one per `JewelCode`)
 1. For each `JewelCode`, take the tip (`NewJewelId IS NULL`); map every instance `JewelId` of the chain to this tag in the source map (59,839 entries).
-2. Create the tag with the GATI `JewelCode` as `tagNumber`, `branchId` from `BranchNo` (NULL→HO; a `V` tip keeps its **source** branch), `status` per the D16/D15 mapping, weights, cost per D22, material rows.
+2. Create the tag with the GATI `JewelCode` as `tagNumber`, `branchId` from `BranchNo` (source value kept; NULL→the TRIVO branch D13 confirms; a `V` tip keeps its **source** branch), `status` per the D16/D15 mapping, weights, cost per D22, material rows.
 3. Advance `TAG:*` sequences past any imported number that could collide.
 4. Zero-cost / no-metal / cost-component exceptions go to quarantine with their reason; they are imported flagged or held back per the owner's ruling, not defaulted.
 **Gate P3:** R-01…R-14.

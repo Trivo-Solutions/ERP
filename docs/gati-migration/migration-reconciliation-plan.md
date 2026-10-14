@@ -31,8 +31,8 @@ Date: 2026-10-14. Scope: `VASDSJEP` only (VASSSJEP excluded by owner), **full hi
 | R-03 | Unique tag numbers | 0 duplicate `JewelCode` per tip | `tagNumber` unique per company; 0 collisions with TRIVO-generated numbers; sequences advanced past imported ones | 0 | 0 expected |
 | R-04 | One tip per piece | tips (`NewJewelId IS NULL`) per `JewelCode` = 1 | n/a (assert on source copy) | 0 violations | 1 for all 35,384 |
 | R-05 | Current status | tips by `Status` | tags by mapped status, using the mapping signed off in D16 | 0 | A 21,857 · X 13,173 · V 212 · C 136 · T 6 |
-| R-06 | Stock by branch × status | tips A/C/T/V by `BranchNo` (NULL→HO) | tags by `branchId` and status | 0 | HO A 9,720 C 129 T 1 V 63 · 02 A 1,490 C 2 T 5 V 66 · 03 A 4,480 C 5 V 49 · 04 A 5,699 V 33 · 05 A 468 V 1 |
-| R-07 | Weights | Σ `GrossWt`, Σ `NetWt` (+`NetWtNotBase` per D22) by branch × base metal × karat for tips | Σ `grossWeight`, Σ `netWeight` same grouping | per §9 | silver 925 dominates by weight; gold 22KT/18KT/14KT; 253 HO tips (78,432 g gross) have no base metal |
+| R-06 | Stock by branch × status | tips A/C/T/V by `BranchNo` (NULL→HO) | tags by `branchId` and status | 0 | NULL/Self A 9,720 C 129 T 1 V 63 · 02 A 1,490 C 2 T 5 V 66 · 03 A 4,480 C 5 V 49 · 04 A 5,699 V 33 · 05 A 468 V 1 |
+| R-07 | Weights | Σ `GrossWt`, Σ `NetWt` (+`NetWtNotBase` per D22) by branch × base metal × karat for tips | Σ `grossWeight`, Σ `netWeight` same grouping | per §9 | silver 925 dominates by weight; gold 22KT/18KT/14KT; 253 NULL/Self tips (78,432 g gross) have no base metal |
 | R-08 | Stone weight and pieces | Σ stone weights, Σ `ItemPieces` | Σ `stoneWeight`, Σ `noOfPcs` | per §9 | — |
 | R-09 | Original cost | Σ `COST` of the chosen instance (D22) by branch × metal × karat | Σ `costPrice` | 0.00 | 1,422 tips with COST=0; 845 tags where COST ≠ Σ component cost within ₹1 (listed, not corrected) |
 | R-10 | Cost components | per tag: Σ `Tot*CostAmt` and `InwardDetail.CostAmount` | Σ `JewelryTagMaterial.costAmount` + labour/VA | 0.00 per tag after the D22 rule | 57,572 of 58,417 tags with COST>0 tie within ₹1 |
@@ -49,7 +49,7 @@ Date: 2026-10-14. Scope: `VASDSJEP` only (VASSSJEP excluded by owner), **full hi
 | R-20 | Issue documents | `BJWSL` docs and lines | `branch_transfers` / items | 0 | 783 docs; 24,389 lines |
 | R-21 | Completed vs outstanding | lines with clone vs without | items with/without `receivedAt` | 0 | 24,177 completed + 212 outstanding |
 | R-22 | Receipts matched | `BJWPH` docs and lines vs clones | matched receipt documents | 0 unexplained | 741 docs; 24,175 lines; **2 clones without a receipt line** (listed in `branch-location-exceptions.csv`, class D2) |
-| R-23 | In-transit set | `BranchPendingVerification_Report` logic = V tips without `Inline_ToJewelId` | transfers `DISPATCHED`/`PARTIALLY_RECEIVED` with items `receivedAt IS NULL` and tags `TRANSFERRED` (only if D15 says so) | exact id list match | 212 (63 from HO; 61 aged ≤3 d, 26 aged 8–30 d, 82 aged 31–90 d, 43 older) |
+| R-23 | In-transit set | `BranchPendingVerification_Report` logic = V tips without `Inline_ToJewelId` | transfers `DISPATCHED`/`PARTIALLY_RECEIVED` with items `receivedAt IS NULL` and tags `TRANSFERRED` (only if D15 says so) | exact id list match | 212 (63 from NULL/Self; 61 aged ≤3 d, 26 aged 8–30 d, 82 aged 31–90 d, 43 older) |
 | R-24 | Per-hop branch continuity | for every chain, hop *n*'s destination = hop *n+1*'s source | movement history | 0 breaks | holds by construction in GATI (a hop's destination row *is* the next hop's source row); the check guards the loader, not the source |
 | R-25 | Transfer value | Σ journal amount `BJWSL`/`BJWPH` | per D18 (imported or excluded) | 0 or documented | ₹3,334,695,044.74 / ₹3,270,464,992.56 (gap ₹64.2 M unexplained) |
 
@@ -160,7 +160,7 @@ SELECT Status, COUNT(*) FROM Inward WHERE NewJewelId IS NULL GROUP BY Status;
 -- pieces
 SELECT COUNT(DISTINCT JewelCode) FROM Inward;
 -- stock by branch x metal (A, C, T tips)
-SELECT ISNULL(i.BranchNo,'HO') br, i.Status, v.ItemCode, COUNT(*) tags,
+SELECT ISNULL(i.BranchNo,'NULL/Self') br, i.Status, v.ItemCode, COUNT(*) tags,
        SUM(s.GrossWt) gross, SUM(s.NetWt+s.NetWtNotBase) net, SUM(s.COST) cost
 FROM Inward i JOIN InwardSummary s ON s.JewelId=i.JewelId
 LEFT JOIN SPM_ItemView v ON v.ItemId=s.BaseMetalId

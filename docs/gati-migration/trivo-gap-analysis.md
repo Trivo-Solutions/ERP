@@ -12,7 +12,7 @@ TRIVO can **hold** the migrated facts (tags, branches, invoices, returns, memos,
 |---|---|---|---|
 | Tag (one physical piece) | `JewelryTag` | Good, but one row per piece (`@@unique([companyId, tagNumber])`) vs GATI's chain of instances; `branchId` required, status `IN_STOCK/ON_APPROVAL/TRANSFERRED/SOLD/RETIRED` | schema.prisma:2998-3106 |
 | Material rows | `JewelryTagMaterial` (code, type, pieces, weight, cost/sale rate+amount) | Good | schema |
-| Branch | `Branch` (`branchCode`, `isHeadOffice`, `gstRegistrationId`) | Good; HO is a real row, not NULL | schema.prisma:2895 |
+| Branch | `Branch` (`branchCode`, `isHeadOffice`, `gstRegistrationId`) | Good; every location (incl. the one GATI stores as NULL/"Self") needs a real row — five rows per the owner's five locations, mapping pending D13 | schema.prisma:2895 |
 | Branch transfer | `BranchTransfer` + `BranchTransferItem.receivedAt` (null = in transit) | Concept fits, **mechanics differ** (§4) | schema.prisma:3108-3156; tagging.service.ts:1411-1538 |
 | Sale / lines / tax | `SalesInvoice`, `InvoiceItem` (per-line `hsnCodeId`, `taxRate`, cgst/sgst/igst, `materialBreakdown`), `TaxInvoice` | Good fit for what GATI stores, per-line tax must be derived | schema.prisma:3714-3880 |
 | Sale return | `SalesReturn`/`SalesReturnItem` (requires original `invoiceId` + `invoiceItemId`) | Fits: GATI `OriginalSaleId` resolves 153/153 | schema.prisma:4133 |
@@ -38,7 +38,7 @@ TRIVO can **hold** the migrated facts (tags, branches, invoices, returns, memos,
 2. **Transfer mechanics.** TRIVO `createTransfer` flips `IN_STOCK→TRANSFERRED` immediately and keeps the **source** `branchId` until `receiveTransfer` sets the destination (tagging.service.ts:1442, 1518). GATI keeps `V` on the source row and creates the destination row only at receipt. They agree on the in-transit state only if the 212 are deliberately imported as `TRANSFERRED` + a `DISPATCHED` transfer with item `receivedAt = null` (D15).
 3. **No transfer journal in TRIVO; ₹3.3 B of inter-branch journals in GATI** (BJWSL 783 rows, BJWPH 741). Importing them yields inter-branch balances TRIVO would never produce itself (D18).
 4. **Deletes.** GATI deletes documents physically; nothing is "cancelled". TRIVO voids (`VOID`). So no imported document ever needs a void/cancelled state, and the 147k-row `Delete_Log` has nothing to map onto.
-5. **HO is NULL in GATI, a row in TRIVO** (D13).
+5. **One source location is stored as NULL ("Self") in GATI; TRIVO needs a real `Branch` row for it** (D13: which physical location that is — Manikonda per the evidence — is pending verification; `05` as HO/Himayathnagar is also pending).
 6. **GST.** GATI stores GST as document-level add/less lines; TRIVO stores it per line (`InvoiceItem.cgstAmount` etc.). Per-line tax must be **allocated**, and the allocation must sum back to GATI's document totals exactly (D20).
 
 ## 5. Why replaying history through TRIVO's services does not work
