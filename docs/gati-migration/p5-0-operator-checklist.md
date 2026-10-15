@@ -48,13 +48,16 @@ function Ev {                                    # run a block, truncate each li
   param([string]$Id, [scriptblock]$Do)
   $out = @(& $Do 2>&1 | ForEach-Object {
     $s = "$_"
+    $s = $s -replace '://[^/\s:]+:[^/\s]*@','://***@' `
+            -replace '(?i)\bbearer\s+\S+','Bearer ***' `
+            -replace '(?i)([\w-]*(?:password|passwd|secret|token|api[_-]?key)[\w-]*["'']?\s*[=:]\s*)(?:"[^"]*"|''[^'']*''|\S+)','$1***'
     if ($s.Length -gt 300) { $s.Substring(0, 300) + ' ...[truncated]' } else { $s }
   })
   $out | Out-File -FilePath (Join-Path $E "$Id.txt") -Encoding utf8
   $out
 }
 ```
-Every step below is run as `Ev '<ID>' { ... }`. In PowerShell 5.1, a native command's stderr can appear wrapped as `NativeCommandError`; that is cosmetic and is still captured.
+Every step below is run as `Ev '<ID>' { ... }`. `Ev` also applies three regex masks to each output line before it is shown or saved: `://user:pass@` credentials in a URI (including `%`-encoded passwords and passwords containing `@`), `Bearer <token>`, and `password|passwd|secret|token|api_key` assignments written with `=` or `:` (including JSON `"key": "value"`, quoted multi-word values and names such as `AWS_SECRET_ACCESS_KEY`). **This is a best-effort backstop, not a guarantee, and not a substitute for the filtered commands.** Regex masking cannot recognise every secret. Known gaps, which are *not* masked: a secret separated from its name by a space only (`password hunter2`); a bare key or token with no name in front of it (for example `sk-…`); a value on the line after its name (output is masked one line at a time); and any secret under a name the pattern does not list. Read every evidence file yourself before it leaves the host. In PowerShell 5.1, a native command's stderr can appear wrapped as `NativeCommandError`; that is cosmetic and is still captured.
 
 ---
 
@@ -64,12 +67,13 @@ Every step below is run as `Ev '<ID>' { ... }`. In PowerShell 5.1, a native comm
 ```powershell
 Ev 'A1' {
   Get-CimInstance Win32_Service | Where-Object { $_.Name -match 'postgres|pgsql' } |
-    Select-Object Name,State,StartName,ProcessId,PathName
+    Select-Object Name,State,StartName,ProcessId,
+      @{n='DataDir';e={ if ($_.PathName -match '-D\s+"([^"]+)"') { $Matches[1] } elseif ($_.PathName -match '-D\s+(\S+)') { $Matches[1] } else { '(no -D found)' } }}
   Get-NetTCPConnection -State Listen -LocalPort 5432 -ErrorAction SilentlyContinue |
     Select-Object LocalAddress,LocalPort,OwningProcess
 }
 ```
-- **Capture:** service name(s), state, the account it runs as, the data directory (`-D` in `PathName`), and the listen addresses. `PathName` is a service command line: if it contains anything other than paths and `-D`/`-w`/`-N`, redact it before saving.
+- **Capture:** service name(s), state, the account it runs as, the data directory (`-D` in `PathName`), and the listen addresses. The service command line (`PathName`) is never selected or written; only the `-D` data-directory path is extracted from it in memory.
 - **Pass:** exactly one PostgreSQL 18 service is Running and the listen address is documented.
 - **Finding (draft P.1 #4):** `0.0.0.0` or `::` means all interfaces. Record it for the owner; it is not a P5-0 fail.
 - **Unverified if:** no service matches, or more than one appears (note which serves TRIVO).
@@ -128,7 +132,7 @@ Ev 'A4b' {
   foreach ($k in "HKLM:\SYSTEM\CurrentControlSet\Services\$svc\Environment","HKLM:\SYSTEM\CurrentControlSet\Services\$svc\Parameters") {
     if (Test-Path $k) {
       (Get-ItemProperty $k).PSObject.Properties | Where-Object Name -match 'Environment' |
-        ForEach-Object { $_.Value } | ForEach-Object { ($_ -split '=')[0] }
+        ForEach-Object { $_.Value } | Where-Object { "$_" -match '=' } | ForEach-Object { ($_ -split '=')[0] }
     }
   }
 }
@@ -331,17 +335,115 @@ Expected evidence and criteria, per section:
 - **B3:** **Pass:** `trivo_owner`, `trivo_runtime`, `trivo_platform` exist; `trivo_runtime` is not superuser and has no BYPASSRLS; `trivo_platform` has BYPASSRLS and is not superuser; `trivo_backup` present or recorded as absent. **Fail:** a missing `trivo_*` role, or `trivo_runtime` with `rolsuper`/`rolbypassrls`. Roles that are neither `trivo_*` nor `postgres` are co-tenancy evidence.
 - **B4:** **Pass:** TRIVO's database is named (cross-check B2 and A6) with its size (feeds A7/P5-3). Flag every other database, and any non-TRIVO database the `trivo_*` roles can connect to, for DEC-2.
 
+### B5 expected tenant-table inventory (defined independently of the database) — put this above `$Sess2`
+The 134 names below were derived **from `server/prisma/schema.prisma` at the checklist's repo HEAD** (every model that declares a `companyId` field, using its `@@map` table name), **not** from the database and not from `pg_policies`. Re-derive it if the repo has moved. The six platform tables (`companies`, `users`, `hsn_codes`, `state_master`, `platform_audit_logs`, `_prisma_migrations`) are the only `public` tables allowed to be outside it.
+```powershell
+$ExpectedTenantTables = @(
+  'accounts', 'approval_history', 'artisans', 'audit_logs', 'bom_items',
+  'bom_processes', 'branch_payment_providers', 'branch_transfer_items', 'branch_transfers', 'branches',
+  'category_sub_categories', 'client_notifications', 'clients', 'collections', 'company_gst_aato_histories',
+  'company_gst_aatos', 'company_gst_registrations', 'company_invitations', 'company_users', 'consumable_transactions',
+  'consumables', 'cost_centers', 'cost_estimates', 'credit_note_items', 'credit_note_templates',
+  'credit_notes', 'customer_advance_applications', 'customer_advance_payments', 'customer_advances', 'debit_note_items',
+  'debit_note_templates', 'debit_notes', 'design_categories', 'design_files', 'designs',
+  'discount_approvals', 'einvoice_records', 'estimate_templates', 'export_documents', 'goods_receipt_notes',
+  'grn_item_component_rates', 'grn_items', 'gst2b_documents', 'gst2b_statements', 'gst_filing_attempts',
+  'gst_filing_snapshots', 'gst_integration_configs', 'gst_integration_credentials', 'gst_integration_request_logs', 'gst_return_periods',
+  'hallmarking_batches', 'hallmarking_items', 'hardware_devices', 'invoice_items', 'invoice_payments',
+  'jewelry_tag_materials', 'jewelry_tags', 'job_cards', 'job_processes', 'journal_entries',
+  'journal_lines', 'karat_master', 'karigar_ledger', 'making_charges', 'material_codes',
+  'material_reservations', 'memo_items', 'memo_outs', 'metal_rates', 'metal_stock_movements',
+  'metal_stocks', 'number_sequences', 'offer_rules', 'offers', 'old_gold_exchanges',
+  'order_items', 'payment_providers', 'photography_capture_commands', 'photography_stations', 'po_item_categories',
+  'po_item_components', 'po_items', 'pos_terminals', 'pr_items', 'price_masters',
+  'process_tolerances', 'product_categories', 'purchase_lots', 'purchase_orders', 'purchase_requisitions',
+  'purchase_return_items', 'purchase_returns', 'qc_checkpoints', 'rcm_liabilities', 'repair_cases',
+  'repair_jobs', 'repair_transactions', 'repair_transfer_items', 'repair_transfers', 'roles',
+  'sales_debit_note_items', 'sales_debit_notes', 'sales_invoices', 'sales_orders', 'sales_return_items',
+  'sales_returns', 'self_invoices', 'setting_types', 'sizes', 'station_credentials',
+  'stock_audit_items', 'stock_audits', 'stock_types', 'stone_grades', 'stone_lot_splits',
+  'stone_lots', 'stone_types', 'sub_categories', 'subcontractor_invoices', 'supplier_payments',
+  'suppliers', 'system_configs', 'tag_estimate_items', 'tag_estimates', 'tag_history',
+  'tag_images', 'tag_retags', 'tag_templates', 'tax_invoice_templates', 'tax_invoices',
+  'user_branch_access', 'user_table_layouts', 'vendor_component_rates', 'wip_tracking'
+)
+$PlatformTables = @('companies','users','hsn_codes','state_master','platform_audit_logs','_prisma_migrations')
+$ev = ($ExpectedTenantTables | ForEach-Object { "('$_')" }) -join ','
+$pv = ($PlatformTables       | ForEach-Object { "('$_')" }) -join ','
+"expected tenant tables: $($ExpectedTenantTables.Count) (expect 134)"
+```
+The required policy (from migrations `20260923130000`/`20260923150000` onward): exactly one policy named `tenant_isolation`, `PERMISSIVE`, command `ALL`, role `public`, with `USING` and `WITH CHECK` both equal to `"companyId" = current_setting('app.tenant_company_id', true)` (compared after removing the `::text` cast PostgreSQL adds when it prints the expression).
+
 ### B-session 2: inside the TRIVO database (B5–B7a) 🟡🔑 `DB-READ`, connected to `$TrivoDb`
 ```powershell
 $Sess2 = @()
+$Sess2 += @"
+\echo === B5 RLS inventory: expected vs actual (only problems are listed; SUMMARY rows always)
+WITH expected(t) AS (VALUES $ev),
+platform(t)  AS (VALUES $pv),
+want(q) AS (VALUES ('("companyId" = current_setting(''app.tenant_company_id'', true))')),
+tbl AS (
+  SELECT c.relname AS t, c.relrowsecurity AS rls_on, c.relforcerowsecurity AS rls_forced
+  FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r','p')
+),
+pol AS (
+  SELECT tablename AS t,
+         count(*) AS n,
+         count(*) FILTER (WHERE policyname = 'tenant_isolation' AND permissive = 'PERMISSIVE' AND cmd = 'ALL'
+                            AND roles = '{public}'
+                            AND replace(qual, '::text', '') = (SELECT q FROM want)
+                            AND replace(with_check, '::text', '') = (SELECT q FROM want)) AS good
+  FROM pg_policies WHERE schemaname = 'public' GROUP BY tablename
+)
+SELECT 'PROBLEM' AS kind, e.t AS name,
+       concat_ws(', ',
+         CASE WHEN tb.t IS NULL THEN 'table missing' END,
+         CASE WHEN tb.t IS NOT NULL AND NOT tb.rls_on THEN 'RLS not enabled' END,
+         CASE WHEN tb.t IS NOT NULL AND NOT tb.rls_forced THEN 'FORCE RLS off' END,
+         CASE WHEN tb.t IS NOT NULL AND coalesce(p.good, 0) <> 1 THEN 'policy missing or expression not recognised — investigate' END,
+         CASE WHEN coalesce(p.n, 0) > 1 THEN 'more than one policy' END) AS detail
+FROM expected e LEFT JOIN tbl tb ON tb.t = e.t LEFT JOIN pol p ON p.t = e.t
+WHERE tb.t IS NULL OR NOT tb.rls_on OR NOT tb.rls_forced OR coalesce(p.n, 0) <> 1 OR coalesce(p.good, 0) <> 1
+UNION ALL
+SELECT 'UNEXPECTED_TABLE', tb.t, 'in public but in neither the expected tenant list nor the platform list'
+FROM tbl tb WHERE tb.t NOT IN (SELECT t FROM expected) AND tb.t NOT IN (SELECT t FROM platform)
+UNION ALL
+SELECT 'UNEXPECTED_POLICY', p.t, 'policy on a table outside the expected tenant list'
+FROM pol p WHERE p.t NOT IN (SELECT t FROM expected)
+UNION ALL
+SELECT 'SUMMARY', 'expected_tenant_tables', count(*)::text FROM expected
+UNION ALL
+SELECT 'SUMMARY', 'present_in_database', count(*)::text FROM expected e JOIN tbl tb ON tb.t = e.t
+UNION ALL
+SELECT 'SUMMARY', 'rls_on_and_forced', count(*)::text FROM expected e JOIN tbl tb ON tb.t = e.t WHERE tb.rls_on AND tb.rls_forced
+UNION ALL
+SELECT 'SUMMARY', 'with_required_policy', count(*)::text FROM expected e JOIN pol p ON p.t = e.t WHERE p.n = 1 AND p.good = 1
+ORDER BY 1, 2;
+"@
 $Sess2 += @'
-\echo === B5 FORCE RLS counts
-SELECT count(*) FILTER (WHERE c.relrowsecurity)      AS rls_on,
-       count(*) FILTER (WHERE c.relforcerowsecurity) AS rls_forced,
-       count(*) FILTER (WHERE NOT c.relforcerowsecurity) AS unforced,
-       count(*)                                      AS tenant_tables
-FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
-WHERE c.relkind = 'r' AND c.relname IN (SELECT tablename FROM pg_policies WHERE policyname = 'tenant_isolation');
+\echo === B5 policy diagnostic: every public policy on a table whose RLS flags or policy shape the inventory would flag (read-only; no rows after this line = nothing to show)
+WITH want(q) AS (VALUES ('("companyId" = current_setting(''app.tenant_company_id'', true))')),
+tbl AS (
+  SELECT c.relname AS t, c.relrowsecurity AS rls_on, c.relforcerowsecurity AS rls_forced
+  FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r','p')
+),
+pol AS (
+  SELECT tablename AS t,
+         count(*) AS n,
+         count(*) FILTER (WHERE policyname = 'tenant_isolation' AND permissive = 'PERMISSIVE' AND cmd = 'ALL'
+                            AND roles = '{public}'
+                            AND replace(qual, '::text', '') = (SELECT q FROM want)
+                            AND replace(with_check, '::text', '') = (SELECT q FROM want)) AS good
+  FROM pg_policies WHERE schemaname = 'public' GROUP BY tablename
+),
+flagged AS (
+  SELECT tb.t FROM tbl tb JOIN pol p ON p.t = tb.t
+  WHERE NOT tb.rls_on OR NOT tb.rls_forced OR p.n <> 1 OR p.good <> 1
+)
+SELECT pp.tablename, pp.policyname, pp.permissive, pp.cmd, pp.roles::text AS roles, pp.qual, pp.with_check
+FROM pg_policies pp JOIN flagged f ON f.t = pp.tablename
+WHERE pp.schemaname = 'public'
+ORDER BY pp.tablename, pp.policyname;
 '@
 $Sess2 += @'
 \echo === B5 table owners
@@ -370,7 +472,7 @@ SELECT 'MIG:' || migration_name FROM _prisma_migrations WHERE finished_at IS NOT
 '@
 $out2 = Ev 'B-session2' { Invoke-RoPsql -Db $TrivoDb -Sections $Sess2 }
 ```
-- **B5 pass:** `unforced = 0`; `rls_forced = tenant_tables`; tables owned by `trivo_owner`, not `trivo_runtime` or `postgres`; policies ≥ 80 and two-column FKs ≥ 58 (thresholds from the draft/CLAUDE.md, measured on a different stack: guidance, and two-column FKs also counts non-tenant FKs). **Fail:** any unforced table, or the runtime role owning tables. **Unverified:** zero `tenant_isolation` policies means an unmigrated or non-TRIVO database; say so.
+- **B5 pass:** the inventory query returns **no** `PROBLEM`, `UNEXPECTED_TABLE` or `UNEXPECTED_POLICY` rows, and its `SUMMARY` rows read `expected_tenant_tables` = `present_in_database` = `rls_on_and_forced` = `with_required_policy` = 134; tables owned by `trivo_owner`, not `trivo_runtime` or `postgres`; two-column FKs ≥ 58 (a guidance figure from the draft/CLAUDE.md, measured on a different stack, and it also counts non-tenant FKs). **Structural STOP:** any `PROBLEM` row whose detail says `table missing`, `RLS not enabled` or `FORCE RLS off`, or the runtime role owning tables. **Investigate (neither pass nor automatic fail):** a `PROBLEM` row whose detail says `policy missing or expression not recognised — investigate` or `more than one policy`; an `UNEXPECTED_TABLE`/`UNEXPECTED_POLICY` row (a newer migration than the repo list, or a stray table); or a count other than 134. For these, read the policy diagnostic section: it prints each policy's `policyname`, `permissive`, `cmd`, `roles`, `qual` and `with_check` exactly as PostgreSQL shows them. A recognised-but-differently-printed expression is not proof of a hole, and an unrecognised one is not proof of safety; decide from the printed expression, and record the item as **Unverified** until you have. **Unverified, never pass:** if the inventory returned **zero `SUMMARY` rows**, treat B5 as Unverified: a psql error (permissions, a failed section, a dropped connection) can yield no result rows at all, so silence is not a clean result. The same goes for a missing `=== B5 policy diagnostic` header line: the diagnostic did not run, so its absence of rows says nothing. The exact printed form of the policy expression on the live server (compared after dropping `::text`) is itself unverified.
 - **B6 pass:** the existing client's company code is named (a new code must not collide, including look-alike folding 0→O, 1/L→I, 5→S, 8→B; draft P.2). Only code, name, flags: never query a company-scoped table. **Unverified:** zero rows from a non-superuser, non-platform login is not "no companies".
 - **B7a pass:** `unfinished = 0`, `rolled_back = 0`, and the name comparison below shows no difference.
 
@@ -396,10 +498,12 @@ Ev 'B7a-compare' {
 - B7a already answers "what is applied and what is pending" with no credential in the environment. Use B7b only if checksum drift matters.
 
 ```powershell
-cd $S
+$oldDbUrl = $env:DATABASE_URL; $oldCheckpoint = $env:CHECKPOINT_DISABLE    # remember, restore in finally
+Push-Location $S -ErrorAction Stop
+try {
 Ev 'B7b' {
-  $env:CHECKPOINT_DISABLE = '1'                      # no update/telemetry network call
   try {
+    $env:CHECKPOINT_DISABLE = '1'                    # no update/telemetry network call
     $sec = Read-Host -AsSecureString 'trivo_owner password'
     $pw  = [pscredential]::new('x', $sec).GetNetworkCredential().Password
     $env:DATABASE_URL = "postgresql://trivo_owner:$([uri]::EscapeDataString($pw))@$($PgHost):$($PgPort)/$($TrivoDb)?schema=public"
@@ -407,11 +511,14 @@ Ev 'B7b' {
       ForEach-Object { "$_" -replace 'postgres(ql)?://[^@\s]+@','postgresql://***@' }
   }
   finally {
-    Remove-Item Env:DATABASE_URL, Env:CHECKPOINT_DISABLE -ErrorAction SilentlyContinue
+    if ($null -eq $oldDbUrl)      { Remove-Item Env:DATABASE_URL -ErrorAction SilentlyContinue }      else { $env:DATABASE_URL = $oldDbUrl }
+    if ($null -eq $oldCheckpoint) { Remove-Item Env:CHECKPOINT_DISABLE -ErrorAction SilentlyContinue } else { $env:CHECKPOINT_DISABLE = $oldCheckpoint }
     $pw = $null; $sec = $null
   }
 }
+} finally { Pop-Location }
 ```
+Whatever `DATABASE_URL` / `CHECKPOINT_DISABLE` held before (including nothing) is put back, and the working directory is restored, even if the command fails or is interrupted.
 This calls the hoisted CLI directly (no `npx`, so nothing can be downloaded), and only ever runs the `status` subcommand. If `prisma.cmd` is missing at that path, stop and report; do not install it.
 - **Pass:** "Database schema is up to date!" with 112 migrations. **Fail:** a failed migration, or an applied migration missing from the repo. **Record, do not act on:** pending migrations.
 
@@ -451,23 +558,31 @@ This calls the hoisted CLI directly (no `npx`, so nothing can be downloaded), an
 **P5-0 verdict (draft's own rule):**
 - **PASS** needs all of:
   - A5, B2, B3 and B5 show the API connecting as `trivo_runtime` (platform as `trivo_platform`), neither superuser nor owner.
-  - B5: `unforced = 0`, tables owned by `trivo_owner`.
+  - B5: the RLS inventory was actually returned (its four `SUMMARY` rows are present) and shows no `PROBLEM` rows, all 134 expected tables RLS-on, FORCEd and policy-correct; tables owned by `trivo_owner`. Zero `SUMMARY` rows, or any unresolved `policy missing or expression not recognised — investigate` row, is not a pass.
   - A4: `NODE_ENV=production`.
   - B6: the existing company code is known.
   - B7a/B7b: current, or the pending list is recorded.
   - A7/B4: disk and database size recorded.
-- **STOP** if the RLS-not-enforced warning is the latest startup line, the API role is a superuser or owner, or any tenant table is unforced. Provisioning would then create a company in a database with no tenant isolation.
+- **STOP** if the RLS-not-enforced warning is the latest startup line, the API role is a superuser or owner, or any expected tenant table is **missing, has RLS disabled, or has FORCE RLS disabled**. Provisioning would then create a company in a database with no tenant isolation.
+- **INVESTIGATE** (not pass, and not an automatic STOP) a policy whose expression is not recognised (`policy missing or expression not recognised — investigate`), a table with more than one policy, or an unexpected table/policy: read the diagnostic output and resolve it to a recorded STOP or a recorded safe finding before the verdict. Until then B5 is **UNVERIFIED**.
 - Anything not established is **UNVERIFIED** with the reason. It is never marked pass.
 
 ## Cleanup
-The helper restores `PGOPTIONS`/`PGCONNECT_TIMEOUT` itself, and B7b removes `DATABASE_URL`/`CHECKPOINT_DISABLE` in `finally`. After Part B, close the PowerShell window and confirm nothing remains:
+The helper restores `PGOPTIONS`/`PGCONNECT_TIMEOUT` to their prior values, and B7b restores `DATABASE_URL`/`CHECKPOINT_DISABLE` and the working directory, all in `finally`. After Part B, close the PowerShell window and confirm nothing remains (a `True` only means the variable was already set before the run; compare with what you saw in B-setup):
 ```powershell
 Ev 'Z-cleanup' { 'DATABASE_URL set: ' + [bool]$env:DATABASE_URL; 'PGOPTIONS set: ' + [bool]$env:PGOPTIONS; 'PGPASSWORD set: ' + [bool]$env:PGPASSWORD }
 ```
 Expected: all `False`.
 
+**Evidence leak scan** (before any evidence file leaves the host; prints file name and line number only, never the matching text):
+```powershell
+Get-ChildItem $E -Filter *.txt | Select-String -Pattern '://[^/\s:]+:(?!\*\*\*@)[^/\s]*@','(?i)\bbearer\s+(?!\*\*\*)\S','(?i)(password|passwd|secret|token|api[_-]?key)[\w-]*["'']?\s*[=:]\s*["'']?(?!\*\*\*)[^\s"'']' |
+  Select-Object Filename,LineNumber
+```
+The patterns mirror the masks above and skip text that is already `***`. No output means no match for those patterns, **not** that the files are clean: the scan shares the masks' blind spots (space-separated secrets, bare keys, values on a following line). It is a heuristic, not proof; you still read every file.
+
 ## Limits of this checklist
 - A4's "actual" `NODE_ENV` comes from the startup log line (and the JSON-versus-text format as supporting evidence). No command reads a live process's environment.
-- The B5 thresholds (≥ 80 policies, ≥ 58 two-column FKs) come from the repo's docs, not this server; a lower count is something to investigate, not an automatic fail.
+- The two-column-FK figure (≥ 58) comes from the repo's docs, not this server; a lower count is something to investigate, not an automatic fail. The 134-table inventory was derived from `schema.prisma` and checked against migrations by static reading only; it was never compared with a real database.
 - B6's quoted column names follow `schema.prisma` field names; Prisma's mapped column names were not checked. If a section errors, the error is shown and the other sections still run.
-- None of these commands has been dry-run on any machine. In particular, `psql` reading the password from the console while its stdin is piped is expected behaviour on Windows but is **unverified** here.
+- None of these commands has been dry-run on any machine. In particular, `psql` reading the password from the console while its stdin is piped is expected behaviour on Windows but is **unverified** here. The same applies to `Read-Host -AsSecureString` inside the `Ev` script block, to `psql` behaviour on the hosted server (version, TLS, `pg_hba.conf`), and to every target-host fact (paths, service names, log format). Only PowerShell 5.1 *syntax* of the code blocks was checked, by parsing without executing.
