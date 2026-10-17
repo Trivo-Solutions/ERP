@@ -51,7 +51,7 @@ async function callAgent<T>(path: string, init?: RequestInit, timeoutMs = 3000):
   }
   const body = await res.json().catch(() => null);
   if (!res.ok || body?.ok === false) {
-    throw new Error(body?.error || `Print agent error (HTTP ${res.status})`);
+    throw Object.assign(new Error(body?.error || `Print agent error (HTTP ${res.status})`), { status: res.status });
   }
   return body as T;
 }
@@ -66,4 +66,48 @@ export function printTsplViaAgent(tspl: string, copies = 1): Promise<{ ok: true;
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ tspl, copies }),
   }, 15000);
+}
+
+// ── Receipt printer (ESC/POS, e.g. Epson TM-m30III) — separate routes on the same agent ─────────
+export interface ReceiptAgentStatus {
+  ok: true;
+  configured: boolean;
+  printerName: string | null;
+  online: boolean;
+  statusText: string;
+}
+
+export interface ReceiptPrintResult {
+  ok: true;
+  jobId: string;
+  // The agent can only vouch that the bytes reached the Windows print queue — never that paper came out.
+  status: 'SENT_TO_SPOOLER';
+  duplicate: boolean;
+  copies: number;
+}
+
+// A running agent that predates the receipt printer answers /receipt/* with 404 - "needs updating",
+// not "not running". Polling stops for it (react-query refetchInterval below) so it is not hammered.
+export const isReceiptAgentOutdated = (err: unknown) => (err as { status?: number } | null)?.status === 404;
+export const receiptStatusRefetchMs = (ms: number) => (q: { state: { error: unknown } }) => (isReceiptAgentOutdated(q.state.error) ? false : ms);
+
+export function getReceiptPrinterStatus(): Promise<ReceiptAgentStatus> {
+  // The agent asks Windows (PowerShell) for the printer state, which takes 2-5 s - well past callAgent's
+  // 3 s default, which made a healthy agent look "not running".
+  return callAgent<ReceiptAgentStatus>('/receipt/status', undefined, 15000);
+}
+
+export function printReceiptViaAgent(job: {
+  jobId: string; widthDots: number; heightDots: number; data: string; copies?: number;
+}): Promise<ReceiptPrintResult> {
+  return callAgent<ReceiptPrintResult>('/receipt/print', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(job),
+  }, 30000);
+}
+
+// Text-only test slip (init, text, feed, cut) — proves the receipt printer is wired up without an estimate.
+export function printReceiptTest(): Promise<{ ok: true; status: 'SENT_TO_SPOOLER' }> {
+  return callAgent('/receipt/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }, 30000);
 }

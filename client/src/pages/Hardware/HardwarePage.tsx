@@ -4,14 +4,14 @@ import {
   Alert, Table, TableHead, TableBody, TableRow, TableCell, Divider, Tooltip, Link,
 } from '@mui/material';
 import { useQuery, useMutation } from '@tanstack/react-query';
-import { Scale, QrCode, Nfc, Link as LinkIcon, LinkOff, Usb, Print, Download, Settings } from '@mui/icons-material';
+import { Scale, QrCode, Nfc, Link as LinkIcon, LinkOff, Usb, Print, ReceiptLong, Download, Settings } from '@mui/icons-material';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost } from '../../api/client';
 import { PageHeader } from '../../components/common/PageHeader';
 import { useScaleReading } from '../../hooks/useSocket';
 import { useWebSerial } from '../../hooks/useWebSerial';
 import { useUiStore } from '../../store/ui.store';
-import { getPrintAgentStatus, PRINT_AGENT_DOWNLOAD_URL, PRINT_AGENT_INSTALLER_URL, PRINT_AGENT_SETUP_URL } from '../../utils/printAgent';
+import { getPrintAgentStatus, getReceiptPrinterStatus, isReceiptAgentOutdated, receiptStatusRefetchMs, printReceiptTest, PRINT_AGENT_DOWNLOAD_URL, PRINT_AGENT_INSTALLER_URL, PRINT_AGENT_SETUP_URL } from '../../utils/printAgent';
 
 export function HardwarePage() {
   const { enqueueSnackbar } = useSnackbar();
@@ -49,6 +49,22 @@ export function HardwarePage() {
     queryFn: getPrintAgentStatus,
     refetchInterval: 10_000,
     retry: false,
+  });
+
+  // Receipt printer (ESC/POS, e.g. Epson TM-m30III) on the same agent - polled separately so the
+  // label printer card above is unaffected by it.
+  const { data: receiptStatus, isError: receiptQueryError, error: receiptError, refetch: refetchReceipt } = useQuery({
+    queryKey: ['receipt-printer-status'],
+    queryFn: getReceiptPrinterStatus,
+    refetchInterval: receiptStatusRefetchMs(10_000),
+    retry: false,
+  });
+  const receiptAgentOutdated = receiptQueryError && isReceiptAgentOutdated(receiptError);
+  const receiptAgentOffline = receiptQueryError && !receiptAgentOutdated;
+  const receiptTestMutation = useMutation({
+    mutationFn: printReceiptTest,
+    onSuccess: () => { enqueueSnackbar('Test slip sent to the receipt printer queue - check that it came out', { variant: 'success' }); refetchReceipt(); },
+    onError: (e: any) => enqueueSnackbar(e?.message ?? 'Test print failed', { variant: 'error' }),
   });
 
   const simulateMutation = useMutation({
@@ -330,6 +346,96 @@ export function HardwarePage() {
                 Prefer the manual route instead? <Link href={PRINT_AGENT_DOWNLOAD_URL} download>Download the .zip</Link> and
                 run <code>printer-agent.exe</code> directly — same auto-detect/setup behavior, but
                 no install step or autostart.
+              </Typography>
+            </CardContent>
+          </Card>
+        </Grid>
+
+        {/* ── Receipt Printer (Epson TM-m30III, estimates) ─────────────── */}
+        <Grid item xs={12} md={4}>
+          <Card>
+            <CardContent>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
+                <ReceiptLong color="primary" />
+                <Typography variant="subtitle1" fontWeight={700}>Receipt Printer</Typography>
+                <Chip
+                  label={
+                    receiptStatus?.online ? 'ONLINE'
+                      : receiptStatus && !receiptStatus.configured ? 'NEEDS SETUP'
+                      : receiptStatus ? 'OFFLINE'
+                      : receiptAgentOutdated ? 'AGENT NEEDS UPDATE'
+                      : receiptAgentOffline ? 'AGENT NOT RUNNING' : 'CHECKING...'
+                  }
+                  size="small"
+                  color={
+                    receiptStatus?.online ? 'success'
+                      : receiptStatus ? 'warning'
+                      : receiptAgentOutdated ? 'warning'
+                      : receiptAgentOffline ? 'error' : 'default'
+                  }
+                />
+              </Box>
+
+              <Alert severity="info" sx={{ mb: 2, fontSize: 12 }}>
+                The 80 mm Epson used for estimates. It runs on the same print agent as the label
+                printer (one installer for both), but is a separate printer - changing one never
+                changes the other.
+              </Alert>
+
+              {receiptStatus && (
+                <Typography variant="body2" sx={{ mb: 2 }}>
+                  {receiptStatus.configured ? receiptStatus.printerName : 'Not configured'} — {receiptStatus.statusText}
+                </Typography>
+              )}
+              {receiptAgentOutdated && (
+                <Typography variant="body2" color="warning.main" sx={{ mb: 2 }}>
+                  The print agent on this PC is an older version without receipt-printer support.
+                  Download and run the installer below, then reload this page. The label printer keeps working meanwhile.
+                </Typography>
+              )}
+              {receiptAgentOffline && (
+                <Typography variant="body2" color="error" sx={{ mb: 2 }}>
+                  The print agent is not running on this PC. Start it (see the Label Printer Agent card), then reload.
+                </Typography>
+              )}
+
+              <Button
+                fullWidth
+                variant="contained"
+                startIcon={<Download />}
+                href={PRINT_AGENT_INSTALLER_URL}
+                download
+                sx={{ mb: 1 }}
+              >
+                Download Print Agent (Installer)
+              </Button>
+
+              {receiptStatus && (
+                <Button
+                  fullWidth
+                  variant="outlined"
+                  startIcon={<Settings />}
+                  href={PRINT_AGENT_SETUP_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  sx={{ mb: 1 }}
+                >
+                  {receiptStatus.configured ? 'Change Receipt Printer' : 'Choose Receipt Printer'}
+                </Button>
+              )}
+              <Button
+                fullWidth
+                variant="contained"
+                startIcon={<Print />}
+                disabled={!receiptStatus?.configured || receiptStatus.online === false || receiptTestMutation.isPending}
+                onClick={() => receiptTestMutation.mutate()}
+              >
+                {receiptTestMutation.isPending ? 'Sending…' : 'Print Test Slip'}
+              </Button>
+
+              <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 1 }}>
+                Pick the printer under "Receipt printer" on the setup page. Estimates then get a
+                "Print to Receipt Printer" button on the Estimation screen.
               </Typography>
             </CardContent>
           </Card>

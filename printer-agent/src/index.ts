@@ -8,6 +8,9 @@ import { readConfig, writeConfig } from './config';
 import { listRealPrinters } from './printers';
 import { isAutostartEnabled, isAutostartSupported, setAutostart } from './autostart';
 import { renderSetupPage } from './setupPage';
+import crypto from 'crypto';
+import { buildReceiptJob, buildTestJob, validateBitmap } from './escpos';
+import { ReceiptJobRunner, sameQueue, sendRawBytes } from './receiptPrint';
 
 // A single raw write already takes real time on a thermal head; a runaway "copies" value from a
 // bad request shouldn't be able to queue an unbounded number of them.
@@ -62,6 +65,122 @@ app.post('/print', async (req, res) => {
     res.json({ ok: true, copies: count });
   } catch (err) {
     res.status(502).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// ── Receipt printer (ESC/POS, e.g. Epson TM-m30III) ─────────────────────────────────────────────
+// Entirely separate from the label printer above: its own configured printer, its own routes, its
+// own serialized queue. Nothing in /status or /print reads or changes any of it.
+const receiptState: { printerName: string | null } = {
+  printerName: process.env.RECEIPT_PRINTER_NAME || fileConfig.receiptPrinterName || null,
+};
+const receiptRunner = new ReceiptJobRunner();
+const JOB_ID_PATTERN = /^[A-Za-z0-9:_-]{8,100}$/;
+const MAX_RECEIPT_COPIES = 5;
+
+// With ALLOWED_ORIGIN left at '*' (the default) nothing changes. Set it to the ERP's own origin
+// and the receipt routes refuse a request that names any other web page as its origin, so an
+// unrelated site open in the same browser cannot make the counter print.
+function receiptOriginGuard(req: express.Request, res: express.Response, next: express.NextFunction): void {
+  const origin = req.headers.origin;
+  if (ALLOWED_ORIGIN !== '*' && origin && !ALLOWED_ORIGIN.split(',').map((s) => s.trim()).includes(origin)) {
+    res.status(403).json({ ok: false, error: 'Origin not allowed.' });
+    return;
+  }
+  next();
+}
+
+app.get('/receipt/status', async (_req, res) => {
+  if (!receiptState.printerName) {
+    res.json({ ok: true, configured: false, printerName: null, online: false, statusText: `Receipt printer not set — open http://127.0.0.1:${state.port}/setup` });
+    return;
+  }
+  const status = await getPrinterStatus(receiptState.printerName);
+  res.json({ ok: true, configured: true, printerName: receiptState.printerName, ...status });
+});
+
+app.post('/receipt/config', receiptOriginGuard, (req, res) => {
+  const { printerName } = req.body ?? {};
+  if (typeof printerName !== 'string' || !printerName.trim()) {
+    res.status(400).json({ ok: false, error: 'printerName is required.' });
+    return;
+  }
+  if (sameQueue(printerName, state.printerName)) {
+    res.status(400).json({ ok: false, error: 'That is the label printer. Pick the receipt printer (e.g. EPSON TM-m30III) — a printer cannot be both.' });
+    return;
+  }
+  writeConfig({ receiptPrinterName: printerName.trim() });
+  receiptState.printerName = printerName.trim();
+  res.json({ ok: true, printerName: receiptState.printerName });
+});
+
+// Body: { jobId, widthDots, heightDots, data (base64 1-bit bitmap), copies?, cut?, feedDots? }.
+// "ok" means the bytes were handed to the Windows spooler for that printer - the agent cannot see
+// paper-out or a jam after that, and says so (status: SENT_TO_SPOOLER, never "printed").
+app.post('/receipt/print', receiptOriginGuard, async (req, res) => {
+  if (!receiptState.printerName) {
+    res.status(409).json({ ok: false, code: 'NOT_CONFIGURED', error: `Receipt printer is not set. Open http://127.0.0.1:${state.port}/setup and pick it.` });
+    return;
+  }
+  if (sameQueue(receiptState.printerName, state.printerName)) {
+    res.status(409).json({ ok: false, code: 'SAME_AS_LABEL_PRINTER', error: 'The receipt printer is set to the same printer as the label printer. Fix it on the setup page.' });
+    return;
+  }
+  const { jobId, widthDots, heightDots, data, copies, cut, feedDots } = req.body ?? {};
+  if (typeof jobId !== 'string' || !JOB_ID_PATTERN.test(jobId)) {
+    res.status(400).json({ ok: false, error: 'jobId (8-100 chars: letters, digits, : _ -) is required.' });
+    return;
+  }
+  if (typeof data !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) {
+    res.status(400).json({ ok: false, error: '"data" must be a base64 string.' });
+    return;
+  }
+  const bitmap = { widthDots: Number(widthDots), heightDots: Number(heightDots), bits: Buffer.from(data, 'base64') };
+  const invalid = validateBitmap(bitmap);
+  if (invalid) {
+    res.status(400).json({ ok: false, error: invalid });
+    return;
+  }
+  const count = Math.min(Math.max(Number(copies) || 1, 1), MAX_RECEIPT_COPIES);
+  const printerName = receiptState.printerName;
+  try {
+    // An offline printer is refused up front, not queued behind a spooler that will hold the job
+    // and print it later (a surprise reprint when someone turns the printer back on).
+    const status = await getPrinterStatus(printerName);
+    if (!status.online) {
+      res.status(409).json({ ok: false, code: 'PRINTER_OFFLINE', error: `Receipt printer is not ready: ${status.statusText}` });
+      return;
+    }
+    const job = buildReceiptJob(bitmap, { cut: cut !== false, feedDots: feedDots === undefined ? undefined : Number(feedDots) });
+    const result = await receiptRunner.run(jobId, async () => {
+      for (let i = 0; i < count; i++) await sendRawBytes(printerName, job);
+    });
+    res.json({ ok: true, ...result, copies: count });
+  } catch (err) {
+    res.status(502).json({ ok: false, code: 'SEND_FAILED', error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.post('/receipt/test', receiptOriginGuard, async (_req, res) => {
+  if (!receiptState.printerName) {
+    res.status(409).json({ ok: false, code: 'NOT_CONFIGURED', error: 'Receipt printer is not set.' });
+    return;
+  }
+  if (sameQueue(receiptState.printerName, state.printerName)) {
+    res.status(409).json({ ok: false, code: 'SAME_AS_LABEL_PRINTER', error: 'The receipt printer is set to the same printer as the label printer.' });
+    return;
+  }
+  try {
+    const status = await getPrinterStatus(receiptState.printerName);
+    if (!status.online) {
+      res.status(409).json({ ok: false, code: 'PRINTER_OFFLINE', error: `Receipt printer is not ready: ${status.statusText}` });
+      return;
+    }
+    await receiptRunner.run(`test-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`, () =>
+      sendRawBytes(receiptState.printerName!, buildTestJob(['TRIVO receipt printer test', receiptState.printerName!, new Date().toISOString()])));
+    res.json({ ok: true, status: 'SENT_TO_SPOOLER' });
+  } catch (err) {
+    res.status(502).json({ ok: false, code: 'SEND_FAILED', error: err instanceof Error ? err.message : String(err) });
   }
 });
 

@@ -56,12 +56,31 @@ export function liveSaleValue(tag: LiveValueTag, rateByKarat: Map<string, number
  * Live sale value of every piece matching `where`, summed by `keyOf`. Returns per-key { value, unpriced } so a report can show the
  * live total and say how many pieces could not be priced. Company scope comes from the caller's `where` (companyId is required there).
  */
+/**
+ * Every tag matching `where`, loaded in id-ordered batches. Selecting a to-many relation (materials) for ALL tags at once makes
+ * Prisma send one `IN (<every tag id>)` query, which overflows Postgres' max_stack_depth (54001) on a large company.
+ * `where` must already carry companyId.
+ */
+export async function findTagsBatched<S extends Prisma.JewelryTagSelect>(
+  companyId: string, where: Prisma.JewelryTagWhereInput, select: S, batchSize = 1000,
+): Promise<Array<Prisma.JewelryTagGetPayload<{ select: S }>>> {
+  const out: Array<Prisma.JewelryTagGetPayload<{ select: S }>> = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const batch = await tenantQuery(companyId, (_tx) => _tx.jewelryTag.findMany({
+      where, select: { ...select, id: true } as Prisma.JewelryTagSelect, orderBy: { id: 'asc' }, take: batchSize,
+      ...(cursor && { cursor: { id: cursor }, skip: 1 }),
+    })) as unknown as Array<Prisma.JewelryTagGetPayload<{ select: S }> & { id: string }>;
+    out.push(...batch);
+    if (batch.length < batchSize) return out;
+    cursor = batch[batch.length - 1].id;
+  }
+}
+
 export async function liveValueByKey<K extends string>(
   companyId: string, where: Prisma.JewelryTagWhereInput, keyOf: (t: { branchId: string; categoryId: string | null }) => K,
 ): Promise<Map<K, { value: number; unpriced: number }>> {
-  const tags = await tenantQuery(companyId, (_tx) => _tx.jewelryTag.findMany({
-    where: { ...where, companyId }, select: { branchId: true, categoryId: true, ...LIVE_VALUE_TAG_SELECT },
-  }));
+  const tags = await findTagsBatched(companyId, { ...where, companyId }, { branchId: true, categoryId: true, ...LIVE_VALUE_TAG_SELECT });
   const rates = await loadLiveRates(companyId, tags.map((t) => t.metalKarat));
   const out = new Map<K, { value: number; unpriced: number }>();
   for (const t of tags) {

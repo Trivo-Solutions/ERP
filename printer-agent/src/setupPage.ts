@@ -48,6 +48,17 @@ export function renderSetupPage(): string {
   </div>
 
   <div class="card">
+    <p><strong>Receipt printer (estimates, 80 mm).</strong> Pick the Epson TM-m30III here. It is
+    separate from the label printer above — saving one never changes the other.</p>
+    <select id="receiptSelect" style="width:100%;padding:8px;"></select>
+    <div style="margin-top:10px;display:flex;gap:8px;">
+      <button id="receiptSave">Save receipt printer</button>
+      <button id="receiptTest" class="secondary">Print test receipt</button>
+    </div>
+    <div id="receiptMsg" class="msg"></div>
+  </div>
+
+  <div class="card">
     <p><strong>2. Start automatically when this PC turns on</strong> (recommended for a counter PC)
     — no more double-clicking the exe every morning.</p>
     <label class="opt">
@@ -180,6 +191,36 @@ document.getElementById('autostartBox').addEventListener('change', async (e) => 
 loadStatus();
 loadPrinters();
 loadAutostart();
+async function loadReceipt() {
+  const sel = document.getElementById('receiptSelect');
+  let current = null;
+  try { current = (await (await fetch('/receipt/status')).json()).printerName || null; } catch {}
+  try {
+    const { printers } = await (await fetch('/setup/printers')).json();
+    const names = current && !printers.includes(current) ? [current, ...printers] : printers;
+    sel.innerHTML = '<option value="">— not set —</option>' + names.map((n) =>
+      '<option value="' + escapeHtml(n) + '"' + (n === current ? ' selected' : '') + '>' + escapeHtml(n) + '</option>').join('');
+  } catch { sel.innerHTML = '<option value="">Could not list printers</option>'; }
+}
+async function receiptCall(path, body) {
+  const msg = document.getElementById('receiptMsg');
+  msg.className = 'msg'; msg.textContent = 'Working…';
+  try {
+    const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    const out = await res.json();
+    if (!res.ok || !out.ok) throw new Error(out.error || 'Failed');
+    msg.className = 'msg ok';
+    msg.textContent = path === '/receipt/test' ? 'Test sent to the printer queue — check the paper.' : 'Saved.';
+  } catch (e) { msg.className = 'msg err'; msg.textContent = e.message || String(e); }
+}
+document.getElementById('receiptSave').addEventListener('click', () => {
+  const v = document.getElementById('receiptSelect').value;
+  if (!v) { const m = document.getElementById('receiptMsg'); m.className = 'msg err'; m.textContent = 'Pick the receipt printer first.'; return; }
+  receiptCall('/receipt/config', { printerName: v });
+});
+document.getElementById('receiptTest').addEventListener('click', () => receiptCall('/receipt/test'));
+loadReceipt();
+
 </script>
 </body>
 </html>`;

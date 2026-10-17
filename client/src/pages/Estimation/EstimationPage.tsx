@@ -5,7 +5,7 @@ import {
   TableBody, TableRow, TableCell, CircularProgress, Chip, TextField, InputAdornment, IconButton,
   Alert, Dialog, DialogTitle, DialogContent, DialogActions, Switch, FormControlLabel,
 } from '@mui/material';
-import { Edit, Save, Close, QrCodeScanner, Print, Send, Undo } from '@mui/icons-material';
+import { Edit, Save, Close, QrCodeScanner, Print, ReceiptLong, Send, Undo } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost } from '../../api/client';
@@ -16,6 +16,8 @@ import { NumberField } from '../../components/fields/NumberField';
 import { SelectField } from '../../components/fields/SelectField';
 import { findMakingCharge, computeLineAmount, computeMakingAmount } from '../../utils/estimateCalc';
 import { printTagEstimate } from '../../utils/printTagEstimate';
+import { printEstimateToReceiptPrinter } from '../../utils/estimateReceipt';
+import { getReceiptPrinterStatus, receiptStatusRefetchMs } from '../../utils/printAgent';
 
 // What "Send to billing" asks for, so the biller does not ask again. Name, mobile and the sales employee are
 // required; DOB, address and PAN are optional (the server validates them all again).
@@ -74,7 +76,7 @@ function materialLabel(m: any) {
 // cost data to begin with (see estimation.service.ts's ESTIMATE_*_SALE_SELECT), so there's nothing
 // to hide here — cost columns simply don't exist in the payload.
 export function EstimationPage() {
-  const { enqueueSnackbar } = useSnackbar();
+  const { enqueueSnackbar, closeSnackbar } = useSnackbar();
   const qc = useQueryClient();
   const inputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
@@ -304,6 +306,54 @@ export function EstimationPage() {
       qc.invalidateQueries({ queryKey: ['estimation-past', selectedTagId] });
     },
     onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Could not recall the estimate', { variant: 'error' }),
+  });
+
+  // ── Receipt printer (Epson, via the local print agent) ─────────────────────────────────────────
+  // Offered only when the agent is running AND has a receipt printer set; the browser Print button
+  // is unchanged. One send at a time (the button locks while one is in flight), and every send
+  // carries a job id the agent de-duplicates on: a retry after a failure or timeout re-uses the id
+  // for that estimate, so it can never print twice, while a deliberate reprint after a confirmed
+  // send gets a fresh id.
+  const receiptStatusQuery = useQuery({
+    queryKey: ['receipt-printer-status'], queryFn: getReceiptPrinterStatus, retry: false, refetchInterval: receiptStatusRefetchMs(15000),
+  });
+  const receiptAvailable = Boolean(receiptStatusQuery.data?.configured);
+  const [receiptBusy, setReceiptBusy] = useState(false);
+  const receiptBusyRef = useRef(false);
+  const receiptJobIds = useRef(new Map<string, string>());
+
+  const sendToReceipt = async (estimate: any) => {
+    const template = templates.find((t) => t.id === templateId);
+    if (!template) { enqueueSnackbar('No print template selected', { variant: 'warning' }); return; }
+    if (receiptBusyRef.current) return;
+    receiptBusyRef.current = true; setReceiptBusy(true);
+    let jobId = receiptJobIds.current.get(estimate.id);
+    if (!jobId) { jobId = `est-${estimate.id}-${Date.now().toString(36)}`; receiptJobIds.current.set(estimate.id, jobId); }
+    const progress = enqueueSnackbar(`Sending ${estimate.estimateNumber} to the receipt printer…`, { variant: 'info', persist: true });
+    try {
+      const r = await printEstimateToReceiptPrinter(template, tag, estimate, jobId);
+      receiptJobIds.current.delete(estimate.id);
+      // Honest wording: the agent confirms the Windows print queue accepted it, not that paper came out.
+      enqueueSnackbar(r.duplicate
+        ? `${estimate.estimateNumber} was already sent to the printer - not printed again`
+        : `${estimate.estimateNumber} sent to the receipt printer. Check the slip came out.`, { variant: 'success' });
+    } catch (e: any) {
+      // The job id is kept: retrying the same estimate re-uses it, and the agent never sends one id twice.
+      enqueueSnackbar(`${estimate.estimateNumber} was NOT confirmed as sent: ${e?.message ?? 'unknown error'}. Press the receipt button again to retry.`, { variant: 'error' });
+    } finally {
+      closeSnackbar(progress);
+      receiptBusyRef.current = false; setReceiptBusy(false);
+    }
+  };
+
+  const receiptMutation = useMutation({
+    mutationFn: () => apiPost<any>(`/estimation/tags/${selectedTagId}/estimates`, buildEstimatePayload()),
+    onSuccess: (saved) => {
+      qc.invalidateQueries({ queryKey: ['estimation-past', selectedTagId] });
+      setEditing(false);
+      void sendToReceipt(saved);
+    },
+    onError: (e: any) => enqueueSnackbar(e.response?.data?.error ?? 'Failed to save estimate', { variant: 'error' }),
   });
 
   const printSavedEstimate = (estimate: any) => {
@@ -551,6 +601,14 @@ export function EstimationPage() {
                   {printMutation.isPending ? 'Printing…' : 'Print'}
                 </Button>
               </Stack>
+              {receiptAvailable && (
+                <Button fullWidth variant="outlined" startIcon={<ReceiptLong />} sx={{ mt: 1 }}
+                  disabled={receiptMutation.isPending || receiptBusy || items.length === 0 || !templateId || receiptStatusQuery.data?.online === false}
+                  title={receiptStatusQuery.data?.online === false ? `Receipt printer: ${receiptStatusQuery.data.statusText}` : 'Save this estimate and print it on the receipt printer'}
+                  onClick={() => receiptMutation.mutate()}>
+                  {receiptMutation.isPending || receiptBusy ? 'Sending…' : 'Print to Receipt Printer'}
+                </Button>
+              )}
             </Card>
 
             <Card sx={{ p: 2 }}>
@@ -594,6 +652,11 @@ export function EstimationPage() {
                         <IconButton size="small" disabled={!templateId} onClick={() => printSavedEstimate(e)}>
                           <Print fontSize="small" />
                         </IconButton>
+                        {receiptAvailable && (
+                          <IconButton size="small" title="Print on receipt printer" disabled={!templateId || receiptBusy} onClick={() => void sendToReceipt(e)}>
+                            <ReceiptLong fontSize="small" />
+                          </IconButton>
+                        )}
                       </Stack>
                     </Stack>
                     <Typography variant="caption" color="text.secondary">

@@ -10,6 +10,8 @@ const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
 
 export interface AgentConfig {
   printerName?: string;
+  // The ESC/POS receipt printer (e.g. Epson TM-m30III) - separate from the TSC label printer above.
+  receiptPrinterName?: string;
   port?: number;
 }
 
@@ -19,6 +21,7 @@ export function readConfig(): AgentConfig {
     const parsed = JSON.parse(raw);
     return {
       printerName: typeof parsed.printerName === 'string' ? parsed.printerName : undefined,
+      receiptPrinterName: typeof parsed.receiptPrinterName === 'string' ? parsed.receiptPrinterName : undefined,
       port: Number.isFinite(parsed.port) ? Number(parsed.port) : undefined,
     };
   } catch {

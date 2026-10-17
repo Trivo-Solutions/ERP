@@ -8,7 +8,7 @@ import { FINISHED_GOODS_MATERIAL_TYPE } from '../../shared/constants';
 import { isValidKarat } from '../../shared/karatMaster';
 import { resolveMetalRate, resolveLiveMetalRate } from '../../shared/metalRate';
 import { pickMakingCharge } from '../../shared/makingChargeLookup';
-import { liveValueByKey, liveSaleValue, loadLiveRates, LIVE_VALUE_TAG_SELECT } from '../../shared/liveSaleValue';
+import { findTagsBatched, liveValueByKey, liveSaleValue, loadLiveRates, LIVE_VALUE_TAG_SELECT } from '../../shared/liveSaleValue';
 import { resolveSupplierStateCode, splitInputGst, round2, resolveBuyerRegistration } from '../../shared/inputGst';
 import { resolvePriceMaster } from '../../shared/priceMaster';
 import { allocateFromLot } from '../../shared/purchaseLot';
@@ -192,15 +192,12 @@ export async function getStockOnHand(companyId: string, filters: { branchId?: st
 // class of documented approximation as F3's dueDate-or-invoiceDate anchor.
 export async function getDeadStock(companyId: string, asOfDate?: Date) {
   const cutoff = asOfDate ?? new Date();
-  const tags = await tenantQuery(companyId, (_tx) => _tx.jewelryTag.findMany({
-    where: { companyId, status: 'IN_STOCK' },
-    select: {
-      id: true, tagNumber: true, name: true, costPrice: true, updatedAt: true, ...LIVE_VALUE_TAG_SELECT,
-      branch: { select: { name: true } },
-      category: { select: { name: true } },
-      createdBy: { select: { name: true } },
-    },
-  }));
+  const tags = await findTagsBatched(companyId, { companyId, status: 'IN_STOCK' }, {
+    id: true, tagNumber: true, name: true, costPrice: true, updatedAt: true, ...LIVE_VALUE_TAG_SELECT,
+    branch: { select: { name: true } },
+    category: { select: { name: true } },
+    createdBy: { select: { name: true } },
+  });
   const liveRates = await loadLiveRates(companyId, tags.map((t) => t.metalKarat));
 
   const rows = tags.map((t) => {
@@ -273,7 +270,10 @@ export async function getStockBook(ctx: TenantContext, filters: {
     }),
   };
 
-  const tags = await tenantQuery(ctx.companyId, (_tx) => _tx.jewelryTag.findMany({
+  // Fetched in id-ordered batches: loading `materials` for every tag at once makes Prisma send one
+  // `IN (<all tag ids>)` query, which overflows Postgres' max_stack_depth (54001) on a large company.
+  const STOCK_BOOK_BATCH = 1_000;
+  const fetchBatch = (cursor: string | undefined, take: number) => tenantQuery(ctx.companyId, (_tx) => _tx.jewelryTag.findMany({
     where,
     select: {
       id: true, tagNumber: true, name: true, status: true, makeType: true, metalType: true, metalKarat: true,
@@ -289,9 +289,16 @@ export async function getStockBook(ctx: TenantContext, filters: {
       saleMcRate: true, saleVaPercent: true,
       materials: { select: { materialType: true, weight: true, pieces: true, saleRate: true } },
     },
-    orderBy: [{ tagNumber: 'asc' }],
-    take: STOCK_BOOK_LIMIT + 1,
+    orderBy: [{ tagNumber: 'asc' }, { id: 'asc' }],
+    take,
+    ...(cursor && { cursor: { id: cursor }, skip: 1 }),
   }));
+  const tags: Awaited<ReturnType<typeof fetchBatch>> = [];
+  while (tags.length < STOCK_BOOK_LIMIT + 1) {
+    const batch = await fetchBatch(tags[tags.length - 1]?.id, Math.min(STOCK_BOOK_BATCH, STOCK_BOOK_LIMIT + 1 - tags.length));
+    tags.push(...batch);
+    if (batch.length < STOCK_BOOK_BATCH) break;
+  }
   const truncated = tags.length > STOCK_BOOK_LIMIT;
   if (truncated) tags.pop();
 

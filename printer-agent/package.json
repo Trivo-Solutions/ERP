@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "nodemon --watch src --ext ts --exec ts-node src/index.ts",
     "build": "tsc",
+    "test": "node --require ts-node/register --test src/escpos.test.ts",
     "start": "node dist/index.js",
     "package": "npm run build && pkg . --output dist-exe/printer-agent.exe",
     "installer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-installer.ps1"

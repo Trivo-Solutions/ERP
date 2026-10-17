@@ -70,3 +70,35 @@ step by hand.
 - **Agent reports success but nothing prints** — the raw write reached the spooler queue fine;
   check the printer itself (paused queue, out of labels, needs a manual "resume" in the print
   queue window).
+
+## Receipt printer (Epson TM-m30III, ESC/POS) — estimates
+
+Separate from the label printer: its own printer setting (`receiptPrinterName` in the same
+`config.json`, or `RECEIPT_PRINTER_NAME`), its own routes, its own one-at-a-time queue. `/status`,
+`/print` and the label flow are not touched, and saving one printer never changes the other.
+
+1. Install the Epson driver and confirm Windows can see the printer.
+2. Open `http://127.0.0.1:9101/setup`, pick it under **Receipt printer**, **Save**, then
+   **Print test receipt** (text only — proves init, feed and cut).
+3. In the ERP's Estimation screen a **Print to Receipt Printer** button (and a receipt icon on each
+   past estimate) appears once the agent has a receipt printer. The browser **Print** button still works.
+
+How it prints: the browser draws the same estimate page the print window shows, reduces it to a
+1-bit image exactly as tall as the content (80 mm paper = 576 dots wide, the page scaled to fit),
+and posts it to the agent, which sends ESC/POS raster + feed + cut straight to the Windows spooler
+(RAW). No driver paper size is involved, so there is no "80 x 297 mm" padding.
+
+- `GET /receipt/status` → `{ ok, configured, printerName, online, statusText }`
+- `POST /receipt/config` `{ printerName }`; `POST /receipt/test`
+- `POST /receipt/print` `{ jobId, widthDots, heightDots, data(base64 1-bit), copies?, cut?, feedDots? }`
+  → `{ ok, jobId, status: "SENT_TO_SPOOLER", duplicate, copies }`. `SENT_TO_SPOOLER` means Windows
+  accepted the bytes — the agent cannot see paper-out or a jam after that. An offline printer is
+  refused (409 `PRINTER_OFFLINE`) rather than queued. The same `jobId` is never sent twice (a repeat
+  returns `duplicate: true`); failures are not remembered, so a retry with the same id is safe.
+- Set `ALLOWED_ORIGIN` to the ERP's origin to make the receipt routes refuse requests from any other web page.
+
+Troubleshooting: slip too narrow/cut → the printer's paper width setting (Web Config / DIP) must be
+80 mm; blank/garbage output → the queue's driver must accept RAW jobs (Epson TM drivers do); button
+missing → agent not running or receipt printer not saved on `/setup`.
+Rollback: delete `receiptPrinterName` from `%LOCALAPPDATA%\SeaErpPrintAgent\config.json` (or reinstall the
+previous agent) — the button disappears and the browser Print path is unchanged.

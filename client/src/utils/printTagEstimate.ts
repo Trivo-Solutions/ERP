@@ -4,6 +4,7 @@ import {
   formatEstimateDate,
 } from '../types/estimateTemplate';
 import { computeMakingAmount } from './estimateCalc';
+import { flowBelowTables } from './estimatePageLayout';
 
 const INR = (v: number) => '₹' + v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -109,7 +110,7 @@ function elementHtml(el: EstimateTemplateElement, data: PrintData, pageWidthMm: 
     // pt, not px — a true physical unit (1pt = 1/72in, same as Microsoft Word), consistent with
     // every other size on the page already being in mm. Using px here was the actual cause of the
     // printed page sometimes running longer than the on-screen measurement predicted (see
-    // measureContentBottomMm below): px is a screen-oriented unit whose real physical size a
+    // measureElementHeightsMm below): px is a screen-oriented unit whose real physical size a
     // browser is free to interpret slightly differently between contexts, unlike pt/mm/in.
     return `<div style="${pos} font-size:${fontSize}pt; font-family:Arial, sans-serif; text-align:${align}; ${widthRule}">${escapeHtml(content)}</div>`;
   }
@@ -198,38 +199,40 @@ function elementHtml(el: EstimateTemplateElement, data: PrintData, pageWidthMm: 
   return '';
 }
 
-// mm→px isn't a fixed constant across browsers/OS DPI settings — measured off a real, momentarily-
-// inserted 100mm-wide ruler rather than assumed (e.g. hardcoding 96dpi's 3.7795), so the height
-// this computes actually matches how the same content will really lay out.
-function pxPerMm(): number {
-  const ruler = document.createElement('div');
-  ruler.style.cssText = 'position:absolute; visibility:hidden; width:100mm; height:0; left:-99999px; top:0;';
-  document.body.appendChild(ruler);
-  const px = ruler.getBoundingClientRect().width;
-  document.body.removeChild(ruler);
-  return px / 100;
-}
+// The popup's base reset, shared so the measuring frame lays out under exactly the rules the
+// printed page uses (the app window's global CSS, e.g. MUI's line-height, differs).
+export const BASE_CSS = '* { box-sizing: border-box; margin: 0; padding: 0; } body { font-family: Arial, sans-serif; }';
 
-// Every element renders `position:absolute`, so the container they sit in never grows to fit them
-// — that's normal CSS behavior for absolutely-positioned content, not a bug, but it means a
-// template's own heightMm can't be trusted as "tall enough" once real content (e.g. a materials
-// table with more rows than the sample preview showed) is dropped in. This renders the full
-// element HTML into a hidden, real DOM node so it actually lays out, measures how far down it
-// really goes, and converts back to mm — the page height that follows is then whatever the
-// content genuinely needs, not a design-time guess.
-function measureContentBottomMm(contentHtml: string, widthMm: number): number {
-  const container = document.createElement('div');
-  container.style.cssText = `position:absolute; visibility:hidden; left:-99999px; top:0; width:${widthMm}mm; font-family:Arial, sans-serif;`;
-  container.innerHTML = contentHtml;
-  document.body.appendChild(container);
-  const ratio = pxPerMm();
-  const containerTop = container.getBoundingClientRect().top;
-  let maxBottomPx = 0;
-  Array.from(container.children).forEach((child) => {
-    maxBottomPx = Math.max(maxBottomPx, child.getBoundingClientRect().bottom - containerTop);
-  });
-  document.body.removeChild(container);
-  return maxBottomPx / ratio;
+// Lays every element out in a hidden same-origin iframe carrying the popup's own CSS and returns
+// each element's real rendered height in mm, by id. document.write into about:blank is synchronous,
+// so this stays sync (the print popup must still open inside the click's user activation). Nothing
+// loads asynchronously: Arial is a system font, and barcodes/images have explicit mm sizes.
+function measureElementHeightsMm(elements: EstimateTemplateElement[], data: PrintData, widthMm: number): Record<string, number> {
+  const frame = document.createElement('iframe');
+  frame.style.cssText = 'position:absolute; left:-99999px; top:0; width:2000px; height:2000px; border:0; visibility:hidden;';
+  document.body.appendChild(frame);
+  try {
+    const doc = frame.contentDocument;
+    if (!doc) return {};
+    const rendered = elements.map((el) => ({ el, html: elementHtml(el, data, widthMm) })).filter((r) => r.html);
+    doc.open();
+    doc.write(`<!DOCTYPE html><html><head><style>${BASE_CSS}</style></head><body><div id="p" style="position:relative; width:${widthMm}mm;">${rendered.map((r) => r.html).join('\n')}</div></body></html>`);
+    doc.close();
+    const ruler = doc.createElement('div');
+    ruler.style.cssText = 'position:absolute; width:100mm; height:0;';
+    doc.body.appendChild(ruler);
+    const pxPerMm = ruler.getBoundingClientRect().width / 100;
+    const out: Record<string, number> = {};
+    if (!(pxPerMm > 0)) return out;
+    const kids = Array.from(doc.getElementById('p')!.children);
+    rendered.forEach((r, i) => {
+      const rect = kids[i]?.getBoundingClientRect();
+      if (rect) out[r.el.id] = rect.height / pxPerMm;
+    });
+    return out;
+  } finally {
+    document.body.removeChild(frame);
+  }
 }
 
 // Renders a saved EstimateTemplate against a real tag + (saved or in-progress) estimate, and opens
@@ -238,24 +241,30 @@ function measureContentBottomMm(contentHtml: string, widthMm: number): number {
 // the template itself, not a fixed A4 — the real target may be a narrow continuous-roll thermal/
 // receipt printer, so widthMm is whatever that template was designed for; heightMm only seeds the
 // *designer canvas*'s size — the actual page height is always computed from real content below.
-export function printTagEstimate(template: { layout: EstimateTemplateLayout; widthMm: number; heightMm: number }, tag: any, estimate: any) {
+export interface EstimatePage { contentHtml: string; widthMm: number; heightMm: number }
+
+// The laid-out estimate (element HTML in mm + the real page height), shared by the browser print
+// window below and the receipt-printer path (estimateReceipt.ts) so both print the same page.
+export function buildEstimatePage(template: { layout: EstimateTemplateLayout; widthMm: number; heightMm: number }, tag: any, estimate: any): EstimatePage {
   const items = estimate.items ?? [];
   const metalWeight = items.filter((i: any) => i.materialType === 'METAL').reduce((s: number, i: any) => s + Number(i.weight || 0), 0);
   const metalSaleAmt = items.filter((i: any) => i.materialType === 'METAL').reduce((s: number, i: any) => s + Number(i.saleAmount || 0), 0);
   const makingChargeAmount = computeMakingAmount(metalWeight, metalSaleAmt, Number(estimate.saleMcRate ?? 0), Number(estimate.saleVaPercent ?? 0));
 
   const data: PrintData = { tag, estimate, makingChargeAmount };
-  const allElements = template.layout.elements ?? [];
   const widthMm = template.widthMm;
-  const contentHtml = allElements.map((el) => elementHtml(el, data, widthMm)).join('\n');
+  // Elements below the materials table follow the table's real height (up for a short estimate,
+  // down for a long one) and the page height is the real content bottom, bounded - see
+  // estimatePageLayout.ts. Previously every element stayed at its design-time y, so the paper was
+  // never shorter than the template's footer position, however few rows there were.
+  const heights = measureElementHeightsMm(template.layout.elements ?? [], data, widthMm);
+  const flowed = flowBelowTables(template.layout.elements ?? [], heights, template.heightMm);
+  const contentHtml = flowed.elements.map((el) => elementHtml(el, data, widthMm)).join('\n');
+  return { contentHtml, widthMm, heightMm: flowed.pageHeightMm };
+}
 
-  // Auto-height: however far the real content actually reaches (every element sits in one flow
-  // now — no separate footer band to reserve extra room for). A one-line plain-gold-ring estimate
-  // (a single materials-table row) prints short with whatever's below it sitting right under that
-  // one row; a ten-row estimate on the same template prints taller and everything below the table
-  // moves down with it, since it's all measured together.
-  const measuredBottomMm = measureContentBottomMm(contentHtml, widthMm);
-  const heightMm = Math.max(20, Math.ceil(measuredBottomMm) + 2);
+export function printTagEstimate(template: { layout: EstimateTemplateLayout; widthMm: number; heightMm: number }, tag: any, estimate: any) {
+  const { contentHtml, widthMm, heightMm } = buildEstimatePage(template, tag, estimate);
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -263,8 +272,8 @@ export function printTagEstimate(template: { layout: EstimateTemplateLayout; wid
   <meta charset="UTF-8" />
   <title>Estimate — ${estimate.estimateNumber ?? ''}</title>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: Arial, sans-serif; background: #eee; }
+    ${BASE_CSS}
+    body { background: #eee; }
     .page {
       position: relative;
       width: ${widthMm}mm; height: ${heightMm}mm;
@@ -282,7 +291,7 @@ export function printTagEstimate(template: { layout: EstimateTemplateLayout; wid
     .btn-close { background: #EEE; color: #333; }
     /* Custom paper size hint for the print dialog/driver — a continuous-roll thermal/receipt
        printer (e.g. Epson POS) is typically configured in the OS as a fixed-width custom size;
-       height here is the real measured content height (see measureContentBottomMm above), not
+       height here is the real measured content height (see measureElementHeightsMm above), not
        just the template's design-time guess. */
     @page { size: ${widthMm}mm ${heightMm}mm; margin: 0; }
     @media print {
