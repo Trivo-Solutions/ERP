@@ -91,12 +91,28 @@ describe('fixed price per piece (silver) - estimate -> send to billing -> tax in
     expect(Number(after.sellingPrice)).toBe(750);
   });
 
-  it('a stale or hand-edited client price cannot change the invoice: the saved price wins', async () => {
+  it('billing can sell a fixed-price piece at an edited flat amount; the tag is untouched; GST is on the edited amount', async () => {
     const tag = await makeTag(true);
     const est = await createTagEstimate(tag.id, { items: [], ...customer() } as any, A.ctx, A.user.id);
     estimateIds.push(est.id);
     await sendEstimateToBilling(A.ctx, est.id, customer() as any, A.user.id);
-    const inv = await bill([billLine(tag.id, est, { goldRate: 1125, makingCharge: 181.25, stoneValue: 0 })], { estimateIds: [est.id] });
+    const inv = await bill([billLine(tag.id, est, { goldRate: 700 })], { estimateIds: [est.id] });
+    invoiceIds.push(inv.id);
+    expect(Number(inv.items[0].totalPrice)).toBe(700);
+    expect(Number(inv.taxAmount)).toBeCloseTo(700 * gstRate, 2);
+    expect(Number((await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } })).sellingPrice)).toBe(750);
+  });
+
+  it('per-gram / MC / VA figures (not an explicit flat price) still cannot change a fixed-price line', async () => {
+    const tag = await makeTag(true);
+    const inv = await bill([{ productCode: 'PHF', description: 'PHF', quantity: 1, grossWeight: 12.5, netGoldWeight: 12.5, rateType: 'PER_GRAM', goldRate: 90, makingCharge: 125, wastagePercent: 5, tagId: tag.id }]);
+    invoiceIds.push(inv.id);
+    expect(Number(inv.items[0].totalPrice)).toBe(750);
+  });
+
+  it('a zero or negative edited flat amount falls back to the saved price (never bills 0)', async () => {
+    const tag = await makeTag(true);
+    const inv = await bill([{ productCode: 'PHF', description: 'PHF', quantity: 1, grossWeight: 12.5, netGoldWeight: 12.5, rateType: 'FIXED', goldRate: 0, tagId: tag.id }]);
     invoiceIds.push(inv.id);
     expect(Number(inv.items[0].totalPrice)).toBe(750);
   });

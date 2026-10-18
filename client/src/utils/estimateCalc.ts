@@ -84,9 +84,10 @@ export function quoteTotals(
   tag: { pricingMode?: string | null; sellingPrice?: number | string | null },
   items: EstimateLineLike[],
   mcVa: { saleMcRate?: number; saleVaPercent?: number },
+  fixedAmount?: number | string | null, // the estimator's amount for this quote; defaults to the tag's saved price
 ) {
   if (isFixedPriceTag(tag)) {
-    const price = Math.round(Number(tag.sellingPrice || 0) * 100) / 100;
+    const price = Math.round(Number(fixedAmount ?? tag.sellingPrice ?? 0) * 100) / 100;
     return { metalWeight: 0, materialsSaleAmt: price, makingSaleAmount: 0, totalSaleAmount: price };
   }
   const t = computeEstimateTotals(items, mcVa);

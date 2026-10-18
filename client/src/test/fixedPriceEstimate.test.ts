@@ -29,6 +29,18 @@ describe('quoteTotals - fixed price per piece', () => {
   });
 });
 
+describe('quoteTotals - edited amount for a fixed-price quote', () => {
+  it('uses the estimator amount instead of the saved price; GST/MC/VA/weight still irrelevant', () => {
+    expect(quoteTotals(fixedTag, silverRows(90), { saleMcRate: 10, saleVaPercent: 5 }, 600).totalSaleAmount).toBe(600);
+  });
+  it('defaults to the saved price when no amount is given', () => {
+    expect(quoteTotals(fixedTag, silverRows(90), {}, undefined).totalSaleAmount).toBe(750);
+  });
+  it('ignores an amount on a weight-based tag', () => {
+    expect(quoteTotals(weightTag, silverRows(90), { saleMcRate: 10, saleVaPercent: 5 }, 5).totalSaleAmount).toBeCloseTo(1306.25, 2);
+  });
+});
+
 describe('quoteTotals - weight-based categories unchanged', () => {
   it('Silver weight-based: metal value + MC + VA', () => {
     // 12.5 x 90 = 1125; MC 10 x 12.5 = 125; VA 5% of 1125 = 56.25

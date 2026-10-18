@@ -97,6 +97,22 @@ describe('fixed price per piece - silver tag in estimation', () => {
     expect(Number(after.netWeight)).toBe(12.5);
   });
 
+  it('the estimator can quote a different amount for this estimate only; invalid amounts are refused; the tag keeps its saved price', async () => {
+    const tag = await makeTag(true);
+    const e = await estimate(tag.id, 12.5, 90, { fixedPrice: 600 });
+    expect(Number(e.totalSaleAmount)).toBe(600);
+    expect(Number(e.gstAmount)).toBeCloseTo(600 * gstRate, 2);
+    await expect(estimate(tag.id, 12.5, 90, { fixedPrice: 0 })).rejects.toMatchObject({ statusCode: 400 });
+    await expect(estimate(tag.id, 12.5, 90, { fixedPrice: -5 })).rejects.toMatchObject({ statusCode: 400 });
+    expect(Number((await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } })).sellingPrice)).toBe(750);
+    expect(Number((await estimate(tag.id, 12.5, 90)).totalSaleAmount)).toBe(750); // no amount sent -> the saved price again
+  });
+
+  it('fixedPrice is ignored on a weight-based tag', async () => {
+    const tag = await makeTag(false);
+    expect(Number((await estimate(tag.id, 12.5, 90, { fixedPrice: 5 })).totalSaleAmount)).toBeCloseTo(1306.25, 2);
+  });
+
   it('weight-based silver category still prices from the live silver rate + MC + VA', async () => {
     const tag = await makeTag(false);
     const view = await getTagForEstimation(A.ctx, tag.id);

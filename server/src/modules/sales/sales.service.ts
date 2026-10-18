@@ -763,7 +763,12 @@ async function priceInvoice(
       if (fixedTag && isFixedPrice(fixedTag)) {
         assertTagPriceable(fixedTag);
         const { materialBreakdown: _drop, ...rest } = line;
-        return { ...rest, rateType: 'FIXED', goldRate: Number(fixedTag.sellingPrice), makingCharge: 0, wastagePercent: 0, stoneValue: 0 };
+        // The saved price is the default. The biller may bill a different flat amount for this sale (the New Sale 'Edit' / F4 on a
+        // fixed-price line): honoured only as an explicit flat price (rateType FIXED, finite > 0) - never from per-gram / MC / VA
+        // figures - and never written back to the tag.
+        const sent = Number(line.goldRate);
+        const amount = line.rateType === 'FIXED' && Number.isFinite(sent) && sent > 0 ? Math.round(sent * 100) / 100 : Number(fixedTag.sellingPrice);
+        return { ...rest, rateType: 'FIXED', goldRate: amount, makingCharge: 0, wastagePercent: 0, stoneValue: 0 };
       }
       const tag = autoPriced(line);
       if (!tag) return line;

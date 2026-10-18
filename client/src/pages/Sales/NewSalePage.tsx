@@ -509,12 +509,15 @@ export function NewSalePage() {
       description: tag.name, huid: tag.huid ?? undefined, karat: tag.metalKarat ?? undefined,
       quantity: 1,
       grossWeight: Number(tag.grossWeight ?? 0), netGoldWeight: Number(tag.netWeight ?? 0), stoneWeight: Number(tag.stoneWeight ?? 0),
-      goldRate: 0, makingCharge: 0, wastagePercent: 0, stoneValue: 0,
+      goldRate: tag.pricingMode === 'FIXED_PRICE_PER_PIECE' ? Number(est.totalSaleAmount) : 0, makingCharge: 0, wastagePercent: 0, stoneValue: 0,
       categoryId: tag.category?.id ?? undefined, categoryName: tag.category?.name ?? undefined,
       estimateId: est.id, estimateNumber: est.estimateNumber, quotedTotal: Number(est.totalSaleAmount),
       goldRateChanged: !!est.goldRateChanged, goldRateAtEstimate: est.goldRateAtEstimate ?? undefined, goldRateNow: est.goldRateNow ?? undefined,
-      estimate: breakdown, salesPersonId, offerName: est.offerName ?? undefined,
-      fixedPrice: tag.pricingMode === 'FIXED_PRICE_PER_PIECE',
+      // A fixed-price estimate comes in as ONE flat amount (no material breakdown), so Edit / F4 can change the amount.
+      ...(tag.pricingMode === 'FIXED_PRICE_PER_PIECE'
+        ? { fixedPrice: true, rateType: 'FIXED' }
+        : { estimate: breakdown }),
+      salesPersonId, offerName: est.offerName ?? undefined,
     }]);
     setEstimateSearch('');
     // An estimate that was priced below its offer was released to billing by a store manager's approval; carry that approval
@@ -529,7 +532,9 @@ export function NewSalePage() {
   // a return. Each piece opens with its saved breakdown (from an estimate or an earlier edit) or one built from the tag's
   // own material rows. The session only edits drafts; "Apply to bill" copies the changed ones onto their lines, and the
   // server re-prices each from what is stored. The tag, its rows and its cost are never written.
-  const isMaterialLine = (l: LineItem) => !!l.tagId && !isLocked(l);
+  // A fixed-price piece has no material rows to re-price: it is one flat amount, edited in the small Edit dialog (also on F4).
+  const isFlatTagLine = (l: LineItem) => !!l.fixedPrice || (!!l.tagId && l.rateType === 'FIXED' && !l.estimate);
+  const isMaterialLine = (l: LineItem) => !!l.tagId && !isLocked(l) && !isFlatTagLine(l);
 
   const buildTagBreakdown = async (l: LineItem): Promise<EstimateBreakdown> => {
     const tag = await apiGet<any>(`/tagging/tags/${l.tagId}`);
@@ -775,7 +780,7 @@ export function NewSalePage() {
   // Rates are not editable in the grid. A tagged / estimate line is re-priced through Edit (F4) → Material Pricing; a custom
   // or material line through the small Edit dialog. Rate columns exist for those who want to see them, hidden by default.
   const wt = (v: number) => <Typography component="span" variant="body2" sx={{ fontFamily: 'monospace' }}>{Number(v || 0).toFixed(3)}</Typography>;
-  const editLine = (l: LineItem) => (l.tagId || l.estimate ? void openMaterials(l.key) : setCustomEditKey(l.key));
+  const editLine = (l: LineItem) => ((l.tagId || l.estimate) && !isFlatTagLine(l) ? void openMaterials(l.key) : setCustomEditKey(l.key));
   const itemColumns: DataTableColumn[] = [
     {
       key: 'item', label: 'Item', width: 260, hideable: false, filterValue: (l: LineItem) => l.tagNumber ?? l.description ?? '',
@@ -838,7 +843,7 @@ export function NewSalePage() {
       key: 'actions', label: '', width: 160, hideable: false, filterable: false,
       render: (l: LineItem) => (
         <Stack direction="row" spacing={0.5} alignItems="center" data-line-key={l.key}>
-          <Button size="small" variant="outlined" sx={{ whiteSpace: 'nowrap' }} disabled={isLocked(l) || matLoading || !!l.fixedPrice} title={l.fixedPrice ? 'Fixed price per piece - the price is set on the tag' : undefined} onClick={() => editLine(l)}>
+          <Button size="small" variant="outlined" sx={{ whiteSpace: 'nowrap' }} disabled={isLocked(l) || matLoading} title={l.fixedPrice ? 'Fixed price per piece - edit the amount for this sale (the tag is not changed)' : undefined} onClick={() => editLine(l)}>
             {l.tagId || l.estimate ? 'Edit (F4)' : 'Edit'}
           </Button>
           {l.estimateId && !l.invoiceItemId && (
@@ -1259,6 +1264,8 @@ export function NewSalePage() {
     'f4': () => {
       if (createdInvoice || activeTab !== 1) return;
       const focusedKey = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('[data-line-key]')?.dataset.lineKey;
+      const focusedFlat = lines.find((x) => x.key === focusedKey && isFlatTagLine(x) && !isLocked(x));
+      if (focusedFlat) { setCustomEditKey(focusedFlat.key); return; }
       const eligible = lines.filter(isMaterialLine);
       const target = eligible.find((x) => x.key === focusedKey)?.key ?? eligible[eligible.length - 1]?.key;
       if (target) void openMaterials(target);

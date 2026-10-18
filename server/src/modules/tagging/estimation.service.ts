@@ -6,7 +6,7 @@ import { Prisma } from '@prisma/client';
 import { normalizePan } from '../../shared/compliance';
 import { computeRowsPricing } from '../../shared/pricingEngine';
 import { resolveLiveMetalRate } from '../../shared/metalRate';
-import { isFixedPrice } from '../../shared/fixedPrice';
+import { isFixedPrice, parseFixedPrice } from '../../shared/fixedPrice';
 import { assertTagPriceable } from '../../shared/tagPriceability';
 import { startOfLocalDay, endOfLocalDay, isEstimateExpired } from '../../shared/estimateExpiry';
 import { createAuditEntry } from '../../middleware/audit';
@@ -105,6 +105,8 @@ interface EstimateItemInput {
 }
 
 interface CreateTagEstimateInput {
+  /** Fixed-price-per-piece tags only: the GST-exclusive amount to quote instead of the tag's saved price (this estimate only). */
+  fixedPrice?: number;
   /** Work the estimate up with the offer that applies to this piece today (rates submitted are the offered rates). */
   applyOffer?: boolean;
   /** Hand the estimate straight to the billing counter as it is saved (same as calling sendEstimateToBilling). When it is
@@ -258,7 +260,8 @@ export async function createTagEstimate(tagId: string, input: CreateTagEstimateI
   // 'FIXED' line, no MC / VA, no offer (offers lower weight-based component rates; there are none here).
   const fixed = isFixedPrice(tag);
   if (fixed && input.applyOffer) throw new AppError('Offers do not apply to a fixed-price piece', 409);
-  const fixedPrice = fixed ? Number(tag.sellingPrice) : 0;
+  // The amount defaults to the tag's saved price; the estimator may quote a different one for this estimate only (never written to the tag).
+  const fixedPrice = fixed ? (input.fixedPrice != null ? parseFixedPrice(input.fixedPrice) : Number(tag.sellingPrice)) : 0;
   const items = fixed
     ? [{ code: 'FIXED', materialType: 'FIXED', name: 'Fixed price per piece', weight: 1, unit: 'PC', costRate: 0, costAmount: 0, saleRate: fixedPrice, saleAmount: fixedPrice } as EstimateItemInput & { costAmount: number; saleAmount: number }]
     : input.items.map((i) => ({

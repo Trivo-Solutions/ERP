@@ -88,6 +88,8 @@ export function EstimationPage() {
   const [editing, setEditing] = useState(false);
   const [lines, setLines] = useState<EditableLine[]>([]);
   const [saleMcRate, setSaleMcRate] = useState(0);
+  // Fixed-price piece: the amount quoted (GST-exclusive). Starts at the tag's saved price; editable for this estimate only.
+  const [fixedAmount, setFixedAmount] = useState(0);
   const [saleVaPercent, setSaleVaPercent] = useState(0);
   const [notes, setNotes] = useState('');
   // "Apply offer": the piece's MC/VA as tagged (the offer lowers these), and whether the offer is switched on for this work-up.
@@ -176,6 +178,7 @@ export function EstimationPage() {
     setEditing(false);
     setNotes('');
     setApplyOffer(false);
+    setFixedAmount(Number(tag.sellingPrice ?? 0));
     setLines((tag.materials ?? []).map((m: any) => ({
       materialId: m.id, baseRate: Number(m.saleRate ?? 0),
       code: m.code, materialType: m.materialType, name: materialLabel(m),
@@ -200,7 +203,7 @@ export function EstimationPage() {
 
   const items = lines.map((l) => ({ ...l, saleAmount: computeLineAmount(l.weight, l.saleRate) }));
   // Fixed price per piece: the quote is the tag's saved GST-exclusive price; material rows are weights only (see quoteTotals).
-  const { materialsSaleAmt, makingSaleAmount, totalSaleAmount } = quoteTotals(tag ?? {}, items, { saleMcRate, saleVaPercent });
+  const { materialsSaleAmt, makingSaleAmount, totalSaleAmount } = quoteTotals(tag ?? {}, items, { saleMcRate, saleVaPercent }, fixedAmount);
   const metalWeight = items.filter((i) => i.materialType === 'METAL').reduce((s, i) => s + i.weight, 0);
   // Indicative GST only — at the default HSN's rate from the HSN master (sent with the tag);
   // the saved TagEstimate snapshots its own taxRate/gstAmount at save time (see estimation.service.ts),
@@ -242,8 +245,8 @@ export function EstimationPage() {
   // price (auto-filled from the tag + MakingCharge master on load) is a perfectly valid estimate
   // to save or print as-is; "Edit" is only for when the customer needs a different number.
   const buildEstimatePayload = () => fixedPrice ? {
-    // The server quotes the tag's saved price itself; nothing weight-based is sent.
-    items: [], notes: notes.trim() || undefined,
+    // Nothing weight-based is sent: the server quotes this amount (default = the tag's saved price) as one flat line.
+    items: [], fixedPrice: fixedAmount, notes: notes.trim() || undefined,
   } : ({
     items: lines.map((l) => ({ materialId: l.materialId, code: l.code, materialType: l.materialType, name: l.name, weight: l.weight, unit: l.unit, saleRate: l.saleRate })),
     saleMcRate, saleVaPercent,
@@ -476,7 +479,17 @@ export function EstimationPage() {
 
               <Divider sx={{ my: 1.5 }} />
               <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1 }}>{fixedPrice ? 'Materials (weights for stock record only)' : 'Materials'}</Typography>
-              {fixedPrice && <Alert severity="info" sx={{ mb: 1 }}>Fixed price per piece: this piece is quoted at its saved price of {fmt(Number(tag.sellingPrice))} (excluding GST). Weight, metal rate, making charge and VA do not change it.</Alert>}
+              {fixedPrice && (
+                <Alert severity="info" sx={{ mb: 1, alignItems: 'center' }}>
+                  <Typography variant="body2" sx={{ mb: 1 }}>
+                    Fixed price per piece - saved price {fmt(Number(tag.sellingPrice))} (excluding GST). Weight, metal rate, making charge and VA do not change it.
+                    {editing ? '' : ' Press Edit to quote a different amount.'}
+                  </Typography>
+                  <NumberField label="Amount (₹, excl. GST)" size="small" disabled={!editing} value={fixedAmount}
+                    onChange={(e) => setFixedAmount(Number(e.target.value))}
+                    error={!(fixedAmount > 0)} helperText={fixedAmount > 0 && fixedAmount !== Number(tag.sellingPrice) ? `Differs from the saved ${fmt(Number(tag.sellingPrice))} - this estimate only; the tag is not changed` : undefined} />
+                </Alert>
+              )}
               <Box sx={{ overflowX: 'auto' }}>
               <Table size="small" sx={{ '& .MuiTableCell-root': { px: { xs: 0.5, sm: 2 }, fontSize: { xs: 11.5, sm: 'inherit' } }, '& .MuiTableCell-head': { fontSize: { xs: 10, sm: '0.75rem' }, letterSpacing: { xs: 0, sm: '0.05em' } } }}>
                 <TableHead>
@@ -587,26 +600,26 @@ export function EstimationPage() {
                   onChange={(e) => setTemplateId(e.target.value)} />
               )}
               <Button fullWidth variant="contained" color="secondary" startIcon={<Send />} sx={{ mt: 2 }}
-                disabled={(items.length === 0 && !fixedPrice) || tag.status !== 'IN_STOCK'}
+                disabled={(fixedPrice ? !(fixedAmount > 0) : items.length === 0) || tag.status !== 'IN_STOCK'}
                 title={tag.status !== 'IN_STOCK' ? 'Only a piece that is in stock can be sent to billing' : belowOfferNow ? 'Priced below the offer - a store manager has to approve it before it goes to billing' : 'Save this estimate and send it to the billing counter'}
                 onClick={() => { setCustomer(EMPTY_CUSTOMER); setShowCustErrors(false); setSendTarget('new'); }}>
                 {belowOfferNow ? 'Send for Approval' : 'Send to Billing'}
               </Button>
               <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
                 <Button fullWidth variant="outlined" startIcon={<Save />}
-                  disabled={saveMutation.isPending || (items.length === 0 && !fixedPrice)}
+                  disabled={saveMutation.isPending || (fixedPrice ? !(fixedAmount > 0) : items.length === 0)}
                   onClick={() => saveMutation.mutate()}>
                   {saveMutation.isPending ? 'Saving…' : 'Save'}
                 </Button>
                 <Button fullWidth variant="contained" startIcon={<Print />}
-                  disabled={printMutation.isPending || (items.length === 0 && !fixedPrice) || !templateId}
+                  disabled={printMutation.isPending || (fixedPrice ? !(fixedAmount > 0) : items.length === 0) || !templateId}
                   onClick={() => printMutation.mutate()}>
                   {printMutation.isPending ? 'Printing…' : 'Print'}
                 </Button>
               </Stack>
               {receiptAvailable && (
                 <Button fullWidth variant="outlined" startIcon={<ReceiptLong />} sx={{ mt: 1 }}
-                  disabled={receiptMutation.isPending || receiptBusy || (items.length === 0 && !fixedPrice) || !templateId || receiptStatusQuery.data?.online === false}
+                  disabled={receiptMutation.isPending || receiptBusy || (fixedPrice ? !(fixedAmount > 0) : items.length === 0) || !templateId || receiptStatusQuery.data?.online === false}
                   title={receiptStatusQuery.data?.online === false ? `Receipt printer: ${receiptStatusQuery.data.statusText}` : 'Save this estimate and print it on the receipt printer'}
                   onClick={() => receiptMutation.mutate()}>
                   {receiptMutation.isPending || receiptBusy ? 'Sending…' : 'Print to Receipt Printer'}
