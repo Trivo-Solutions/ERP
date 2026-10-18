@@ -73,3 +73,22 @@ export function computeEstimateTotals(
     totalSaleAmount: materialsSaleAmt + makingSaleAmount,
   };
 }
+
+export const FIXED_PRICE_PER_PIECE = 'FIXED_PRICE_PER_PIECE';
+export const isFixedPriceTag = (tag: { pricingMode?: string | null } | null | undefined): boolean => tag?.pricingMode === FIXED_PRICE_PER_PIECE;
+
+// What the Estimation screen shows as the quote for a tag. A fixed-price-per-piece tag is quoted at its own saved GST-exclusive
+// sellingPrice and nothing else: its material rows (kept only for weights / inventory), the day's metal rate, MC and VA never
+// enter. Mirrors estimation.service.ts: createTagEstimate's `fixed` branch (the server is authoritative; this is the preview).
+export function quoteTotals(
+  tag: { pricingMode?: string | null; sellingPrice?: number | string | null },
+  items: EstimateLineLike[],
+  mcVa: { saleMcRate?: number; saleVaPercent?: number },
+) {
+  if (isFixedPriceTag(tag)) {
+    const price = Math.round(Number(tag.sellingPrice || 0) * 100) / 100;
+    return { metalWeight: 0, materialsSaleAmt: price, makingSaleAmount: 0, totalSaleAmount: price };
+  }
+  const t = computeEstimateTotals(items, mcVa);
+  return { metalWeight: t.metalWeight, materialsSaleAmt: t.materialsSaleAmt, makingSaleAmount: t.makingSaleAmount, totalSaleAmount: t.totalSaleAmount };
+}

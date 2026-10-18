@@ -79,6 +79,8 @@ interface LineItem {
   // a FIXED line's goldRate is its flat price, not a per-gram rate.
   invoiceItemId?: string;
   rateType?: string;
+  // Fixed Price per Piece tag: priced from the tag's saved price by the server, so its rates are not editable here.
+  fixedPrice?: boolean;
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -473,7 +475,7 @@ export function NewSalePage() {
     };
     // Fixed Price per Piece: a flat line at the tag's saved GST-exclusive price (the server enforces the same price); GST is added by the bill.
     if (tag.pricingMode === 'FIXED_PRICE_PER_PIECE') {
-      setLines((p) => [...p, { ...line, rateType: 'FIXED', goldRate: Number(tag.sellingPrice), makingCharge: 0, wastagePercent: 0, stoneValue: 0 }]);
+      setLines((p) => [...p, { ...line, rateType: 'FIXED', fixedPrice: true, goldRate: Number(tag.sellingPrice), makingCharge: 0, wastagePercent: 0, stoneValue: 0 }]);
       setTagSearch('');
       return;
     }
@@ -512,6 +514,7 @@ export function NewSalePage() {
       estimateId: est.id, estimateNumber: est.estimateNumber, quotedTotal: Number(est.totalSaleAmount),
       goldRateChanged: !!est.goldRateChanged, goldRateAtEstimate: est.goldRateAtEstimate ?? undefined, goldRateNow: est.goldRateNow ?? undefined,
       estimate: breakdown, salesPersonId, offerName: est.offerName ?? undefined,
+      fixedPrice: tag.pricingMode === 'FIXED_PRICE_PER_PIECE',
     }]);
     setEstimateSearch('');
     // An estimate that was priced below its offer was released to billing by a store manager's approval; carry that approval
@@ -835,7 +838,7 @@ export function NewSalePage() {
       key: 'actions', label: '', width: 160, hideable: false, filterable: false,
       render: (l: LineItem) => (
         <Stack direction="row" spacing={0.5} alignItems="center" data-line-key={l.key}>
-          <Button size="small" variant="outlined" sx={{ whiteSpace: 'nowrap' }} disabled={isLocked(l) || matLoading} onClick={() => editLine(l)}>
+          <Button size="small" variant="outlined" sx={{ whiteSpace: 'nowrap' }} disabled={isLocked(l) || matLoading || !!l.fixedPrice} title={l.fixedPrice ? 'Fixed price per piece - the price is set on the tag' : undefined} onClick={() => editLine(l)}>
             {l.tagId || l.estimate ? 'Edit (F4)' : 'Edit'}
           </Button>
           {l.estimateId && !l.invoiceItemId && (

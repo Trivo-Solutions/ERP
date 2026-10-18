@@ -416,7 +416,7 @@ const BILLABLE_ESTIMATE_SELECT = {
   tag: {
     select: {
       id: true, tagNumber: true, name: true, status: true, metalType: true, metalKarat: true, makeType: true,
-      grossWeight: true, netWeight: true, stoneWeight: true, huid: true,
+      grossWeight: true, netWeight: true, stoneWeight: true, huid: true, pricingMode: true,
       category: { select: { id: true, name: true } },
     },
   },

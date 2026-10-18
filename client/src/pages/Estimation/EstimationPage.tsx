@@ -14,7 +14,7 @@ import { StatusChip } from '../../components/common/StatusChip';
 import { useAuthStore } from '../../store/auth.store';
 import { NumberField } from '../../components/fields/NumberField';
 import { SelectField } from '../../components/fields/SelectField';
-import { findMakingCharge, computeLineAmount, computeMakingAmount } from '../../utils/estimateCalc';
+import { findMakingCharge, computeLineAmount, computeMakingAmount, quoteTotals, isFixedPriceTag } from '../../utils/estimateCalc';
 import { printTagEstimate } from '../../utils/printTagEstimate';
 import { printEstimateToReceiptPrinter } from '../../utils/estimateReceipt';
 import { getReceiptPrinterStatus, receiptStatusRefetchMs } from '../../utils/printAgent';
@@ -132,6 +132,7 @@ export function EstimationPage() {
     enabled: !!selectedTagId,
   });
   const tag = tagQuery.data;
+  const fixedPrice = isFixedPriceTag(tag);
 
   const estimatesQuery = useQuery({
     queryKey: ['estimation-past', selectedTagId],
@@ -149,7 +150,7 @@ export function EstimationPage() {
     retry: false,
   });
   const offerRes = (offerQuery.data as any)?.data ?? offerQuery.data;
-  const offer = offerRes?.resolution?.offer ? offerRes.resolution : null;
+  const offer = !fixedPrice && offerRes?.resolution?.offer ? offerRes.resolution : null;
 
   const { data: makingChargesData } = useQuery({
     queryKey: ['master-making-charges'],
@@ -198,11 +199,9 @@ export function EstimationPage() {
   }, [tag, makingCharges.length]);
 
   const items = lines.map((l) => ({ ...l, saleAmount: computeLineAmount(l.weight, l.saleRate) }));
+  // Fixed price per piece: the quote is the tag's saved GST-exclusive price; material rows are weights only (see quoteTotals).
+  const { materialsSaleAmt, makingSaleAmount, totalSaleAmount } = quoteTotals(tag ?? {}, items, { saleMcRate, saleVaPercent });
   const metalWeight = items.filter((i) => i.materialType === 'METAL').reduce((s, i) => s + i.weight, 0);
-  const metalSaleAmt = items.filter((i) => i.materialType === 'METAL').reduce((s, i) => s + i.saleAmount, 0);
-  const materialsSaleAmt = items.reduce((s, i) => s + i.saleAmount, 0);
-  const makingSaleAmount = computeMakingAmount(metalWeight, metalSaleAmt, saleMcRate, saleVaPercent);
-  const totalSaleAmount = materialsSaleAmt + makingSaleAmount;
   // Indicative GST only — at the default HSN's rate from the HSN master (sent with the tag);
   // the saved TagEstimate snapshots its own taxRate/gstAmount at save time (see estimation.service.ts),
   // this is just the live preview shown before that save happens.
@@ -225,7 +224,7 @@ export function EstimationPage() {
   const baseMetalAmt = lines.filter((l) => l.materialType === 'METAL').reduce((s, l) => s + computeLineAmount(l.weight, l.baseRate ?? l.saleRate), 0);
   const baseTotal = lines.reduce((s, l) => s + computeLineAmount(l.weight, l.baseRate ?? l.saleRate), 0)
     + computeMakingAmount(metalWeight, baseMetalAmt, baseMcVa.mc, baseMcVa.va);
-  const offerSaving = applyOffer ? Math.max(0, baseTotal - totalSaleAmount) : 0;
+  const offerSaving = applyOffer && !fixedPrice ? Math.max(0, baseTotal - totalSaleAmount) : 0;
 
   // Is the work-up on screen priced below the offered rates (zero tolerance)? Mirrors the server's own check, which decides.
   const belowOfferNow = !!offer && (
@@ -242,7 +241,10 @@ export function EstimationPage() {
   // Deliberately not gated on `editing` — a tag whose materials/MC/VA already reflect its real
   // price (auto-filled from the tag + MakingCharge master on load) is a perfectly valid estimate
   // to save or print as-is; "Edit" is only for when the customer needs a different number.
-  const buildEstimatePayload = () => ({
+  const buildEstimatePayload = () => fixedPrice ? {
+    // The server quotes the tag's saved price itself; nothing weight-based is sent.
+    items: [], notes: notes.trim() || undefined,
+  } : ({
     items: lines.map((l) => ({ materialId: l.materialId, code: l.code, materialType: l.materialType, name: l.name, weight: l.weight, unit: l.unit, saleRate: l.saleRate })),
     saleMcRate, saleVaPercent,
     applyOffer: applyOffer || undefined,
@@ -427,7 +429,7 @@ export function EstimationPage() {
       {tag && !tagQuery.isLoading && (
         <Grid container spacing={2}>
           <Grid item xs={12} md={8}>
-            {tag.goldRate && !tag.goldRate.isToday && (
+            {!fixedPrice && tag.goldRate && !tag.goldRate.isToday && (
               <Alert severity="warning" sx={{ mb: 2, alignItems: 'center' }}
                 action={canUpdateRates ? <Button color="inherit" size="small" onClick={() => navigate('/designs/rates')}>Update rate</Button> : undefined}>
                 Today's {tag.goldRate.karat} rate has not been entered yet - this estimate uses the {new Date(`${tag.goldRate.rateDate}T00:00:00`).toLocaleDateString('en-IN')} rate
@@ -450,7 +452,7 @@ export function EstimationPage() {
                 </Typography>
               </Alert>
             )}
-            {!offer && offerRes && (
+            {!fixedPrice && !offer && offerRes && (
               <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>No offer applies to this piece today.</Typography>
             )}
             <Card sx={{ p: 2, mb: 2 }}>
@@ -473,7 +475,8 @@ export function EstimationPage() {
               </Stack>
 
               <Divider sx={{ my: 1.5 }} />
-              <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1 }}>Materials</Typography>
+              <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1 }}>{fixedPrice ? 'Materials (weights for stock record only)' : 'Materials'}</Typography>
+              {fixedPrice && <Alert severity="info" sx={{ mb: 1 }}>Fixed price per piece: this piece is quoted at its saved price of {fmt(Number(tag.sellingPrice))} (excluding GST). Weight, metal rate, making charge and VA do not change it.</Alert>}
               <Box sx={{ overflowX: 'auto' }}>
               <Table size="small" sx={{ '& .MuiTableCell-root': { px: { xs: 0.5, sm: 2 }, fontSize: { xs: 11.5, sm: 'inherit' } }, '& .MuiTableCell-head': { fontSize: { xs: 10, sm: '0.75rem' }, letterSpacing: { xs: 0, sm: '0.05em' } } }}>
                 <TableHead>
@@ -492,7 +495,7 @@ export function EstimationPage() {
                       <TableCell align="right">{l.weight.toFixed(3)}</TableCell>
                       <TableCell>{l.unit}</TableCell>
                       <TableCell align="right">
-                        {editing ? (
+                        {fixedPrice ? '—' : editing ? (
                           <NumberField size="small" value={l.saleRate}
                             onChange={(e) => updateLine(idx, { saleRate: Number(e.target.value) })} />
                         ) : applyOffer && l.baseRate != null && l.baseRate !== l.saleRate ? (
@@ -502,7 +505,7 @@ export function EstimationPage() {
                           </>
                         ) : fmt(l.saleRate)}
                       </TableCell>
-                      <TableCell align="right">{fmt(l.saleAmount)}</TableCell>
+                      <TableCell align="right">{fixedPrice ? '—' : fmt(l.saleAmount)}</TableCell>
                     </TableRow>
                   ))}
                   {items.length === 0 && (
@@ -513,7 +516,7 @@ export function EstimationPage() {
               </Box>
             </Card>
 
-            <Card sx={{ p: 2 }}>
+            {!fixedPrice && <Card sx={{ p: 2 }}>
               <Typography variant="h6" fontWeight={700} sx={{ mb: 2 }}>Making Charge & Value Addition</Typography>
               <Grid container spacing={2}>
                 <Grid item xs={6} sm={4}>
@@ -527,7 +530,7 @@ export function EstimationPage() {
                     helperText={applyOffer && saleVaPercent !== baseMcVa.va ? `Offer - tagged ${baseMcVa.va}%` : undefined} />
                 </Grid>
               </Grid>
-            </Card>
+            </Card>}
 
             <Card sx={{ p: 2, mt: 2 }}>
               <Typography variant="h6" fontWeight={700} sx={{ mb: 1 }}>Notes</Typography>
@@ -584,26 +587,26 @@ export function EstimationPage() {
                   onChange={(e) => setTemplateId(e.target.value)} />
               )}
               <Button fullWidth variant="contained" color="secondary" startIcon={<Send />} sx={{ mt: 2 }}
-                disabled={items.length === 0 || tag.status !== 'IN_STOCK'}
+                disabled={(items.length === 0 && !fixedPrice) || tag.status !== 'IN_STOCK'}
                 title={tag.status !== 'IN_STOCK' ? 'Only a piece that is in stock can be sent to billing' : belowOfferNow ? 'Priced below the offer - a store manager has to approve it before it goes to billing' : 'Save this estimate and send it to the billing counter'}
                 onClick={() => { setCustomer(EMPTY_CUSTOMER); setShowCustErrors(false); setSendTarget('new'); }}>
                 {belowOfferNow ? 'Send for Approval' : 'Send to Billing'}
               </Button>
               <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
                 <Button fullWidth variant="outlined" startIcon={<Save />}
-                  disabled={saveMutation.isPending || items.length === 0}
+                  disabled={saveMutation.isPending || (items.length === 0 && !fixedPrice)}
                   onClick={() => saveMutation.mutate()}>
                   {saveMutation.isPending ? 'Saving…' : 'Save'}
                 </Button>
                 <Button fullWidth variant="contained" startIcon={<Print />}
-                  disabled={printMutation.isPending || items.length === 0 || !templateId}
+                  disabled={printMutation.isPending || (items.length === 0 && !fixedPrice) || !templateId}
                   onClick={() => printMutation.mutate()}>
                   {printMutation.isPending ? 'Printing…' : 'Print'}
                 </Button>
               </Stack>
               {receiptAvailable && (
                 <Button fullWidth variant="outlined" startIcon={<ReceiptLong />} sx={{ mt: 1 }}
-                  disabled={receiptMutation.isPending || receiptBusy || items.length === 0 || !templateId || receiptStatusQuery.data?.online === false}
+                  disabled={receiptMutation.isPending || receiptBusy || (items.length === 0 && !fixedPrice) || !templateId || receiptStatusQuery.data?.online === false}
                   title={receiptStatusQuery.data?.online === false ? `Receipt printer: ${receiptStatusQuery.data.statusText}` : 'Save this estimate and print it on the receipt printer'}
                   onClick={() => receiptMutation.mutate()}>
                   {receiptMutation.isPending || receiptBusy ? 'Sending…' : 'Print to Receipt Printer'}
