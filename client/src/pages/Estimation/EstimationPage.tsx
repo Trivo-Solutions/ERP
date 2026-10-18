@@ -16,7 +16,8 @@ import { NumberField } from '../../components/fields/NumberField';
 import { SelectField } from '../../components/fields/SelectField';
 import { findMakingCharge, computeLineAmount, computeMakingAmount, quoteTotals, isFixedPriceTag } from '../../utils/estimateCalc';
 import { printTagEstimate } from '../../utils/printTagEstimate';
-import { printEstimateToReceiptPrinter } from '../../utils/estimateReceipt';
+import { printEstimateToReceiptPrinter, printEstimateToNetworkPrinter } from '../../utils/estimateReceipt';
+import { getNetworkPrinterHost } from '../../utils/networkReceiptPrinter';
 import { getReceiptPrinterStatus, receiptStatusRefetchMs } from '../../utils/printAgent';
 
 // What "Send to billing" asks for, so the biller does not ask again. Name, mobile and the sales employee are
@@ -322,7 +323,10 @@ export function EstimationPage() {
   const receiptStatusQuery = useQuery({
     queryKey: ['receipt-printer-status'], queryFn: getReceiptPrinterStatus, retry: false, refetchInterval: receiptStatusRefetchMs(15000),
   });
-  const receiptAvailable = Boolean(receiptStatusQuery.data?.configured);
+  // A network printer address saved on THIS device (Android / no PC) wins over the local agent.
+  // (set on the Hardware page)
+  const [netHost] = useState<string | null>(getNetworkPrinterHost);
+  const receiptAvailable = Boolean(netHost) || Boolean(receiptStatusQuery.data?.configured);
   const [receiptBusy, setReceiptBusy] = useState(false);
   const receiptBusyRef = useRef(false);
   const receiptJobIds = useRef(new Map<string, string>());
@@ -336,6 +340,11 @@ export function EstimationPage() {
     if (!jobId) { jobId = `est-${estimate.id}-${Date.now().toString(36)}`; receiptJobIds.current.set(estimate.id, jobId); }
     const progress = enqueueSnackbar(`Sending ${estimate.estimateNumber} to the receipt printer…`, { variant: 'info', persist: true });
     try {
+      if (netHost) {
+        await printEstimateToNetworkPrinter(netHost, template, tag, estimate);
+        enqueueSnackbar(`${estimate.estimateNumber} sent to the receipt printer.`, { variant: 'success' });
+        return;
+      }
       const r = await printEstimateToReceiptPrinter(template, tag, estimate, jobId);
       receiptJobIds.current.delete(estimate.id);
       // Honest wording: the agent confirms the Windows print queue accepted it, not that paper came out.
@@ -619,8 +628,8 @@ export function EstimationPage() {
               </Stack>
               {receiptAvailable && (
                 <Button fullWidth variant="outlined" startIcon={<ReceiptLong />} sx={{ mt: 1 }}
-                  disabled={receiptMutation.isPending || receiptBusy || (fixedPrice ? !(fixedAmount > 0) : items.length === 0) || !templateId || receiptStatusQuery.data?.online === false}
-                  title={receiptStatusQuery.data?.online === false ? `Receipt printer: ${receiptStatusQuery.data.statusText}` : 'Save this estimate and print it on the receipt printer'}
+                  disabled={receiptMutation.isPending || receiptBusy || (fixedPrice ? !(fixedAmount > 0) : items.length === 0) || !templateId || (!netHost && receiptStatusQuery.data?.online === false)}
+                  title={!netHost && receiptStatusQuery.data?.online === false ? `Receipt printer: ${receiptStatusQuery.data.statusText}` : 'Save this estimate and print it on the receipt printer'}
                   onClick={() => receiptMutation.mutate()}>
                   {receiptMutation.isPending || receiptBusy ? 'Sending…' : 'Print to Receipt Printer'}
                 </Button>

@@ -11,6 +11,8 @@ import { PageHeader } from '../../components/common/PageHeader';
 import { useScaleReading } from '../../hooks/useSocket';
 import { useWebSerial } from '../../hooks/useWebSerial';
 import { useUiStore } from '../../store/ui.store';
+import { getNetworkPrinterHost } from '../../utils/networkReceiptPrinter';
+import { NetworkPrinterDialog } from '../../components/sales/NetworkPrinterDialog';
 import { getPrintAgentStatus, getReceiptPrinterStatus, isReceiptAgentOutdated, receiptStatusRefetchMs, printReceiptTest, PRINT_AGENT_DOWNLOAD_URL, PRINT_AGENT_INSTALLER_URL, PRINT_AGENT_SETUP_URL } from '../../utils/printAgent';
 
 export function HardwarePage() {
@@ -59,7 +61,9 @@ export function HardwarePage() {
     refetchInterval: receiptStatusRefetchMs(10_000),
     retry: false,
   });
-  const receiptAgentOutdated = receiptQueryError && isReceiptAgentOutdated(receiptError);
+  const [netHost, setNetHost] = useState<string | null>(getNetworkPrinterHost);
+  const [netDialog, setNetDialog] = useState(false);
+  const receiptAgentOutdated =receiptQueryError && isReceiptAgentOutdated(receiptError);
   const receiptAgentOffline = receiptQueryError && !receiptAgentOutdated;
   const receiptTestMutation = useMutation({
     mutationFn: printReceiptTest,
@@ -437,6 +441,29 @@ export function HardwarePage() {
                 Pick the printer under "Receipt printer" on the setup page. Estimates then get a
                 "Print to Receipt Printer" button on the Estimation screen.
               </Typography>
+            </CardContent>
+          </Card>
+        </Grid>
+
+        {/* ── Network Receipt Printer (Epson TM-m30III over Wi-Fi/Ethernet; Android, no PC) ── */}
+        <Grid item xs={12} md={4}>
+          <Card>
+            <CardContent>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
+                <ReceiptLong color="primary" />
+                <Typography variant="subtitle1" fontWeight={700}>Network Receipt Printer</Typography>
+                <Chip label={netHost ? 'CONFIGURED' : 'NOT SET'} size="small" color={netHost ? 'success' : 'default'} />
+              </Box>
+              <Alert severity="info" sx={{ mb: 2, fontSize: 12 }}>
+                Prints estimates straight to the Epson over the network - no PC or print agent, so it
+                works from an Android tablet or phone. The address is saved on this device only; set
+                it up once on each device. It takes priority over the print agent on this device.
+              </Alert>
+              <Typography variant="body2" sx={{ mb: 2 }}>{netHost ? `Printer address: ${netHost}` : 'No printer address on this device'}</Typography>
+              <Button fullWidth variant="outlined" startIcon={<Settings />} onClick={() => setNetDialog(true)}>
+                {netHost ? 'Change / Test Printer' : 'Set Up Network Printer'}
+              </Button>
+              <NetworkPrinterDialog open={netDialog} onClose={() => setNetDialog(false)} onSaved={setNetHost} />
             </CardContent>
           </Card>
         </Grid>

@@ -1,5 +1,6 @@
 import { BASE_CSS, buildEstimatePage } from './printTagEstimate';
 import { printReceiptViaAgent, ReceiptPrintResult } from './printAgent';
+import { buildEscPosRaster, sendToNetworkPrinter } from './networkReceiptPrinter';
 import type { EstimateTemplateLayout } from '../types/estimateTemplate';
 
 // Prints an estimate on the ESC/POS receipt printer through the local print agent: the same page
@@ -64,6 +65,19 @@ async function rasterize(contentHtml: string, widthMm: number, heightMm: number,
 // jobId is the duplicate guard: the agent never sends the same id to the printer twice. Pass the
 // SAME id when retrying a print whose outcome is unknown (timeout); use a fresh one for a
 // deliberate reprint.
+// Same slip, sent straight to a network Epson (Android / no PC). Resolves once the printer itself
+// acknowledged the job; throws with the printer's own reason otherwise.
+export async function printEstimateToNetworkPrinter(
+  host: string,
+  template: { layout: EstimateTemplateLayout; widthMm: number; heightMm: number },
+  tag: any, estimate: any,
+): Promise<void> {
+  const page = buildEstimatePage(template, tag, estimate);
+  const { widthDots, heightDots } = receiptDotsFor(page.widthMm, page.heightMm);
+  const bits = await rasterize(page.contentHtml, page.widthMm, page.heightMm, widthDots, heightDots);
+  await sendToNetworkPrinter(host, buildEscPosRaster(bits, widthDots, heightDots));
+}
+
 export async function printEstimateToReceiptPrinter(
   template: { layout: EstimateTemplateLayout; widthMm: number; heightMm: number },
   tag: any, estimate: any, jobId: string,
