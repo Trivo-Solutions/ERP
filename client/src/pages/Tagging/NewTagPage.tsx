@@ -14,6 +14,7 @@ import {
 } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm, Controller, useFieldArray, useWatch } from 'react-hook-form';
+import { priceFromMarkup } from '../../utils/markupPrice';
 import { useSnackbar } from 'notistack';
 import { apiGet, apiPost, apiPatch } from '../../api/client';
 import { PageHeader } from '../../components/common/PageHeader';
@@ -189,6 +190,12 @@ export function NewTagPage() {
   const [lotId, setLotId] = useState(searchParams.get('lotId') ?? '');
 
   const { control, handleSubmit, reset, watch, setValue, getValues, setFocus } = useForm({ defaultValues: EMPTY });
+  // Fixed-price tagging: a markup % on the cost fills the selling price (cost x (1 + %/100)); typing a price by hand clears the %.
+  const [markupPct, setMarkupPct] = useState('');
+  const applyMarkup = (cost: unknown, pct: unknown) => {
+    const price = priceFromMarkup(cost, pct);
+    if (price !== null) setValue('sellingPrice', String(price), { shouldDirty: true });
+  };
   const { fields, append, remove } = useFieldArray({ control, name: 'materials' });
   const watchedValues = watch();
   const watchedMaterials = watchedValues.materials;
@@ -1250,15 +1257,24 @@ export function NewTagPage() {
                         <Grid item xs={12}>
                           <Divider><Typography variant="caption" color="text.secondary">{fixedMode ? 'Pricing — fixed price per piece' : 'Pricing (optional — auto-calculated from materials)'}</Typography></Divider>
                         </Grid>
-                        <Grid item xs={6}>
+                        <Grid item xs={fixedMode ? 4 : 6}>
                           <Controller name="costPrice" control={control}
                             render={({ field }) => <TextField {...field} fullWidth label="Cost Price (₹)" type="number" inputProps={{ min: 0 }}
+                              onChange={(e) => { field.onChange(e); applyMarkup(e.target.value, markupPct); }}
                               helperText={lotId ? "Blank = built from the Materials and MC & VA tabs (pre-filled from the PO); if those are blank too, the bag's split by net weight" : undefined} />} />
                         </Grid>
-                        <Grid item xs={6}>
+                        {fixedMode && (
+                          <Grid item xs={3}>
+                            <TextField fullWidth label="Markup on cost (%)" type="number" inputProps={{ min: 0, step: 0.1 }} value={markupPct}
+                              onChange={(e) => { setMarkupPct(e.target.value); applyMarkup(getValues('costPrice'), e.target.value); }}
+                              helperText="Cost 1000 + 20% = 1200" />
+                          </Grid>
+                        )}
+                        <Grid item xs={fixedMode ? 5 : 6}>
                           <Controller name="sellingPrice" control={control}
                             render={({ field }) => fixedMode
                               ? <TextField {...field} fullWidth required label="Selling Price per Piece (excluding GST) (₹)" type="number" inputProps={{ min: 0.01, step: 0.01 }}
+                                  onChange={(e) => { field.onChange(e); setMarkupPct(''); }}
                                   helperText="Fixed price for this piece, before GST. GST is added at billing. Not derived from weight, metal rate, MC or VA." />
                               : <TextField {...field} fullWidth label="Selling Price / MRP (₹)" type="number" inputProps={{ min: 0 }} />} />
                         </Grid>
