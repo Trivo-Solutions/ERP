@@ -19,10 +19,10 @@ describe('ePOS-Print XML', () => {
   it('wraps the bytes as a hex <command>', () => {
     const xml = buildEposXml(Uint8Array.from([0x1b, 0x40, 0x0a]));
     expect(xml).toContain('<command>1b400a</command>');
-    expect(xml).toContain('xmlns="http://www.epson.com/2011/epos/print"');
+    expect(xml).toContain('xmlns="http://www.epson-pos.com/schemas/2011/03/epos-print"');
   });
   it('reads success and error code from the reply', () => {
-    const ok = '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><response xmlns="http://www.epson.com/2011/epos/print" success="true" code="" status="251658262" battery="0"/></s:Body></s:Envelope>';
+    const ok = '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><response xmlns="http://www.epson-pos.com/schemas/2011/03/epos-print" success="true" code="" status="251658262" battery="0"/></s:Body></s:Envelope>';
     const bad = ok.replace('success="true" code=""', 'success="false" code="EPTR_COVER_OPEN"');
     expect(parseEposReply(ok)).toEqual({ success: true, code: '' });
     expect(parseEposReply(bad)).toEqual({ success: false, code: 'EPTR_COVER_OPEN' });

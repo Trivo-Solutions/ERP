@@ -58,7 +58,7 @@ export function buildEscPosRaster(bits: Uint8Array, widthDots: number, heightDot
 export function buildEposXml(escpos: Uint8Array): string {
   return '<?xml version="1.0" encoding="utf-8"?>'
     + '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>'
-    + `<epos-print xmlns="http://www.epson.com/2011/epos/print"><command>${hex(escpos)}</command></epos-print>`
+    + `<epos-print xmlns="http://www.epson-pos.com/schemas/2011/03/epos-print"><command>${hex(escpos)}</command></epos-print>`
     + '</s:Body></s:Envelope>';
 }
 
