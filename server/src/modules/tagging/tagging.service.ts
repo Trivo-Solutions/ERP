@@ -8,6 +8,7 @@ import { FINISHED_GOODS_MATERIAL_TYPE } from '../../shared/constants';
 import { isValidKarat } from '../../shared/karatMaster';
 import { resolveMetalRate, resolveLiveMetalRate } from '../../shared/metalRate';
 import { pickMakingCharge } from '../../shared/makingChargeLookup';
+import { isFixedPrice, parseFixedPrice } from '../../shared/fixedPrice';
 import { findTagsBatched, liveValueByKey, liveSaleValue, loadLiveRates, LIVE_VALUE_TAG_SELECT } from '../../shared/liveSaleValue';
 import { resolveSupplierStateCode, splitInputGst, round2, resolveBuyerRegistration } from '../../shared/inputGst';
 import { resolvePriceMaster } from '../../shared/priceMaster';
@@ -278,7 +279,7 @@ export async function getStockBook(ctx: TenantContext, filters: {
     select: {
       id: true, tagNumber: true, name: true, status: true, makeType: true, metalType: true, metalKarat: true,
       huid: true, settingType: true, grossWeight: true, netWeight: true, stoneWeight: true,
-      costPrice: true, sellingPrice: true, createdAt: true, updatedAt: true,
+      costPrice: true, sellingPrice: true, pricingMode: true, createdAt: true, updatedAt: true,
       branch: { select: { id: true, name: true, branchCode: true } },
       category: { select: { name: true } },
       subCategory: { select: { name: true } },
@@ -484,7 +485,27 @@ async function withLotComponentRates<T extends { materialType: string; stoneGrad
  * metal, with a metal rate on file for its karat (gold is priced live from that table). Blank is refused, never read as 0;
  * an explicit 0 is a real rate. `partial` (an edit) only checks the fields the request actually sends.
  */
-export async function assertTagSaleRatesForSave(ctx: TenantContext, body: any, opts: { partial: boolean }) {
+export async function assertTagSaleRatesForSave(ctx: TenantContext, body: any, opts: { partial: boolean; tagId?: string }) {
+  // Fixed-price-per-piece (decided by the category, or by the tag itself on an edit): the entered GST-exclusive price replaces the
+  // MC / VA / stone-rate / metal-rate requirements entirely - none of them price the piece. Weights are still required.
+  let fixed = false;
+  if (opts.partial && opts.tagId) {
+    const t = await tenantQuery(ctx.companyId, (_tx) => _tx.jewelryTag.findFirst({ where: { id: opts.tagId, companyId: ctx.companyId }, select: { pricingMode: true } }));
+    fixed = isFixedPrice(t);
+  } else if (!opts.partial && typeof body.categoryId === 'string') {
+    const c = await tenantQuery(ctx.companyId, (_tx) => _tx.productCategory.findFirst({ where: { id: body.categoryId, companyId: ctx.companyId }, select: { pricingMode: true } }));
+    fixed = isFixedPrice(c);
+  }
+  if (fixed) {
+    if (!opts.partial || 'sellingPrice' in body) parseFixedPrice(body.sellingPrice);
+    if (!opts.partial) {
+      const gross = Number(body.grossWeight), net = Number(body.netWeight);
+      if (!(gross > 0)) throw new AppError('Gross weight is required and must be greater than 0', 400);
+      if (!(net > 0)) throw new AppError('Net weight is required and must be greater than 0', 400);
+      if (net > gross + 1e-9) throw new AppError('Net weight cannot exceed gross weight', 400);
+    }
+    return;
+  }
   const isNum = (v: unknown) => (typeof v === 'number' || (typeof v === 'string' && v.trim() !== '')) && Number.isFinite(Number(v)) && Number(v) >= 0;
   const missing: string[] = [];
   if (!opts.partial || 'saleMcRate' in body) { if (!isNum(body.saleMcRate)) missing.push('making charge rate'); }
@@ -651,7 +672,10 @@ export async function createTag(ctx: TenantContext, data: {
   const totalCost = materials.reduce((s, m) => s + Number(m.costAmount ?? 0), 0);
   const totalSale = materials.reduce((s, m) => s + Number(m.saleAmount ?? 0), 0);
   const costPrice    = data.costPrice    ?? totalCost;
-  const sellingPrice = data.sellingPrice ?? totalSale;
+  // Fixed price per piece: the entered GST-exclusive price IS the selling price (never summed from material rows), and the
+  // tag has no sale MC / VA of its own. The category's mode is snapshotted on the tag so a later category change never reprices it.
+  const fixedPrice = isFixedPrice(category);
+  const sellingPrice = fixedPrice ? parseFixedPrice(data.sellingPrice) : (data.sellingPrice ?? totalSale);
 
   const tag = await tenantTransaction(ctx.companyId, async (tx) => {
     // Lot first: it locks the lot and fails fast (closed / over-tagged / wrong karat) before a tag number is burned.
@@ -677,8 +701,9 @@ export async function createTag(ctx: TenantContext, data: {
         settingType:  data.settingType,
         costPrice:    fromLot && !(costPrice > 0) ? fromLot.suggestedCost : costPrice,
         sellingPrice,
-        saleMcRate:    data.saleMcRate,
-        saleVaPercent: data.saleVaPercent,
+        pricingMode:   fixedPrice ? category.pricingMode : 'WEIGHT_BASED',
+        saleMcRate:    fixedPrice ? undefined : data.saleMcRate,
+        saleVaPercent: fixedPrice ? undefined : data.saleVaPercent,
         costMcRate:    data.costMcRate,
         costVaPercent: data.costVaPercent,
         jobCardId:    data.jobCardId,
@@ -767,6 +792,12 @@ export async function updateTag(id: string, data: {
   }
   assertTagEditable(existing.status, 'edited');
   if (data.branchId !== undefined) await assertBranchAccessible(data.branchId, ctx);
+  const fixedTag = isFixedPrice(existing);
+  if (fixedTag && data.sellingPrice !== undefined) data.sellingPrice = parseFixedPrice(data.sellingPrice);
+  if (data.categoryId !== undefined && data.categoryId !== existing.categoryId) {
+    const target = await tenantQuery(ctx.companyId, (_tx) => _tx.productCategory.findFirst({ where: { id: data.categoryId, companyId: ctx.companyId }, select: { pricingMode: true } }));
+    if (target && isFixedPrice(target) !== fixedTag) throw new AppError('A tag cannot be moved between a fixed-price and a weight-based category - tag the piece afresh', 400);
+  }
 
   if (data.metalKarat && !(await isValidKarat(ctx.companyId, data.metalKarat))) {
     throw new AppError(`Unknown karat/purity code: ${data.metalKarat}`, 400);
@@ -820,7 +851,7 @@ export async function updateTag(id: string, data: {
     const totalCost = materials.reduce((s, m) => s + Number(m.costAmount ?? 0), 0);
     const totalSale = materials.reduce((s, m) => s + Number(m.saleAmount ?? 0), 0);
     costPrice    = data.costPrice    ?? totalCost;
-    sellingPrice = data.sellingPrice ?? totalSale;
+    sellingPrice = fixedTag ? data.sellingPrice : (data.sellingPrice ?? totalSale); // a fixed price is never re-summed from material rows
   }
   // The stored name follows the validated classification (never the client's text); an edit that does not
   // touch category / sub-category leaves the stored text alone.
@@ -1010,6 +1041,9 @@ export async function createTagFromGrnItem(data: {
   ]);
   if (!stockType) throw new AppError('Stock Type not found', 404);
   if (!category) throw new AppError('Category not found', 404);
+  // Fixed-price category: the caller must enter the GST-exclusive piece price (never suggested from the metal rate).
+  const grnFixed = isFixedPrice(category);
+  if (grnFixed) sellingPrice = parseFixedPrice(data.sellingPrice);
   const grnClassification = await loadClassification(ctx.companyId, data.categoryId, data.subCategoryId);
   const grnTagName = deriveTagName(category, grnClassification.subCategory, data.name?.trim() || '');
 
@@ -1053,8 +1087,9 @@ export async function createTagFromGrnItem(data: {
           settingType: data.settingType,
           costPrice,
           sellingPrice,
-          saleMcRate,
-          saleVaPercent,
+          pricingMode: grnFixed ? category.pricingMode : 'WEIGHT_BASED',
+          saleMcRate: grnFixed ? undefined : saleMcRate,
+          saleVaPercent: grnFixed ? undefined : saleVaPercent,
           grnItemId: data.grnItemId,
           notes: data.notes,
           stockTypeId: data.stockTypeId,

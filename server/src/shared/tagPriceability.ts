@@ -1,10 +1,13 @@
 import { AppError } from '../middleware/error';
+import { isFixedPrice } from './fixedPrice';
 
 // A tag can only be quoted or sold from its own data when its SALE rates exist. Gold is the one live element (read from the
 // metal-rate table every time), so a METAL row's stored rate is irrelevant; everything else the price is built from must be
 // present on the tag: the making-charge rate, the VA %, and a sale rate on every non-metal row (stones etc). A missing value is
 // never read as 0 and never filled from "today's" anything - the piece is refused until its rates are set on the tag.
 export interface PriceabilityTag {
+  pricingMode?: string | null; // FIXED_PRICE_PER_PIECE: priced from sellingPrice alone (no MC / VA / stone rates needed)
+  sellingPrice?: unknown;
   tagNumber?: string | null;
   saleMcRate: unknown;
   saleVaPercent: unknown;
@@ -13,6 +16,7 @@ export interface PriceabilityTag {
 
 export function missingSaleRates(tag: PriceabilityTag): string[] {
   const missing: string[] = [];
+  if (isFixedPrice(tag)) return Number(tag.sellingPrice) > 0 ? [] : ['fixed selling price'];
   if (tag.saleMcRate == null) missing.push('making charge rate');
   if (tag.saleVaPercent == null) missing.push('VA %');
   for (const m of tag.materials) {

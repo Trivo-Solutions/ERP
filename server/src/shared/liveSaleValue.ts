@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { tenantQuery } from './tenantContext';
 import { resolveLiveMetalRate } from './metalRate';
 import { computeRowsPricing } from './pricingEngine';
+import { isFixedPrice } from './fixedPrice';
 
 // What a piece would sell for TODAY: its metal at the day's rate for its karat (the one live element), and everything else
 // from the tag's own stored sale columns (MC rate, VA %, stone sale rates), through the one pricing engine. Stock-side reports
@@ -9,6 +10,8 @@ import { computeRowsPricing } from './pricingEngine';
 // used here. A piece that cannot be priced (a sale rate missing on the tag, or no metal rate on file for its karat) has no
 // live value - it is reported as unpriced, never as 0.
 export interface LiveValueTag {
+  pricingMode: string;
+  sellingPrice: unknown;
   metalKarat: string | null;
   netWeight: unknown;
   saleMcRate: unknown;
@@ -17,7 +20,7 @@ export interface LiveValueTag {
 }
 
 export const LIVE_VALUE_TAG_SELECT = {
-  metalKarat: true, netWeight: true, saleMcRate: true, saleVaPercent: true,
+  pricingMode: true, sellingPrice: true, metalKarat: true, netWeight: true, saleMcRate: true, saleVaPercent: true,
   materials: { select: { materialType: true, weight: true, saleRate: true } },
 } as const;
 
@@ -32,6 +35,8 @@ export async function loadLiveRates(companyId: string, karats: Iterable<string |
 }
 
 export function liveSaleValue(tag: LiveValueTag, rateByKarat: Map<string, number>): number | null {
+  // Fixed price per piece: the tag's own GST-exclusive price, never a metal-rate figure.
+  if (isFixedPrice(tag)) return Number(tag.sellingPrice) > 0 ? Math.round(Number(tag.sellingPrice) * 100) / 100 : null;
   if (tag.saleMcRate == null || tag.saleVaPercent == null) return null;
   const metalRate = tag.metalKarat ? rateByKarat.get(tag.metalKarat) : undefined;
   const rows: Array<{ materialType: string; weight: number; rate: number }> = [];

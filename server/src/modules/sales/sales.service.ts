@@ -6,6 +6,7 @@ import { computeMakingAmount } from '../../shared/pricingEngine';
 import { pickMakingCharge } from '../../shared/makingChargeLookup';
 import { isEstimateExpired } from '../../shared/estimateExpiry';
 import { assertTagPriceable } from '../../shared/tagPriceability';
+import { isFixedPrice } from '../../shared/fixedPrice';
 import { priceMaterialBreakdown, attachOfferSnapshot, MaterialBreakdown } from '../../shared/materialBreakdown';
 import { resolveOfferForTag, todayString } from '../offers/offer.service';
 import { settleApprovals } from '../offers/offerApproval.service';
@@ -663,13 +664,13 @@ async function priceInvoice(
           // (see JewelryTag's schema comment) — preferred below over a fresh MakingCharge master
           // lookup, so a later master-rate change never silently re-prices an already-tagged piece.
           select: {
-            id: true, tagNumber: true, categoryId: true, makeType: true, metalKarat: true, saleMcRate: true, saleVaPercent: true,
+            id: true, tagNumber: true, categoryId: true, makeType: true, metalKarat: true, saleMcRate: true, saleVaPercent: true, pricingMode: true, sellingPrice: true,
             // The piece's own material rows + sale rates: what a tagged line with no rates of its own is priced from.
             materials: { select: { id: true, code: true, materialType: true, weight: true, unit: true, saleRate: true } },
           },
         }))).map((t) => [t.id, t])
       )
-    : new Map<string, { tagNumber: string; categoryId: string | null; makeType: string; metalKarat: string | null; saleMcRate: any; saleVaPercent: any; materials: any[] }>();
+    : new Map<string, { tagNumber: string; categoryId: string | null; makeType: string; metalKarat: string | null; saleMcRate: any; saleVaPercent: any; pricingMode: string; sellingPrice: any; materials: any[] }>();
 
   // Per-line GST (B1): each line's HSN determines its own rate. Resolved once, up front, and the
   // rate is copied onto the row (like costPrice on JewelryTag) — a later change to the HSN master
@@ -737,6 +738,7 @@ async function priceInvoice(
   // the tag's own columns. A karat with no rate at all refuses the bill rather than guessing.
   const autoPriced = (line: InvoiceItemInput) => {
     const tag = line.tagId ? tagInfoById.get(line.tagId) : undefined;
+    if (tag && isFixedPrice(tag)) return undefined; // a fixed-price piece is priced from its own saved price, never from metal rows
     const noRates = line.goldRate == null && line.makingCharge == null && line.wastagePercent == null && line.stoneValue == null;
     if (!tag || !noRates || line.materialBreakdown != null || line.materialSale || line.rateType === 'FIXED') return undefined;
     // The line relies on the tag's own rates: a tag missing any is refused (409), never priced at 0 or from a master default.
@@ -754,6 +756,15 @@ async function priceInvoice(
   data = {
     ...data,
     items: data.items.map((line) => {
+      // Fixed price per piece: the tag's saved GST-exclusive price IS the line's flat unit price (quantity multiplies it; GST is
+      // added on top below by the normal per-line tax path). Whatever rates / breakdown the client sent are ignored - a metal-rate
+      // or MC/VA figure must never replace the entered price. An invoice-level discount still applies as for any line.
+      const fixedTag = line.tagId ? tagInfoById.get(line.tagId) : undefined;
+      if (fixedTag && isFixedPrice(fixedTag)) {
+        assertTagPriceable(fixedTag);
+        const { materialBreakdown: _drop, ...rest } = line;
+        return { ...rest, rateType: 'FIXED', goldRate: Number(fixedTag.sellingPrice), makingCharge: 0, wastagePercent: 0, stoneValue: 0 };
+      }
       const tag = autoPriced(line);
       if (!tag) return line;
       const rows = tag.materials.map((m: any) => ({

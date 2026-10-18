@@ -471,6 +471,12 @@ export function NewSalePage() {
       categoryId: tag.category?.id ?? undefined,
       categoryName: tag.category?.name ?? undefined,
     };
+    // Fixed Price per Piece: a flat line at the tag's saved GST-exclusive price (the server enforces the same price); GST is added by the bill.
+    if (tag.pricingMode === 'FIXED_PRICE_PER_PIECE') {
+      setLines((p) => [...p, { ...line, rateType: 'FIXED', goldRate: Number(tag.sellingPrice), makingCharge: 0, wastagePercent: 0, stoneValue: 0 }]);
+      setTagSearch('');
+      return;
+    }
     // One pricing engine: a tagged piece is priced from its own stored material rows and MC / VA rates (weight x rate,
     // MC x metal weight, VA % of metal value) - exactly what the tag, the estimate and F4 use - never from a separate
     // per-gram shortcut. Only a non-INR bill (no material pricing there) keeps the plain per-gram line.
@@ -524,6 +530,7 @@ export function NewSalePage() {
 
   const buildTagBreakdown = async (l: LineItem): Promise<EstimateBreakdown> => {
     const tag = await apiGet<any>(`/tagging/tags/${l.tagId}`);
+    if (tag.pricingMode === 'FIXED_PRICE_PER_PIECE') throw new Error(`Tag ${tag.tagNumber ?? ''} is a fixed-price piece - its price is set on the tag and cannot be re-built from materials`);
     // Gold is live: a METAL row is priced at the day's rate for the piece's karat, never the rate stored on the tag (the
     // server prices it the same way). No rate at all -> stop here rather than quote the metal at a stale or zero rate.
     const todaysRate = (l.karat && latestRateByKarat[l.karat]) || 0;

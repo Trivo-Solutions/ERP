@@ -3028,6 +3028,8 @@ model JewelryTag {
   settingType    String?
   costPrice      Decimal          @default(0) @db.Decimal(12, 2)
   sellingPrice   Decimal          @default(0) @db.Decimal(12, 2)
+  // Snapshot of the category's pricingMode at tagging. FIXED_PRICE_PER_PIECE: sellingPrice IS the GST-exclusive price, never recomputed.
+  pricingMode    String           @default("WEIGHT_BASED")
   // The making-charge rate (₹/gram) and VA/wastage% actually decided for this piece at tagging
   // time — auto-suggested from the MakingCharge master but overridable there, and the final,
   // possibly-overridden value is what gets saved here. Null only for tags that predate this column
@@ -3166,6 +3168,8 @@ model ProductCategory {
   code      String
   name      String
   isActive  Boolean  @default(true)
+  // WEIGHT_BASED (default: metal x live rate + MC + VA + stones) | FIXED_PRICE_PER_PIECE (the tag carries its own GST-exclusive price).
+  pricingMode String  @default("WEIGHT_BASED")
   createdAt DateTime @default(now())
 
   subCategoryLinks CategorySubCategory[]

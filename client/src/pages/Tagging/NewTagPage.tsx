@@ -377,6 +377,9 @@ export function NewTagPage() {
 
   const { data: categories } = useQuery({ queryKey: ['master-categories'], queryFn: () => apiGet<any>('/masters/categories') });
   const catList: any[] = (categories as any)?.data ?? (categories as any) ?? [];
+  // Fixed Price per Piece: the category (or, on an existing tag, the tag's own saved mode) decides. The entered price is the
+  // GST-exclusive selling price; MC / VA / stone rates and the metal rate do not price the piece.
+  const fixedMode = (isEditMode && editTag?.pricingMode ? editTag.pricingMode : catList.find((c: any) => c.id === selectedCatId)?.pricingMode) === 'FIXED_PRICE_PER_PIECE';
 
   const { data: stockTypes } = useQuery({ queryKey: ['master-stock-types'], queryFn: () => apiGet<any>('/masters/stock-types') });
   const stockTypeList: any[] = (stockTypes as any)?.data ?? (stockTypes as any) ?? [];
@@ -788,9 +791,10 @@ export function NewTagPage() {
       // refuses the same thing; this just says so before the round trip.
       const isBlank = (v: any) => v === '' || v == null;
       const missingRates: string[] = [];
-      if (isBlank(data.saleMcRate)) missingRates.push('Sale making charge rate');
-      if (isBlank(data.saleVaPercent)) missingRates.push('Sale VA %');
-      (data.materials ?? []).forEach((m: any) => {
+      if (fixedMode && !(Number(data.sellingPrice) > 0)) return Promise.reject({ response: { data: { error: 'Enter the Selling Price per Piece (excluding GST) - it must be greater than 0' } } });
+      if (!fixedMode && isBlank(data.saleMcRate)) missingRates.push('Sale making charge rate');
+      if (!fixedMode && isBlank(data.saleVaPercent)) missingRates.push('Sale VA %');
+      (fixedMode ? [] : (data.materials ?? [])).forEach((m: any) => {
         if (m.materialType !== 'METAL' && isBlank(m.saleRate) && isBlank(m.saleAmount) && !m.stoneGradeId) missingRates.push(`${m.code || 'Material'} sale rate`);
       });
       if (missingRates.length > 0) return Promise.reject({ response: { data: { error: `Fill in before saving: ${missingRates.join(', ')}` } } });
@@ -815,13 +819,12 @@ export function NewTagPage() {
         noOfPcs:      data.noOfPcs ? Number(data.noOfPcs) : (isEditMode ? null : undefined),
         manufacturerId: data.manufacturerId || undefined,
         costPrice:    totalCostAmt || Number(data.costPrice    || 0),
-        sellingPrice: totalSaleAmt || Number(data.sellingPrice || 0),
+        sellingPrice: fixedMode ? Number(data.sellingPrice) : (totalSaleAmt || Number(data.sellingPrice || 0)),
         ...(!isEditMode && lotId && { purchaseLotId: lotId }),
         // Whatever MC rate/VA% actually priced this piece — auto-suggested from the MakingCharge
         // master but overridable on this form, so this is the exec's final decision, not a live
         // master value. Estimation/direct-sale pricing read this back later instead of re-deriving.
-        saleMcRate:    Number(data.saleMcRate),
-        saleVaPercent: Number(data.saleVaPercent),
+        ...(!fixedMode && { saleMcRate: Number(data.saleMcRate), saleVaPercent: Number(data.saleVaPercent) }),
         // Cost-side counterpart — persisted so re-opening this tag for edit shows back exactly
         // what was paid in labour/wastage, instead of resetting blank and dropping it from
         // costPrice on the next save.
@@ -1245,7 +1248,7 @@ export function NewTagPage() {
                         </Grid>
 
                         <Grid item xs={12}>
-                          <Divider><Typography variant="caption" color="text.secondary">Pricing (optional — auto-calculated from materials)</Typography></Divider>
+                          <Divider><Typography variant="caption" color="text.secondary">{fixedMode ? 'Pricing — fixed price per piece' : 'Pricing (optional — auto-calculated from materials)'}</Typography></Divider>
                         </Grid>
                         <Grid item xs={6}>
                           <Controller name="costPrice" control={control}
@@ -1254,7 +1257,10 @@ export function NewTagPage() {
                         </Grid>
                         <Grid item xs={6}>
                           <Controller name="sellingPrice" control={control}
-                            render={({ field }) => <TextField {...field} fullWidth label="Selling Price / MRP (₹)" type="number" inputProps={{ min: 0 }} />} />
+                            render={({ field }) => fixedMode
+                              ? <TextField {...field} fullWidth required label="Selling Price per Piece (excluding GST) (₹)" type="number" inputProps={{ min: 0.01, step: 0.01 }}
+                                  helperText="Fixed price for this piece, before GST. GST is added at billing. Not derived from weight, metal rate, MC or VA." />
+                              : <TextField {...field} fullWidth label="Selling Price / MRP (₹)" type="number" inputProps={{ min: 0 }} />} />
                         </Grid>
                       </Grid>
 
@@ -1475,6 +1481,7 @@ export function NewTagPage() {
                   {/* ── Tab 3: MC & VA (making charge / value-addition wastage — tag-level, on net weight) ── */}
                   {activeTab === 2 && (
                     <Box sx={{ p: 3 }}>
+                      {fixedMode && <Alert severity="info" sx={{ mb: 2 }}>This category sells at a fixed price per piece, so sale making charge / VA are not used. Cost-side figures below still feed the cost price.</Alert>}
                       <Grid container spacing={2}>
                         <Grid item xs={12} sm={6}>
                           <Typography variant="caption" fontWeight={700} color="#1B3280" sx={{ display: 'block', mb: 1 }}>

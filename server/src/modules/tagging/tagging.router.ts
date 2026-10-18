@@ -152,7 +152,7 @@ taggingRouter.post('/tags', requirePermission('tag:create'), async (req: Request
 // Corrects a tag's own details after the fact — not a stock movement, so it's gated the same as
 // creating/retiring a tag (tag:create) rather than needing its own permission.
 taggingRouter.patch('/tags/:id', requirePermission('tag:create'), async (req: Request, res: Response) => {
-  await svc.assertTagSaleRatesForSave(req.tenant!, req.body ?? {}, { partial: true });
+  await svc.assertTagSaleRatesForSave(req.tenant!, req.body ?? {}, { partial: true, tagId: req.params.id });
   const tag = await svc.updateTag(req.params.id, req.body, req.tenant!, req.user!.userId);
   res.json({ success: true, data: tag });
 });

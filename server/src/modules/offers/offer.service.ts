@@ -5,6 +5,7 @@ import { assertOwnedByCompany, assertOwnedIfPresent, assertAllOwned } from '../.
 import { TenantContext, tenantQuery, tenantTransaction } from '../../shared/tenantContext';
 import { isBlockedByForeignKey } from '../../shared/prismaErrors';
 import { resolveLiveMetalRate } from '../../shared/metalRate';
+import { isFixedPrice } from '../../shared/fixedPrice';
 import { businessDayString } from '../../shared/businessDay';
 import {
   OFFER_COMPONENTS, OFFER_MODES, OfferLike, OfferResolution, PieceRates, resolveOffer,
@@ -294,7 +295,9 @@ export async function resolveOfferForTag(
   ctx: TenantContext, tagId: string, asOf?: string,
 ): Promise<{ asOf: string; base: PieceRates; resolution: OfferResolution }> {
   const day = asOf ? parseDay(asOf, 'Date') : todayString();
-  const offers = await loadOffersForResolution(ctx, day);
+  // A fixed-price-per-piece tag has no weight-based component rates for an offer to lower - no offer ever applies to it.
+  const mode = await tenantQuery(ctx.companyId, (tx) => tx.jewelryTag.findFirst({ where: { id: tagId, companyId: ctx.companyId }, select: { pricingMode: true } }));
+  const offers = isFixedPrice(mode) ? [] : await loadOffersForResolution(ctx, day);
   const base = await baseRatesForTag(ctx, tagId, day, { requireMetalRate: offers.some((o) => o.rules.some((r) => r.component === 'METAL')) });
   return { asOf: day, base, resolution: resolveOffer(offers, base, day) };
 }

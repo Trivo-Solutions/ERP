@@ -414,7 +414,7 @@ export async function retagTag(data: {
         companyId: ctx.companyId, tagNumber, branchId: ho.id, status: 'IN_STOCK', createdById: userId,
         name: old.name, makeType: old.makeType, metalType: old.metalType, metalKarat: old.metalKarat,
         grossWeight: old.grossWeight, netWeight: old.netWeight, stoneWeight: old.stoneWeight, huid: old.huid,
-        settingType: old.settingType, costPrice: old.costPrice, sellingPrice: old.sellingPrice, // costPrice is immutable: inherited, never repriced
+        settingType: old.settingType, costPrice: old.costPrice, sellingPrice: old.sellingPrice, pricingMode: old.pricingMode, // costPrice is immutable: inherited, never repriced
         saleMcRate: old.saleMcRate, saleVaPercent: old.saleVaPercent, costMcRate: old.costMcRate, costVaPercent: old.costVaPercent,
         notes: old.notes, stockTypeId: old.stockTypeId, categoryId: old.categoryId, subCategoryId: old.subCategoryId,
         collectionId: old.collectionId, sizeId: old.sizeId, noOfPcs: old.noOfPcs, manufacturerId: old.manufacturerId,

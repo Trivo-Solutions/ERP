@@ -6,6 +6,7 @@ import { Prisma } from '@prisma/client';
 import { normalizePan } from '../../shared/compliance';
 import { computeRowsPricing } from '../../shared/pricingEngine';
 import { resolveLiveMetalRate } from '../../shared/metalRate';
+import { isFixedPrice } from '../../shared/fixedPrice';
 import { assertTagPriceable } from '../../shared/tagPriceability';
 import { startOfLocalDay, endOfLocalDay, isEstimateExpired } from '../../shared/estimateExpiry';
 import { createAuditEntry } from '../../middleware/audit';
@@ -56,7 +57,7 @@ export async function getTagForEstimation(ctx: TenantContext, tagId: string) {
       id: true, companyId: true, tagNumber: true, name: true, status: true,
       metalType: true, metalKarat: true, makeType: true, categoryId: true,
       grossWeight: true, netWeight: true, stoneWeight: true, huid: true,
-      sellingPrice: true,
+      sellingPrice: true, pricingMode: true,
       // The MC rate/VA% actually decided for this piece at tagging time — preferred over a fresh
       // MakingCharge master lookup by the client (null only for tags that predate this column).
       saleMcRate: true, saleVaPercent: true,
@@ -79,7 +80,8 @@ export async function getTagForEstimation(ctx: TenantContext, tagId: string) {
   // Gold is live: a METAL row is shown at the day's metal rate for the piece's karat, not the rate it was tagged with. The
   // rate's own date rides along so the screen can say "today's rate not entered yet - using <date>'s".
   assertTagPriceable(tag); // 409 when the tag is missing MC / VA / a stone's sale rate - never quoted at 0
-  const needsMetal = tag.materials.some((m) => m.materialType === 'METAL');
+  // Fixed price per piece: no live metal rate is involved at all (the quote is the tag's own GST-exclusive price).
+  const needsMetal = !isFixedPrice(tag) && tag.materials.some((m) => m.materialType === 'METAL');
   const goldRate = needsMetal && tag.metalKarat ? await resolveLiveMetalRate(ctx.companyId, tag.metalKarat) : null;
   if (needsMetal && !goldRate) throw new AppError(`No metal rate has been entered for ${tag.metalKarat ?? 'this piece'} - enter it under Metal Rates first`, 409);
   return {
@@ -231,7 +233,7 @@ export async function defaultGstRate(): Promise<number> {
 export async function createTagEstimate(tagId: string, input: CreateTagEstimateInput, ctx: TenantContext, userId: string) {
   const tag = await tenantQuery(ctx.companyId, (_tx) => _tx.jewelryTag.findUnique({
     where: { id: tagId },
-    select: { id: true, companyId: true, status: true, tagNumber: true, saleMcRate: true, saleVaPercent: true, materials: { select: { code: true, materialType: true, saleRate: true } } },
+    select: { id: true, companyId: true, status: true, tagNumber: true, pricingMode: true, sellingPrice: true, saleMcRate: true, saleVaPercent: true, materials: { select: { code: true, materialType: true, saleRate: true } } },
   }));
   if (!tag || tag.companyId !== ctx.companyId) throw new AppError('Tag not found', 404);
   assertTagPriceable(tag);
@@ -240,7 +242,7 @@ export async function createTagEstimate(tagId: string, input: CreateTagEstimateI
     assertBillable(tag);
     await assertReadyForBilling(ctx, customer);
   }
-  if (!input.items || input.items.length === 0) throw new AppError('At least one material item is required', 400);
+  if (!isFixedPrice(tag) && (!input.items || input.items.length === 0)) throw new AppError('At least one material item is required', 400);
 
   // "Apply offer": the offer is picked by the server from today's date, never named by the client. The submitted rates are
   // the offered ones; what we record is which offer it was and the tagged rates they were lowered from, so a later edit to
@@ -252,16 +254,24 @@ export async function createTagEstimate(tagId: string, input: CreateTagEstimateI
   }
   const baseRateOf = new Map((offerApplied?.base.rows ?? []).map((r) => [r.key, r.rate]));
 
-  const items = input.items.map((i) => ({
-    ...i,
-    costAmount: i.weight * (i.costRate ?? 0),
-    saleAmount: i.weight * (i.saleRate ?? 0),
-  }));
+  // Fixed price per piece: the quote is exactly the tag's saved GST-exclusive price, whatever rows / rates the client sent - one
+  // 'FIXED' line, no MC / VA, no offer (offers lower weight-based component rates; there are none here).
+  const fixed = isFixedPrice(tag);
+  if (fixed && input.applyOffer) throw new AppError('Offers do not apply to a fixed-price piece', 409);
+  const fixedPrice = fixed ? Number(tag.sellingPrice) : 0;
+  const items = fixed
+    ? [{ code: 'FIXED', materialType: 'FIXED', name: 'Fixed price per piece', weight: 1, unit: 'PC', costRate: 0, costAmount: 0, saleRate: fixedPrice, saleAmount: fixedPrice } as EstimateItemInput & { costAmount: number; saleAmount: number }]
+    : input.items.map((i) => ({
+        ...i,
+        costAmount: i.weight * (i.costRate ?? 0),
+        saleAmount: i.weight * (i.saleRate ?? 0),
+      }));
+  if (fixed) input = { ...input, saleMcRate: undefined, saleVaPercent: undefined, costMcRate: undefined, costVaPercent: undefined };
 
-  const { totalCostAmount, totalSaleAmount } = computeTotals(items, input);
+  const { totalCostAmount, totalSaleAmount } = fixed ? { totalCostAmount: 0, totalSaleAmount: fixedPrice } : computeTotals(items, input);
 
   // Priced below the offer in force today -> it does not go to billing; it goes to a store manager, who releases it.
-  const gate = input.sendToBilling
+  const gate = input.sendToBilling && !fixed
     ? await estimateBelowOffer(ctx, tagId, {
         mcRate: input.saleMcRate ?? Number.POSITIVE_INFINITY, vaPercent: input.saleVaPercent ?? Number.POSITIVE_INFINITY,
         rows: items.map((i) => ({ materialId: i.materialId, rate: i.saleRate ?? 0, code: i.code })),

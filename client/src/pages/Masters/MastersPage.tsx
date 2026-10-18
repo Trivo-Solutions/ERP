@@ -343,7 +343,7 @@ function CategoriesTab() {
   const shownCategories = categories.filter((r) => matches(r, catSearch));
   const shownSubCategories = subCategories.filter((r) => matches(r, subSearch));
 
-  const catDefaults = { code: '', name: '' };
+  const catDefaults = { code: '', name: '', pricingMode: 'WEIGHT_BASED' };
   const { control: catControl, handleSubmit: handleCatSubmit, reset: resetCat } = useForm({ defaultValues: catDefaults });
   const catMutation = useMutation({
     mutationFn: (data: any) => (selectedCat ? apiPatch(`/masters/categories/${selectedCat.id}`, data) : apiPost('/masters/categories', data)),
@@ -429,6 +429,16 @@ function CategoriesTab() {
               render={({ field, fieldState }) => <TextField {...field} fullWidth size="small" label="Category Code *" error={!!fieldState.error} />} />
             <Controller name="name" control={catControl} rules={{ required: true }}
               render={({ field, fieldState }) => <TextField {...field} fullWidth size="small" label="Category Name *" error={!!fieldState.error} />} />
+            <Controller name="pricingMode" control={catControl}
+              render={({ field }) => (
+                <TextField {...field} select SelectProps={{ native: true }} fullWidth size="small" label="Pricing mode" InputLabelProps={{ shrink: true }}
+                  helperText={field.value === 'FIXED_PRICE_PER_PIECE'
+                    ? 'Each piece is tagged with its own selling price (excluding GST); GST is added at billing. Applies to pieces tagged from now on.'
+                    : 'Priced from weight, live metal rate, making charge and VA.'}>
+                  <option value="WEIGHT_BASED">Weight-based (default)</option>
+                  <option value="FIXED_PRICE_PER_PIECE">Fixed price per piece</option>
+                </TextField>
+              )} />
           </FormPanel>
           <TextField size="small" fullWidth placeholder="Search categories by code or name…" value={catSearch}
             onChange={(e) => setCatSearch(e.target.value)} />
@@ -437,11 +447,12 @@ function CategoriesTab() {
             columns={[
               { key: 'code', label: 'Code', render: (r: any) => <Typography fontFamily="monospace" fontWeight={700} color="#44C47A" fontSize={12}>{r.code}</Typography> },
               { key: 'name', label: 'Name' },
+              { key: 'pricingMode', label: 'Pricing', render: (r: any) => (r.pricingMode === 'FIXED_PRICE_PER_PIECE' ? <Chip label="Fixed price" size="small" color="info" /> : <Typography fontSize={12} color="text.secondary">Weight-based</Typography>) },
               { key: 'subCount', label: 'Sub-cats', filterValue: (r: any) => String(r._count?.subCategoryLinks ?? 0), render: (r: any) => <Chip label={r._count?.subCategoryLinks ?? 0} size="small" /> },
             ]}
             rows={shownCategories} isLoading={catLoading} getRowId={(r: any) => r.id}
             selectedId={selectedCat?.id} emptyLabel="No categories yet"
-            onRowClick={(row: any) => { setSelectedCat(row); setSelectedSub(null); resetCat({ code: row.code, name: row.name }); }}
+            onRowClick={(row: any) => { setSelectedCat(row); setSelectedSub(null); resetCat({ code: row.code, name: row.name, pricingMode: row.pricingMode ?? 'WEIGHT_BASED' }); }}
           />
         </Stack>
       </Grid>

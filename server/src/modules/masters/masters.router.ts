@@ -5,6 +5,8 @@ import { resolveTenantContext, assertOwnedByCompany, assertOwnedIfPresent } from
 import { tenantQuery, tenantTransaction } from '../../shared/tenantContext';
 import { isBlockedByForeignKey } from '../../shared/prismaErrors';
 import { AppError } from '../../middleware/error';
+import { assertPricingMode } from '../../shared/fixedPrice';
+import { createAuditEntry } from '../../middleware/audit';
 import {
   listSubCategories, listCategoriesForSubCategory, createSubCategory, updateSubCategory,
   linkSubCategory, unlinkSubCategory, deleteSubCategory,
@@ -84,7 +86,7 @@ mastersRouter.delete('/stock-types/:id', requirePermission('masters:delete'), as
 
 // ─── Product Categories ────────────────────────────────────────────────────────
 
-const CATEGORY_FIELDS = ['code', 'name', 'isActive'] as const;
+const CATEGORY_FIELDS = ['code', 'name', 'isActive', 'pricingMode'] as const;
 
 mastersRouter.get('/categories', requirePermission('masters:view'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
@@ -101,8 +103,9 @@ mastersRouter.get('/categories', requirePermission('masters:view'), async (req: 
 mastersRouter.post('/categories', requirePermission('masters:create'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   const { code, name } = req.body;
+  const pricingMode = req.body.pricingMode === undefined ? 'WEIGHT_BASED' : assertPricingMode(req.body.pricingMode);
   const item = await tenantQuery(companyId, (tx) =>
-    tx.productCategory.create({ data: { companyId, code: String(code).toUpperCase(), name } })
+    tx.productCategory.create({ data: { companyId, code: String(code).toUpperCase(), name, pricingMode } })
   );
   res.status(201).json({ success: true, data: item });
 });
@@ -110,9 +113,15 @@ mastersRouter.post('/categories', requirePermission('masters:create'), async (re
 mastersRouter.patch('/categories/:id', requirePermission('masters:edit'), async (req: Request, res: Response) => {
   const companyId = req.tenant!.companyId;
   await assertOwnedByCompany('productCategory', req.params.id, companyId, 'Category');
+  if (req.body.pricingMode !== undefined) assertPricingMode(req.body.pricingMode);
+  const prior = await tenantQuery(companyId, (tx) => tx.productCategory.findFirst({ where: { id: req.params.id, companyId }, select: { pricingMode: true } }));
   const item = await tenantQuery(companyId, (tx) =>
     tx.productCategory.update({ where: { id: req.params.id }, data: withUpperCode(pick(req.body, CATEGORY_FIELDS)) })
   );
+  // Switching the mode only affects tags created from now on (each tag snapshots the mode when it is tagged) - audited.
+  if (prior && prior.pricingMode !== item.pricingMode) {
+    await createAuditEntry('product_categories', item.id, req.user!.userId, 'EDIT', { pricingMode: prior.pricingMode }, { pricingMode: item.pricingMode }, companyId);
+  }
   res.json({ success: true, data: item });
 });
 
