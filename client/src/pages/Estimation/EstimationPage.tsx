@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   Box, Card, CardContent, Grid, Typography, Button, Stack, Divider, Table, TableHead,
   TableBody, TableRow, TableCell, CircularProgress, Chip, TextField, InputAdornment, IconButton,
-  Alert, Dialog, DialogTitle, DialogContent, DialogActions, Switch, FormControlLabel,
+  Alert, Dialog, DialogTitle, DialogContent, DialogActions, Switch, FormControlLabel, Autocomplete,
 } from '@mui/material';
 import { Edit, Save, Close, QrCodeScanner, Print, ReceiptLong, Send, Undo } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -14,6 +14,7 @@ import { StatusChip } from '../../components/common/StatusChip';
 import { useAuthStore } from '../../store/auth.store';
 import { NumberField } from '../../components/fields/NumberField';
 import { SelectField } from '../../components/fields/SelectField';
+import { customerToEstimateFields } from '../../utils/estimateCustomer';
 import { findMakingCharge, computeLineAmount, computeMakingAmount, quoteTotals, isFixedPriceTag } from '../../utils/estimateCalc';
 import { printTagEstimate } from '../../utils/printTagEstimate';
 import { printEstimateToReceiptPrinter, printEstimateToNetworkPrinter } from '../../utils/estimateReceipt';
@@ -114,6 +115,22 @@ export function EstimationPage() {
   const staffList: any[] = staffQuery.data ?? [];
 
   useEffect(() => { inputRef.current?.focus(); }, []);
+  // Existing customers, searched by name or mobile, so a returning customer is picked rather than retyped.
+  const [custSearch, setCustSearch] = useState('');
+  const [debouncedCustSearch, setDebouncedCustSearch] = useState('');
+  useEffect(() => { const t = setTimeout(() => setDebouncedCustSearch(custSearch.trim()), 250); return () => clearTimeout(t); }, [custSearch]);
+  useEffect(() => { if (!sendTarget) setCustSearch(''); }, [sendTarget]);
+  const customersQuery = useQuery({
+    queryKey: ['estimation-customers', debouncedCustSearch],
+    queryFn: () => apiGet<any[]>('/estimation/customers', { q: debouncedCustSearch }),
+    enabled: !!sendTarget && debouncedCustSearch.length >= 2, // no list until a real term is typed (the server enforces the same)
+    staleTime: 15_000,
+  });
+  const pickCustomer = (c: any | null) => {
+    if (!c) return;
+    setCust(customerToEstimateFields(c));
+  };
+
 
   const searchQuery = useQuery({
     queryKey: ['estimation-tag-search', query],
@@ -710,8 +727,27 @@ export function EstimationPage() {
           </DialogTitle>
           <DialogContent sx={{ pt: 2 }}>
             <Grid container spacing={2} sx={{ mt: 0 }}>
+              <Grid item xs={12}>
+                <Autocomplete
+                  size="small" autoFocus autoHighlight blurOnSelect
+                  options={debouncedCustSearch.length >= 2 ? (customersQuery.data ?? []) : []}
+                  loading={customersQuery.isFetching}
+                  filterOptions={(o) => o} // the server already matched name / mobile
+                  getOptionLabel={(c: any) => `${c.name}${c.phone ? ` — ${c.phone}` : ''}`}
+                  isOptionEqualToValue={(a: any, b: any) => a.id === b.id}
+                  value={null}
+                  inputValue={custSearch}
+                  onInputChange={(_e, v, reason) => { if (reason === 'input') setCustSearch(v); else if (reason === 'clear' || reason === 'reset') setCustSearch(''); }}
+                  onChange={(_e, c) => pickCustomer(c)}
+                  noOptionsText={custSearch.trim().length >= 2 ? 'No existing customer found — fill the details below' : 'Type at least 2 letters of a name, or a mobile number'}
+                  renderInput={(params) => (
+                    <TextField {...params} label="Existing customer (search by name or mobile)"
+                      helperText="Pick a returning customer to fill the details below, or leave this and enter a new one." />
+                  )}
+                />
+              </Grid>
               <Grid item xs={12} sm={7}>
-                <TextField fullWidth size="small" autoFocus required label="Customer name" value={customer.name}
+                <TextField fullWidth size="small" required label="Customer name" value={customer.name}
                   error={showCustErrors && !!custErrors.name} helperText={showCustErrors ? custErrors.name : undefined}
                   onChange={(e) => setCust({ name: e.target.value })} />
               </Grid>

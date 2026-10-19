@@ -10,6 +10,7 @@ import { isFixedPrice, parseFixedPrice } from '../../shared/fixedPrice';
 import { assertTagPriceable } from '../../shared/tagPriceability';
 import { startOfLocalDay, endOfLocalDay, isEstimateExpired } from '../../shared/estimateExpiry';
 import { createAuditEntry } from '../../middleware/audit';
+import { hasPermission } from '../../middleware/rbac';
 import { DEFAULT_HSN_CODE } from '../../shared/constants';
 import { resolveOfferForTag } from '../offers/offer.service';
 import { estimateBelowOffer, requireApprovalReason, createEstimateApproval, auditEstimateApprovalRequested } from '../offers/offerApproval.service';
@@ -207,6 +208,57 @@ export async function listSalesStaff(ctx: TenantContext) {
     orderBy: { user: { name: 'asc' } },
   }));
   return staff.map((s) => ({ id: s.userId, name: s.user.name, employeeId: s.employeeId }));
+}
+
+/** A search term is only acted on from this length (name) / digit count (mobile) - an empty or 1-character box lists no one. */
+export const CUSTOMER_SEARCH_MIN_CHARS = 2;
+export const CUSTOMER_SEARCH_MIN_DIGITS = 3;
+
+/** The digits of a mobile search, with an Indian country/trunk prefix removed (+91 98765 00011 / 09876500011 -> 9876500011). */
+export function normalizeMobileDigits(term: string): string {
+  const d = term.replace(/\D/g, '');
+  if (d.length === 12 && d.startsWith('91')) return d.slice(2);
+  if (d.length === 11 && d.startsWith('0')) return d.slice(1);
+  return d;
+}
+
+/** Existing customers for the "Send to billing" picker: matched on name or mobile number. Lean fields only - no PAN,
+ *  credit limit or balance (PAN is typed in at billing, never served from here).
+ *  Least privilege: phone, date of birth and address are personal data of the customer file, so they (and matching by
+ *  mobile, which would otherwise confirm a number) need `client:view` on top of `estimation:view`. Without it the picker
+ *  still finds a customer by name, but only returns id, name and code. */
+export async function searchEstimateCustomers(ctx: TenantContext, q?: string) {
+  const term = q?.trim() ?? '';
+  const digits = normalizeMobileDigits(term);
+  const canSeePersonal = hasPermission(ctx.permissions, 'client:view');
+  const byMobile = canSeePersonal && digits.length >= CUSTOMER_SEARCH_MIN_DIGITS;
+  if (term.length < CUSTOMER_SEARCH_MIN_CHARS && !byMobile) return [];
+
+  return tenantTransaction(ctx.companyId, async (tx) => {
+    // Stored mobiles may carry spaces, dashes or a +91 prefix, so they are compared digits-only. Read-only, scoped to the
+    // caller's company, and the stored rows are never rewritten. `digits` is digits-only, so it holds no LIKE wildcard.
+    const mobileIds = byMobile
+      ? (await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "clients"
+          WHERE "companyId" = ${ctx.companyId} AND "isActive" = true
+            AND regexp_replace(COALESCE("phone", ''), '[^0-9]', '', 'g') LIKE ${`%${digits}%`}
+          LIMIT 50`).map((r) => r.id)
+      : [];
+    const rows = await tx.client.findMany({
+      where: {
+        companyId: ctx.companyId,
+        isActive: true,
+        OR: [
+          ...(term.length >= CUSTOMER_SEARCH_MIN_CHARS ? [{ name: { contains: term, mode: 'insensitive' as const } }] : []),
+          ...(mobileIds.length ? [{ id: { in: mobileIds } }] : []),
+        ],
+      },
+      select: { id: true, name: true, clientCode: true, phone: canSeePersonal, dateOfBirth: canSeePersonal, address: canSeePersonal },
+      orderBy: { name: 'asc' },
+      take: 15,
+    });
+    return rows;
+  });
 }
 
 /** The hand-off's required fields, checked against what the estimate will hold AFTER this send. */

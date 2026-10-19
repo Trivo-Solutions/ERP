@@ -11,3 +11,12 @@ export function isEstimateCustomerMismatch(billClientPhone?: string | null, esti
   if (!est || !bill) return false;
   return est !== bill;
 }
+
+// The hand-off dialog's customer fields as filled from a picked existing customer. PAN is never part of the search
+// result, so it is always cleared to be typed in when needed; fields the server withheld (no client:view) come out blank.
+export function customerToEstimateFields(c: { name?: string | null; phone?: string | null; dateOfBirth?: string | null; address?: string | null }) {
+  return {
+    name: c.name ?? '', phone: c.phone ?? '', dob: c.dateOfBirth ? String(c.dateOfBirth).slice(0, 10) : '',
+    address: c.address ?? '', pan: '',
+  };
+}

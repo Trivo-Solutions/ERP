@@ -24,6 +24,11 @@ estimationRouter.get('/staff', requirePermission('estimation:view'), async (req:
   res.json({ success: true, data: await svc.listSalesStaff(req.tenant!) });
 });
 
+// Existing-customer lookup (name or mobile) for the same dialog; estimation:view for the same reason as /staff.
+estimationRouter.get('/customers', requirePermission('estimation:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await svc.searchEstimateCustomers(req.tenant!, typeof req.query.q === 'string' ? req.query.q : undefined) });
+});
+
 estimationRouter.get('/tags/:tagId',requirePermission('estimation:view'), async (req: Request, res: Response) => {
   res.json({ success: true, data: await svc.getTagForEstimation(req.tenant!, req.params.tagId) });
 });

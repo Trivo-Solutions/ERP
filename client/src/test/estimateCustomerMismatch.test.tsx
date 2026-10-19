@@ -52,3 +52,18 @@ describe('CustomerMismatchDialog', () => {
     expect(json).toContain('different customer than the customer currently selected');
   });
 });
+
+import { customerToEstimateFields } from '../utils/estimateCustomer';
+
+describe('customerToEstimateFields (existing-customer picker)', () => {
+  it('fills name, mobile, DOB (date part only) and address; never PAN', () => {
+    const f = customerToEstimateFields({ name: 'Ramesh', phone: '9876500011', dateOfBirth: '1990-04-05T00:00:00.000Z', address: '1 MG Road', ...({ panNumber: 'ABCDE1234F' } as object) });
+    expect(f).toEqual({ name: 'Ramesh', phone: '9876500011', dob: '1990-04-05', address: '1 MG Road', pan: '' });
+  });
+  it('a name-only result (server withheld personal fields) leaves the rest blank rather than undefined', () => {
+    expect(customerToEstimateFields({ name: 'Ramesh' })).toEqual({ name: 'Ramesh', phone: '', dob: '', address: '', pan: '' });
+  });
+  it('does not carry a sales employee - that is chosen separately', () => {
+    expect(Object.keys(customerToEstimateFields({ name: 'x' })).sort()).toEqual(['address', 'dob', 'name', 'pan', 'phone']);
+  });
+});

@@ -4,10 +4,10 @@ import cors from 'cors';
 import helmet from 'helmet';
 import { inputGuard } from './middleware/inputGuard';
 import compression from 'compression';
-import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
 import { env } from './config/env';
 import { logger } from './config/logger';
+import { accessLogMiddleware } from './shared/accessLog';
 import { parseTrustProxy } from './shared/trustProxy';
 import { errorHandler, notFound } from './middleware/error';
 import { rejectClientTenantSelectors } from './middleware/tenant';
@@ -82,11 +82,9 @@ app.use(express.json({ limit: '10mb', verify: (req, _res, buf) => { (req as expr
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use('/api', inputGuard); // ids must be strings, no nested query objects — see middleware/inputGuard.ts
 
-// Logging
-app.use(morgan('dev', {
-  stream: { write: (msg) => logger.http(msg.trim()) },
-  skip: () => env.NODE_ENV === 'test',
-}));
+// Logging. The existing-customer search puts a customer's name / mobile number in the query string, so that
+// path is logged without it (personal data stays out of access logs).
+app.use(accessLogMiddleware((msg) => logger.http(msg.trim()), () => env.NODE_ENV === 'test'));
 
 // Health check
 app.get('/health', (_req, res) => {
