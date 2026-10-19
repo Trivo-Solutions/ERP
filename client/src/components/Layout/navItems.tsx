@@ -177,6 +177,7 @@ export const NAV_ITEMS: NavItem[] = [
     label: 'Management', icon: <People />, permission: 'user:manage',
     children: [
       { label: 'Users', path: '/settings/users', permission: 'user:manage' },
+      { label: 'Sales Employees', path: '/settings/sales-employees', permission: 'user:manage' },
       // J4: role:manage was retired (migration 20260927150000_split_role_manage_permission) and is
       // no longer a valid catalog string — this nav entry was permanently unreachable for every
       // role except a '*' wildcard. role:view mirrors the read-oriented convention used elsewhere.

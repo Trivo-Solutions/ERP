@@ -636,6 +636,11 @@ model CompanyUser {
   employeeId  String?
   department  String?
   phone       String?
+  // Sales-employee management: designation is free text ("Senior Sales Executive"); isSalesEmployee marks the members
+  // the Management > Sales Employees screen owns. It is a screen scope, not a permission - billing still lists every
+  // active member (GET /sales/staff), so existing companies keep working with no backfill.
+  designation     String?
+  isSalesEmployee Boolean @default(false)
   lastLoginAt DateTime?
   // Explicit "sees every branch" flag — deliberately NOT "zero UserBranchAccess rows = unrestricted"
   // (an ambiguous, fail-OPEN default). Default false: a membership with no branch grants and
@@ -719,6 +724,9 @@ model User {
   // Set whenever the password changes. Any access/refresh token issued before this instant (whole seconds) is rejected,
   // so changing a password signs out every other session. NULL = never changed since the account was created.
   passwordChangedAt DateTime?
+  // True while the password is an administrator-issued temporary one. authenticate() lets such a session do nothing
+  // but change its password (/auth/change-password) until it does; changePassword() clears it.
+  mustChangePassword Boolean @default(false)
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 

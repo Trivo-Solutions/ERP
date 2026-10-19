@@ -40,7 +40,7 @@ export function ChangePasswordPage() {
     mutationFn: () => api.post<{ data: { accessToken: string; refreshToken: string } }>('/auth/change-password', { current: form.current, next: form.next }),
     onSuccess: (res) => {
       const t = res.data.data;
-      useAuthStore.setState({ accessToken: t.accessToken, refreshToken: t.refreshToken });
+      useAuthStore.setState((s) => ({ accessToken: t.accessToken, refreshToken: t.refreshToken, user: s.user ? { ...s.user, mustChangePassword: false } : s.user }));
       setForm({ current: '', next: '', confirm: '' }); setTouched(false); setServerError('');
       enqueueSnackbar('Password changed. Other devices have been signed out.', { variant: 'success' });
     },

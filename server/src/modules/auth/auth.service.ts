@@ -65,6 +65,9 @@ function issueTokens(membership: {
   return { accessToken, refreshToken, payload };
 }
 
+/** How long an unused administrator-issued temporary password stays valid. */
+export const TEMP_PASSWORD_TTL_HOURS = 72;
+
 // A bcrypt hash to compare against when no membership matched, so "no such member" and "wrong
 // password" cost the same time — otherwise response timing would reveal which identifiers are
 // members of a company. Computed once, lazily.
@@ -102,13 +105,26 @@ export async function login(companyCode: string, identifier: string, password: s
   // Always spend one bcrypt comparison, whether or not a usable membership was found.
   const valid = await bcrypt.compare(password, usable ? membership!.user.password : await getDummyHash());
   if (!usable || !valid || !company) throw new AppError('Invalid credentials', 401);
+  // An administrator-issued temporary password that was never used is only good for TEMP_PASSWORD_TTL_HOURS, measured from
+  // when it was issued (creation, or the last reissue/reset - both stamp passwordChangedAt). Reached only after the password
+  // itself checked out, so naming the reason reveals nothing to someone who did not already hold it.
+  if (membership!.user.mustChangePassword) {
+    const issuedAt = membership!.user.passwordChangedAt ?? membership!.user.createdAt;
+    if (Date.now() - issuedAt.getTime() > TEMP_PASSWORD_TTL_HOURS * 60 * 60 * 1000) {
+      throw new AppError('This temporary password has expired - ask an administrator to issue a new one', 401);
+    }
+  }
 
   const now = new Date();
   await tenantQuery(company.id, (tx) => tx.companyUser.update({ where: { id: membership!.id }, data: { lastLoginAt: now } }));
   await prisma.user.update({ where: { id: membership!.userId }, data: { lastLogin: now } }); // global identity: a platform table
 
   const branchAccess = await resolveBranchAccess(membership!.id, company.id, membership!.allBranches);
-  const { accessToken, refreshToken } = issueTokens(membership!, branchAccess);
+  // A password issued/changed in the SAME second as this sign-in would otherwise make the brand-new token look older than
+  // the change (tokens at or before passwordChangedAt are dead). Same remedy as changePassword: issue it one second after.
+  const changedSec = membership!.user.passwordChangedAt ? Math.floor(membership!.user.passwordChangedAt.getTime() / 1000) : 0;
+  const nowSec = Math.floor(now.getTime() / 1000);
+  const { accessToken, refreshToken } = issueTokens(membership!, branchAccess, changedSec >= nowSec ? changedSec + 1 : undefined);
 
   return {
     accessToken,
@@ -120,6 +136,7 @@ export async function login(companyCode: string, identifier: string, password: s
       name: membership!.user.name,
       role: membership!.role.name,
       permissions: membership!.role.permissions,
+      mustChangePassword: membership!.user.mustChangePassword,
       companyUserId: membership!.id,
       branchAccess,
     },
@@ -189,7 +206,7 @@ export async function changePassword(actor: { userId: string; companyId: string;
   assertAcceptablePassword(next, { current, email: user.email, name: user.name });
   const hashed = await bcrypt.hash(next, 12);
   const changedAt = new Date(Math.floor(Date.now() / 1000) * 1000);
-  await prisma.user.update({ where: { id: actor.userId }, data: { password: hashed, passwordChangedAt: changedAt } });
+  await prisma.user.update({ where: { id: actor.userId }, data: { password: hashed, passwordChangedAt: changedAt, mustChangePassword: false } });
 
   const membership = await tenantQuery(actor.companyId, (tx) => tx.companyUser.findFirstOrThrow({
     where: { id: actor.companyUserId, companyId: actor.companyId },

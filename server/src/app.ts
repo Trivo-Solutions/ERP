@@ -45,6 +45,7 @@ import { gstRouter } from './modules/gst/gst.router';
 import { gstIntegrationRouter } from './modules/gst/integration/gstIntegration.router';
 import { photographyRouter } from './modules/photography/photography.router';
 import { companyRouter } from './modules/company/company.router';
+import { salesEmployeesRouter } from './modules/salesEmployees/salesEmployees.router';
 import { platformRouter } from './modules/platform/platform.router';
 
 const app = express();
@@ -109,6 +110,7 @@ app.use(`${API}/sales`, salesRouter);
 app.use(`${API}/finance`, financeRouter);
 app.use(`${API}/settings`, settingsRouter);
 app.use(`${API}/company`, companyRouter);
+app.use(`${API}/sales-employees`, salesEmployeesRouter);
 // TRIVO operator API (company provisioning) — separate operator key, no tenant auth; disabled unless configured.
 app.use(`${API}/platform`, platformRouter);
 app.use(`${API}/hardware`, hardwareRouter);

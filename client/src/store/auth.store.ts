@@ -11,6 +11,8 @@ interface User {
   role: string;
   permissions: string[];
   department?: string;
+  /** An administrator-issued temporary password is outstanding: the app shows only the change-password page. */
+  mustChangePassword?: boolean;
   companyUserId?: string;
   branchAccess?: {
     allBranches: boolean;

@@ -116,6 +116,7 @@ import { PhotographySettingsPage } from './pages/Photography/PhotographySettings
 // Settings & Hardware
 import { SettingsPage } from './pages/Settings/SettingsPage';
 import { CompanyUsersPage } from './pages/Settings/CompanyUsersPage';
+import { SalesEmployeesPage } from './pages/Settings/SalesEmployeesPage';
 import { RoleEditorPage } from './pages/Settings/RoleEditorPage';
 import { PaymentConfigPage } from './pages/Settings/PaymentConfigPage';
 import { ChangePasswordPage } from './pages/Account/ChangePasswordPage';
@@ -258,6 +259,7 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
 
       {/* Hardware & Settings */}
       <Route path="hardware" element={<RequirePermission permission="hardware:manage"><HardwarePage /></RequirePermission>} />
+      <Route path="settings/sales-employees" element={<RequirePermission permission="user:manage"><SalesEmployeesPage /></RequirePermission>} />
       <Route path="settings/users" element={<RequirePermission permission="user:manage"><CompanyUsersPage /></RequirePermission>} />
       <Route path="settings/roles" element={<RequirePermission permission="role:view"><RoleEditorPage /></RequirePermission>} />
       <Route path="account/password" element={<ChangePasswordPage />} />

@@ -29,6 +29,10 @@ declare global {
   }
 }
 
+// While a temporary, administrator-issued password is outstanding the session may do exactly two things: read who it is
+// and change the password. Enforced here (not just in the UI) so a direct API call gets nowhere either.
+const ALLOWED_WHILE_PASSWORD_CHANGE_PENDING = new Set(['POST /auth/change-password', 'GET /auth/me']);
+
 export async function authenticate(req: Request, _res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) {
@@ -65,6 +69,13 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
   // Signed out by a password change made after this token was issued.
   if (isIssuedBeforePasswordChange((payload as JwtPayload & { iat?: number }).iat, membership.user.passwordChangedAt)) {
     throw new AppError('Your password was changed — please sign in again', 401);
+  }
+
+  if (membership.user.mustChangePassword) {
+    const route = `${req.method} ${req.originalUrl.split('?')[0].replace(/^\/api\/v\d+/, '').replace(/\/+$/, '')}`;
+    if (!ALLOWED_WHILE_PASSWORD_CHANGE_PENDING.has(route)) {
+      throw new AppError('You must change your temporary password before continuing', 403, true, 'PASSWORD_CHANGE_REQUIRED');
+    }
   }
 
   req.user = {

@@ -1392,12 +1392,20 @@ export function NewSalePage() {
                       <Grid item xs={6} sm={4}>
                         <Controller name="salesPersonId" control={control}
                           render={({ field }) => (
-                            <TextField {...field} select fullWidth label="Sales Executive">
-                              <MenuItem value="">— None —</MenuItem>
-                              {staffList.map((s: any) => (
-                                <MenuItem key={s.id} value={s.id}>{s.name}{s.employeeId ? ` (${s.employeeId})` : ''}</MenuItem>
-                              ))}
-                            </TextField>
+                            // Type-to-filter on name or employee code. Keyboard-first: tabbing in opens the list with the
+                            // first match highlighted, arrows move, Enter picks, Escape / the clear button leaves it blank.
+                            // Only active employees are ever offered (GET /sales/staff); the form value stays the User id.
+                            <Autocomplete
+                              options={staffList}
+                              value={staffList.find((s: any) => s.id === field.value) ?? null}
+                              getOptionLabel={(s: any) => `${s.name}${s.employeeId ? ` (${s.employeeId})` : ''}`}
+                              isOptionEqualToValue={(a: any, b: any) => a.id === b.id}
+                              onChange={(_, s: any) => field.onChange(s?.id ?? '')}
+                              onBlur={field.onBlur}
+                              autoHighlight openOnFocus selectOnFocus handleHomeEndKeys
+                              noOptionsText="No active sales employee found"
+                              renderInput={(params) => <TextField {...params} inputRef={field.ref} fullWidth label="Sales Executive" />}
+                            />
                           )} />
                       </Grid>
                       <Grid item xs={12} sm={4}>

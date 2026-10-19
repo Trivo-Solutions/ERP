@@ -143,10 +143,10 @@ Before any handler runs, `middleware/inputGuard.ts` rejects with `400`: an id-na
 
 | Method | Path | Permission | Description |
 |---|---|---|---|
-| POST | `/login` | public (rate-limited) | `{ companyCode, identifier (email or company username), password }` → access + refresh token. The company code only *selects* the company; the caller must also be an active member of it. Any failure is the same generic 401 |
+| POST | `/login` | public (rate-limited) | `{ companyCode, identifier (email or company username), password }` → access + refresh token. The company code only *selects* the company; the caller must also be an active member of it. Any failure is the same generic 401. The response includes `user.mustChangePassword` (true while an administrator-issued temporary password is outstanding — see Sales employees) |
 | POST | `/refresh` | public | Exchange a refresh token for a new access token |
 | GET | `/me` | authenticated | The caller's membership in their own company (employee id, department, phone, role, last login *here*) |
-| POST | `/change-password` | authenticated | Change own password |
+| POST | `/change-password` | authenticated | Change own password (`{ current, next }`); clears `mustChangePassword` and returns fresh tokens. The only write allowed while a temporary password is outstanding |
 | GET | `/users` | `user:manage` | List members of the caller's own company (never a global user scan) |
 | PATCH | `/users/:companyUserId` | `user:manage` | Edit a member's company-specific details: `employeeId` (unique per company), `department`, `phone`, `username`, `roleId`, `allBranches`, `isActive`. Strict body — unknown fields rejected |
 | POST | `/invitations` | `user:manage` | Invite an email into this company (role, branches, employee details). Returns a **one-time `token`** (no email provider yet — hand it to the invitee); only its hash is stored. Identical response whether or not the email already has a login elsewhere |
@@ -155,6 +155,26 @@ Before any handler runs, `middleware/inputGuard.ts` rejects with `400`: an id-na
 | POST | `/invitations/accept` | **public** (rate-limited) | `{ token, name, password }` — the invitee accepts. New email → login created; existing login → its password must match, then it is linked. Every failure returns the same `400 Invalid or expired invitation` |
 
 > **Removed:** `POST /auth/users` (create a user from an email). It silently attached whichever global user already owned the email to the calling company. A membership now only ever comes from an accepted invitation (or the seed).
+
+### Sales employees — `/sales-employees`
+
+A sales employee is an ordinary company member (`CompanyUser` on a global `User` login) carrying `isSalesEmployee = true` and an optional `designation`. There is no separate employee table, and bills keep pointing at the `User` id (`SalesInvoice.salesPersonId`). Every route requires **`user:manage`** (the permission that already guards Users & Invitations) and is scoped to the caller's own company; a foreign id (member, role or branch of another company) is a `404`. The password hash is never returned by any route.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/` | List sales employees. Query: `search` (name, employee code, mobile, designation or email), `status` = `active` \| `inactive` \| `all` (default `all`). Each row: `{ id (company-user id), userId, employeeId, name, email, phone, designation, isActive, role{id,name,displayName}, allBranches, branches[{id,name}], accountStatus, lastLoginAt, createdAt }`. `accountStatus` is `ACTIVE`, `PASSWORD_CHANGE_PENDING` (a temporary password is outstanding) or `DISABLED` |
+| POST | `/` | **Create an employee and a login directly — no invitation link.** Body (strict): `{ name, email, roleId, employeeId?, phone?, designation?, allBranches?, branchIds? }`. The login, membership and branch grants are created in **one transaction**. Returns `201 { employee, temporaryPassword }` — the 16-character `temporaryPassword` is shown **once**, only its bcrypt hash is stored, it is never logged or audited, and no endpoint can read it back. The account is flagged `mustChangePassword` |
+| PATCH | `/:id` | Edit. Body (strict, all optional): `name`, `employeeId`, `phone`, `designation`, `roleId`, `allBranches`, `branchIds` (replaces the whole list), `isActive`. `name` is refused (`409`) for a person who also belongs to another company (the name is on their one global login). You cannot deactivate yourself |
+| POST | `/:id/temporary-password` | Issue a **new** temporary password (`{ temporaryPassword }`, shown once). The old password stops working, every existing session of that person is signed out, and they must choose their own password at next sign-in. Refused for yourself and for a person who belongs to another company (`409`) |
+| GET | `/members` | Existing active company members who are **not** yet sales employees (picker for the next route): `[{ id, name, email, employeeId, role }]` |
+| POST | `/existing` | Mark an **existing** member as a sales employee. Body `{ companyUserId, designation? }`. Creates no login or membership — it only sets the flag; `409` if already marked |
+| POST | `/:id/unmark` | Remove the designation. The login, role, branches and active state are **not** changed |
+
+Errors: `400` validation (unknown fields, bad email, inactive branch); `401` unauthenticated; `403` missing `user:manage`, **role escalation** (assigning a role holding permissions the caller lacks), acting on a member more privileged than the caller, or **branch scope** (a caller restricted to some branches cannot grant "all branches" or a branch they lack, cannot manage an employee whose reach is outside their own branches, and `GET /` / `GET /members` only return people they could manage or who work at their branches); `404` not found / other company; `409` duplicate employee code (`Employee code is already in use in this company`), or an email that already has a login anywhere (a single generic message that does not reveal where — invite that person from Users instead), or a concurrent create of the same email (exactly one wins, nothing is left half-made).
+
+Audit (`audit_logs`, company-scoped): `CREATE`, `EDIT`, `DEACTIVATE`, `REACTIVATE`, `PASSWORD_RESET`, `SALES_EMPLOYEE_MARK`, `SALES_EMPLOYEE_UNMARK`. A password is never part of an audit row. Billing picks employees from `GET /sales/staff` (active members only); who is attributed to a bill is independent of the cashier and the branch.
+
+**Forced password change.** While `User.mustChangePassword` is true, `authenticate` answers every request **except** `GET /auth/me` and `POST /auth/change-password` with `403 { success: false, error: "You must change your temporary password before continuing", code: "PASSWORD_CHANGE_REQUIRED" }`. `POST /auth/login` returns `user.mustChangePassword` (the client then shows only the change-password screen). A successful `POST /auth/change-password` clears the flag and returns fresh tokens. **Expiry:** an unused temporary password is valid for 72 hours from when it was issued (creation, or the last reissue); after that `POST /auth/login` answers `401 "This temporary password has expired - ask an administrator to issue a new one"` (only once the password itself was correct — a wrong password still gets the generic `Invalid credentials`). Reissue with `POST /sales-employees/:id/temporary-password`. Signing in in the same second a password was issued works (the token is issued one second after the change).
 
 ### Company — `/company`
 

@@ -1,9 +1,11 @@
 import { useEffect } from 'react';
+import { Alert, Box, Button } from '@mui/material';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './store/auth.store';
 import { AppShell } from './components/Layout/AppShell';
 import { LoginPage } from './pages/Login/LoginPage';
 import { AcceptInvitationPage } from './pages/Login/AcceptInvitationPage';
+import { ChangePasswordPage } from './pages/Account/ChangePasswordPage';
 
 // isAuthenticated alone is not a valid session — setAuth() always sets user/company/isAuthenticated
 // together (auth.store.ts), so the only way to see isAuthenticated=true with company/user missing is
@@ -17,7 +19,22 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (isAuthenticated && !hasValidSession) useAuthStore.getState().logout();
   }, [isAuthenticated, hasValidSession]);
-  return hasValidSession ? <>{children}</> : <Navigate to="/login" replace />;
+  const mustChangePassword = useAuthStore((s) => !!s.user?.mustChangePassword);
+  if (!hasValidSession) return <Navigate to="/login" replace />;
+  // The server refuses everything else until the temporary password is replaced (middleware/auth.ts); this is the screen for it.
+  if (mustChangePassword) return <ForcedPasswordChange />;
+  return <>{children}</>;
+}
+
+function ForcedPasswordChange() {
+  const logout = useAuthStore((s) => s.logout);
+  return (
+    <Box sx={{ maxWidth: 520, mx: 'auto', p: 3 }}>
+      <Alert severity="warning" sx={{ mb: 2 }}>You signed in with a temporary password. Choose your own password to continue.</Alert>
+      <ChangePasswordPage />
+      <Button sx={{ mt: 2 }} onClick={logout}>Sign out</Button>
+    </Box>
+  );
 }
 
 export default function App() {
