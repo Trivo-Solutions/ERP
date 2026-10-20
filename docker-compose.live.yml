@@ -100,6 +100,11 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8180:80"
+    logging:                 # bounded: nginx writes its access log to stdout, which json-file keeps without limit by default
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     depends_on:
       - server
 
