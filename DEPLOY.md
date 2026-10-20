@@ -252,7 +252,12 @@ nginx cutover; this section is the **routine release**. Every command below was 
 - Build the file set from the **remotely verified** commit: `git archive <commit>` (or `git diff --name-status <previous-commit> <commit>`), and copy **only** the files that
   commit changed. Never copy `.env`, `server/.env.production`, or files that differ on the host on purpose (e.g. `client/nginx.conf`, `docker-compose.live.yml`) unless
   the release itself reviewed them. Keep a rollback copy first: `tar czf /root/release-rollback/src-pre-<commit>.tgz <the replaced files>`.
-- Verify: after the copy, hash the copied files against the commit (`sha256`, CR stripped) — all must match; `.env` and `server/.env.production` untouched.
+- Verify: after the copy, hash the copied files against the commit — all must be **byte-identical**; `.env` and `server/.env.production` untouched.
+- **Pitfall — `git archive` on a Windows workstation applies `core.autocrlf` and writes CRLF.** Extracted that way, every file differs from the commit (and a `.sh` fails with
+  `set: pipefail: invalid option`). Always archive with line-ending conversion off:
+  `git -c core.autocrlf=false -c core.eol=lf archive <commit> <paths> | ssh trivo-e2e 'tar -x -C /opt/trivo-prod -f -'`, then compare
+  `git show <commit>:<path> | sha256sum` against `sha256sum <path>` on the host for every copied file (raw, no CR stripping). If a first extraction was CRLF, re-extract before migrating.
+  (Some older host files still carry CRLF from earlier releases; they are semantically identical — compare those with CRs stripped.)
 
 **4. Migrate** — the compose `migrate` service (profile `deploy`) builds from the host tree and runs, in order, `prisma migrate deploy` (applies pending migrations
 as `trivo_owner`) and then `prisma db execute --file prisma/db-secure.sql` (re-applies grants, FORCE RLS and the append-only audit table, which a new table needs before the runtime role can use it):
@@ -282,6 +287,48 @@ migration or build failure; unhealthy container. On a stop: change nothing furth
 **Rollback boundary.** Application rollback = restore the saved source files, retag the `pre-<commit>` images to `latest`, `up -d` **without** `--build`. Additive migrations (new columns/tables) stay — old code ignores them.
 Do **not** restore a backup over production as a routine application rollback, and never improvise a destructive database rollback; data restoration is an incident decision for the owner, using the
 verified backup into a scratch database first. `ops/live/rollback.sh` only switches nginx to staging — it is not an application rollback.
+
+### 9d. Production release record — Sales Employee management, commit 7d723a1 (2026-10-20)
+
+**Status: deployed; see the open items.** Live stack `/opt/trivo-prod`, project `trivoprod`, file `docker-compose.live.yml`, host `trivo-e2e` (`e2e-147-77`).
+
+- **Released:** `a009ca3` (Sales Employee management: direct employee creation with a one-time temporary password, 72 h expiry, forced first-login change, branch-scoped
+  management, existing-member mark/unmark, searchable active-employee billing selector) and `7d723a1` (this runbook + the `restore-test.sh` fix), over `c3d4b10`.
+  20 files copied from `git archive` of `7d723a1` (13 modified, 7 added), byte-identical to the commit. Branch `feature/sales-employee-management` on the `personal` remote.
+  `client/nginx.conf` and `docker-compose.live.yml` (access-log redaction, bounded client logs) were **not** part of the release and were left untouched.
+- **Live logging configuration (recorded after the release; preserved in git by commit `b68ec71`):** the production host's `client/nginx.conf` uses the `trivo_redacted`
+  access-log format (customer-search query strings on `/api/v1/estimation/customers` and `/api/v1/sales/estimates`, and `token=` parameters, are logged as `?[redacted]`), and the production
+  Compose file applies `json-file` rotation (`max-size: 10m`, `max-file: 5`) to the `client` service. Both were live on the host but **uncommitted in the repository** until that commit, so a
+  deployment built from a clean checkout of an earlier commit would have lost them. The reviewed Compose file sets **no** such limits on the `server`, `postgres` or `redis` services, and this
+  record does not claim that all production logging is bounded or that all sensitive logging is redacted: nginx's error log is unchanged, and the API's own access-log redaction covers only
+  `/estimation/customers`.
+- **Backup (taken immediately before):** `/var/backups/trivo-prod/trivo_20261020T020840Z.dump` (07:38 IST), 4,297,803 bytes, sha256
+  `3a7f743b3014d9b7d0435026d720ccbd501f95fdda2fb9d316e620def043b824` (`.sha256` verified OK, `pg_restore -l` readable), plus `.dump.enc`. No backup was deleted.
+- **Restore test:** corrected `ops/live/restore-test.sh` (source role `trivo_backup`) → exit 0: row counts identical in all 140 tables, RLS enabled + forced, 134 tenant_isolation
+  policies, 166 composite FKs, journals balance, no cross-company references, runtime role fail-closed and sees only its own company. Scratch database dropped.
+- **Migration:** `20261019100000_sales_employee_management` (additive: `users.mustChangePassword`, `company_users.designation`, `company_users.isSalesEmployee`; no row touched) applied by the
+  `migrate` service (`migrate deploy`, then `db-secure.sql`); `migrate status` → 114 migrations, "Database schema is up to date".
+- **Images now live:** server `sha256:0eb41094035897a2ec65a19ef1c06b2696d853fd09e3b52acaa5a620f3740e0b`, client `sha256:6c6a0789fe2b3134557227af607d32001a246a37060ed198bc8bf4bdb5f8e0a0`,
+  migrate `566c97a86eb1` (abbreviated image ID only; the full digest was not recorded in the local release evidence). Containers started 2026-10-20 02:22:30 UTC; 0 restarts; server healthy; `/health` 200 on 3101 and 8180; `/api/v1/platform` 404.
+- **Source verification (two separate checks):** (1) the 20 release files copied from `git archive` of `7d723a1` were hash-verified byte-identical to the commit after the line-ending
+  correction described in §9c; (2) a separate comparison of the host's `server/src`, `server/prisma` and `client/src` against the commit was made with CRs normalised (not byte-level), and it
+  reported differences only in test files — 4 test files that are not shipped to the host, plus one further test file. The individual files in those exceptions are not itemised in this record.
+  Check (2) is not a byte-identical guarantee for the whole host tree.
+- **Production smoke checks (limited, unauthenticated):** running images contain the compiled `salesEmployees` module, the schema columns and the client bundle with the route;
+  unauthenticated `/sales-employees*` and `/sales/staff` → 401; no server errors in the log.
+- **Automated acceptance (throwaway database, not production):** `accept.mjs` against a throwaway database with the new images, 48/48: manager vs cashier vs unauthenticated access, creation, one-time temporary password
+  never re-readable, duplicate email/code and concurrent-create race, forced password change (403 `PASSWORD_CHANGE_REQUIRED` everywhere except `/auth/me`), search/filter, edit,
+  deactivate/reactivate, reissue, mark/unmark, billing selector, role-escalation and cross-company refusals. The 72-hour expiry is covered by the automated test
+  `http.salesEmployees.test.ts` ("an unused temporary password expires after 72 hours"), not run live.
+- **Open item — `ops/live/run-verify.sh` 72/73:** the check "search finds silver tags by name and by number" fails. It fails identically on the previous images (`pre-7d723a1`), so the failure
+  reproduces on the previous images and is not shown to be introduced by this release. **The cause is not yet determined** (it could be the test, the harness or the search endpoint) and has not been
+  investigated further here; it remains open for a separate follow-up.
+- **Not verified on production:** authenticated browser/API flows with a real production login (no authorized test account); real billing, returns/credit notes, Epson printing and fixed-price costing
+  were covered by the automated suites and the throwaway-database estimate→bill checks only.
+- **Rollback material (kept):** images `trivoprod-{server,client,migrate}:pre-7d723a1` (server `sha256:a1ca1c73a99fddc1ccb5914dd03f781b66e9db91f0a4a846d24bbeecbd5e9988`,
+  client `sha256:73a3e3d1224ef1b53521020412932a8ce14902b2a2e141bc0d2d1749c571bb9e`), source archive `/root/release-rollback/src-pre-7d723a1.tgz` (the 13 replaced files, sha256
+  `c7c5cbc35ef4da39c2c37d804d9601e1f46a39e06ff1c318e87bcd4708ed8d1e`). Roll back per §9c. The new columns can stay (old code ignores them).
+- **Left alone on purpose:** the empty `trivoprod_postgres_data` volume created by an earlier mistaken `docker-compose.prod.yml` run (never mounted; remove only on explicit decision).
 
 ## 10. Suspending / offboarding a company
 
