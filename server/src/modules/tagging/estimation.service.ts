@@ -1,6 +1,6 @@
 import { prisma } from '../../config/database';
 import { AppError } from '../../middleware/error';
-import { nextDocumentNumber } from '../../shared/numberSequence';
+import { nextDocumentNumber, nextSimpleCode } from '../../shared/numberSequence';
 import {TenantContext, tenantTransaction, tenantQuery } from '../../shared/tenantContext';
 import { Prisma } from '@prisma/client';
 import { normalizePan } from '../../shared/compliance';
@@ -261,6 +261,64 @@ export async function searchEstimateCustomers(ctx: TenantContext, q?: string) {
   });
 }
 
+type HandOffCustomer = {
+  name?: string | null; phone?: string | null; dob?: Date | null; address?: string | null; pan?: string | null;
+};
+type HandOffCustomerResult = { id: string; created: boolean; filled: string[] } | null;
+
+/** At the billing hand-off the customer becomes a real Client right away (so the next estimate's picker finds them),
+ *  not only when the bill is raised. Matched on the mobile's last 10 digits - stored phones may carry spaces or +91 -
+ *  within this company; an existing customer is never overwritten, only its blanks (PAN, address, DOB) are filled.
+ *  A PAN is optional here: with none, the customer is still created and billing asks for it if the bill needs one
+ *  (Rule 114B), exactly as before. Runs inside the caller's transaction. */
+async function ensureHandOffCustomer(
+  tx: Prisma.TransactionClient, ctx: TenantContext, c: HandOffCustomer,
+): Promise<HandOffCustomerResult> {
+  const name = c.name?.trim();
+  const phone = c.phone ? normalizeMobileDigits(c.phone) : '';
+  if (!name || phone.length !== 10) return null;
+
+  // Two hand-offs for the same new mobile at once must not both create it (the table has no unique on phone).
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`${ctx.companyId}:handoff-customer:${phone}`}))`;
+  const found = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "clients"
+    WHERE "companyId" = ${ctx.companyId}
+      AND right(regexp_replace(COALESCE("phone", ''), '[^0-9]', '', 'g'), 10) = ${phone}
+    ORDER BY "isActive" DESC, "createdAt" ASC
+    LIMIT 1`;
+
+  if (found.length) {
+    const existing = await tx.client.findUniqueOrThrow({
+      where: { id: found[0].id }, select: { id: true, panNumber: true, address: true, dateOfBirth: true },
+    });
+    const fill: { panNumber?: string; address?: string; dateOfBirth?: Date } = {};
+    if (!existing.panNumber && c.pan) fill.panNumber = c.pan;
+    if (!existing.address && c.address) fill.address = c.address;
+    if (!existing.dateOfBirth && c.dob) fill.dateOfBirth = c.dob;
+    const filled = Object.keys(fill);
+    if (filled.length) await tx.client.update({ where: { id: existing.id }, data: fill });
+    return { id: existing.id, created: false, filled };
+  }
+
+  const clientCode = await nextSimpleCode(ctx.companyId, 'CLIENT', 'CL', 5, tx);
+  const created = await tx.client.create({
+    data: {
+      companyId: ctx.companyId, clientCode, name, type: 'RETAIL', phone,
+      panNumber: c.pan || undefined, address: c.address || undefined, dateOfBirth: c.dob || undefined,
+    },
+    select: { id: true },
+  });
+  return { id: created.id, created: true, filled: [] };
+}
+
+async function auditHandOffCustomer(ctx: TenantContext, userId: string, r: HandOffCustomerResult, estimateNumber: string) {
+  if (!r || (!r.created && r.filled.length === 0)) return;
+  await createAuditEntry(
+    'clients', r.id, userId, r.created ? 'CREATE' : 'EDIT',
+    undefined, { source: 'ESTIMATE_HAND_OFF', estimate: estimateNumber, ...(r.created ? {} : { filledBlanks: r.filled }) }, ctx.companyId,
+  );
+}
+
 /** The hand-off's required fields, checked against what the estimate will hold AFTER this send. */
 async function assertReadyForBilling(
   ctx: TenantContext,
@@ -388,10 +446,14 @@ export async function createTagEstimate(tagId: string, input: CreateTagEstimateI
     });
 
     const approval = gate ? await createEstimateApproval(tx, ctx, { estimateId: estimate.id, tagId, ...gate, reason: approvalReason!, userId }) : null;
+    const handOff = input.sendToBilling
+      ? await ensureHandOffCustomer(tx, ctx, { name: customer.customerName, phone: customer.customerPhone, dob: customer.customerDob, address: customer.customerAddress, pan: customer.customerPan })
+      : null;
     const saved = await tx.tagEstimate.findUniqueOrThrow({ where: { id: estimate.id }, select: ESTIMATE_SALE_SELECT });
-    return { saved, approval };
-  }).then(async ({ saved, approval }) => {
+    return { saved, approval, handOff };
+  }).then(async ({ saved, approval, handOff }) => {
     if (approval && gate) await auditEstimateApprovalRequested(ctx, userId, approval.id, gate.below, tagId, saved.id);
+    await auditHandOffCustomer(ctx, userId, handOff, saved.estimateNumber);
     return saved;
   });
 }
@@ -415,7 +477,8 @@ export async function sendEstimateToBilling(
     where: { id: estimateId },
     select: {
       id: true, companyId: true, status: true, estimateNumber: true, tag: { select: { status: true, tagNumber: true } },
-      customerName: true, customerPhone: true, salesPersonId: true, tagId: true, saleMcRate: true, saleVaPercent: true, createdAt: true,
+      customerName: true, customerPhone: true, customerDob: true, customerAddress: true, customerPan: true,
+      salesPersonId: true, tagId: true, saleMcRate: true, saleVaPercent: true, createdAt: true,
       items: { select: { materialId: true, saleRate: true, code: true } },
     },
   }));
@@ -443,16 +506,23 @@ export async function sendEstimateToBilling(
   });
   const approvalReason = gate ? requireApprovalReason(input.approvalReason) : null;
 
-  const { saved, approval } = await tenantTransaction(ctx.companyId, async (tx) => {
+  const { saved, approval, handOff } = await tenantTransaction(ctx.companyId, async (tx) => {
     const saved = await tx.tagEstimate.update({
       where: { id: estimateId },
       data: gate ? { ...customer, ...merged, status: 'AWAITING_APPROVAL' } : { ...customer, ...merged, status: 'SENT', sentToBillingAt: new Date(), sentById: userId },
       select: ESTIMATE_SALE_SELECT,
     });
     const approval = gate ? await createEstimateApproval(tx, ctx, { estimateId, tagId: estimate.tagId, ...gate, reason: approvalReason!, userId }) : null;
-    return { saved, approval };
+    const handOff = await ensureHandOffCustomer(tx, ctx, {
+      name: merged.customerName, phone: merged.customerPhone,
+      dob: customer.customerDob !== undefined ? customer.customerDob : estimate.customerDob,
+      address: customer.customerAddress !== undefined ? customer.customerAddress : estimate.customerAddress,
+      pan: customer.customerPan !== undefined ? customer.customerPan : estimate.customerPan,
+    });
+    return { saved, approval, handOff };
   });
   if (approval && gate) await auditEstimateApprovalRequested(ctx, userId, approval.id, gate.below, estimate.tagId, estimateId);
+  await auditHandOffCustomer(ctx, userId, handOff, estimate.estimateNumber);
   return saved;
 }
 
