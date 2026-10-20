@@ -199,6 +199,90 @@ with `server/.env`). Under Compose: `docker compose -f docker-compose.prod.yml -
   sha256 `631f9e7ae04646dacfa3ad74b0c9691504da05cd633db81b835fbd3792c0c182` (`.dump.sha256` verified OK) and an AES-256
   copy `trivo_20261012T195844Z.dump.enc` alongside.
 
+### 9c. Live production release procedure (host `trivo-e2e`) — verified syntax
+
+This is the procedure the 9b release followed, written down so it is not re-derived. `ops/live/GO_LIVE.md` covers first go-live and
+nginx cutover; this section is the **routine release**. Every command below was checked against `docker-compose.live.yml` and `ops/live/*`.
+
+**Identity (verify, never assume)**
+
+| | value |
+|---|---|
+| SSH alias / host | `trivo-e2e` → `151.185.58.77` (`ssh -G trivo-e2e` shows the resolved hostname; hostname on the box is `e2e-147-77`) |
+| Directory | `/opt/trivo-prod` (no git checkout — releases are file copies) |
+| Compose project | **`trivoprod`** (`name:` in the live file) |
+| Compose file | **`docker-compose.live.yml`** — the only file that defines the live stack |
+| Services | `trivoprod_server`, `trivoprod_client`, `trivoprod_postgres`, `trivoprod_redis` |
+| Live DB volume | `trivoprod_pg_data` (mounted by `trivoprod_postgres`), database `trivo_prod` |
+| Never touch | staging project `trivo` (`/opt/trivo`, `trivo_*` containers); host `e2e-server` / `151.185.58.59` |
+
+> **WARNING — `docker-compose.prod.yml` is a different stack** (generic template: container names `trivo_postgres`/`trivo_server`/…, volume
+> `postgres_data`). Never substitute it for the live file. Running it with `-p trivoprod` still resolves `postgres` to the live database
+> container on `trivoprod_default` (so a read-only command can *appear* to work) but it silently **creates new, empty, unrelated volumes**
+> (`trivoprod_postgres_data`); without `-p` it creates a `trivo-prod_*` network/volumes. Always type both flags:
+> `DC="docker compose -p trivoprod -f docker-compose.live.yml"`.
+
+**1. Preflight — read-only, before any change.** Stop if anything disagrees.
+- Local: on the reviewed branch, `git status` understood, release commit **exists on the remote** (`git ls-remote <remote> <branch>` equals `git rev-parse HEAD`).
+- Host/stack: `ssh -G trivo-e2e | grep -i '^hostname'`; `docker ps --format '{{.Names}} {{.Image}} {{.Status}}'` (all four `trivoprod_*` up; server `healthy`).
+- Mounts: `docker inspect trivoprod_postgres --format '{{range .Mounts}}{{.Name}} -> {{.Destination}}{{println}}{{end}}'` must show `trivoprod_pg_data`;
+  `docker inspect trivoprod_postgres --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}'` must end in `docker-compose.live.yml`.
+  Do not conclude a volume is unused or stray from its *name* — `docker volume ls` has several similarly named volumes; ask Docker who mounts it
+  (`docker ps -a --filter volume=<name>`).
+- Current release: hash the files the release will replace on the host and on the commit the host is believed to run (`git show <prev>:<path> | tr -d '\r' | sha256sum` vs `tr -d '\r' < path | sha256sum` on the host). They must be identical; a mismatch means the host has changes you have not reviewed.
+- Database target and migration state (read-only, as the superuser inside the postgres container; never print the password):
+  `set -a; . ./.env; set +a; docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" trivoprod_postgres psql -U postgres -d trivo_prod -Atc 'select count(*), max(migration_name) from _prisma_migrations'`
+  and compare with the release's `server/prisma/migrations/` directory. The `trivoprod-migrate` image is built from the host tree, so `migrate status` only
+  sees a new migration **after** the release files are copied and the image is rebuilt (step 3) — run it again there, before applying.
+- Health: `/health` through the loopback web port (8180) or `docker inspect` health of the server.
+- Local release gates green (strict tenant audit, full suite, `npm run test:rls`, both builds) — see CLAUDE.md §11–12.
+
+**2. Backup — before every migration, no exceptions.**
+- Take it with the same steps as `ops/live/backup-prod.sh` (read-only `trivo_backup` dump via `server/scripts/backup.sh`, then the AES-256 `.enc` copy).
+  **Do not run the script's final `find … -mtime +14 -delete` as part of a release** — the release procedure never deletes or rotates backups; the nightly timer owns retention.
+- Verify: non-zero size, `sha256sum -c <dump>.sha256` → `OK`, and `pg_restore -l <dump>` (readable; ~140 tables of data, ~134 policies). Record path, UTC timestamp, size, SHA-256.
+- Verify it **restores**: `ops/live/restore-test.sh <dump>` restores into a **new scratch database** (never over `trivo_prod`), re-applies `db-secure.sql`, compares row counts
+  with the live database and checks RLS, policies, composite FKs, journal balance and tenant isolation, then drops the scratch database. Exit 0 is required.
+  It needs the host's `.env`; from a workstation it can be streamed without copying: `ssh trivo-e2e 'bash -s -- <dump>' < <(tr -d '\r' < ops/live/restore-test.sh)`.
+  **The source comparison must use `trivo_backup` / `$BACKUP_PW`** (the read-only role `server/scripts/restore.sh` documents). `trivo_platform` cannot be used:
+  `db-secure.sql` REVOKEs it from `_prisma_migrations`, so the comparison dies with `permission denied for table _prisma_migrations`. Fix the wrapper, never the grants.
+- Never print passwords or copy production secrets into local files.
+
+**3. Release the files.** The host builds its images from its own tree, so the reviewed files must be on the host first (the running containers are unaffected until step 5).
+- Build the file set from the **remotely verified** commit: `git archive <commit>` (or `git diff --name-status <previous-commit> <commit>`), and copy **only** the files that
+  commit changed. Never copy `.env`, `server/.env.production`, or files that differ on the host on purpose (e.g. `client/nginx.conf`, `docker-compose.live.yml`) unless
+  the release itself reviewed them. Keep a rollback copy first: `tar czf /root/release-rollback/src-pre-<commit>.tgz <the replaced files>`.
+- Verify: after the copy, hash the copied files against the commit (`sha256`, CR stripped) — all must match; `.env` and `server/.env.production` untouched.
+
+**4. Migrate** — the compose `migrate` service (profile `deploy`) builds from the host tree and runs, in order, `prisma migrate deploy` (applies pending migrations
+as `trivo_owner`) and then `prisma db execute --file prisma/db-secure.sql` (re-applies grants, FORCE RLS and the append-only audit table, which a new table needs before the runtime role can use it):
+```
+cd /opt/trivo-prod; DC="docker compose -p trivoprod -f docker-compose.live.yml"
+$DC --profile deploy build migrate
+$DC --profile deploy run --rm --no-deps migrate npx prisma migrate status     # read-only: exactly the expected migration(s) pending
+$DC --profile deploy run --rm migrate                                         # applies them, then db-secure.sql
+$DC --profile deploy run --rm --no-deps migrate npx prisma migrate status     # "Database schema is up to date"
+```
+Never `migrate reset`, `migrate dev`, `db push`, a seed, or ad-hoc SQL writes against production. A migration that touches existing tenant rows must lift FORCE RLS around its statement (CLAUDE.md §7, Phase I).
+
+**5. Deploy.** Keep rollback images, then rebuild only the application services:
+```
+docker tag trivoprod-server:latest trivoprod-server:pre-<commit> ; docker tag trivoprod-client:latest trivoprod-client:pre-<commit>
+$DC up -d --build server client
+```
+Do not pass `postgres`/`redis`; do not recreate them.
+
+**6. Verify.** `docker ps` (server `healthy`); image IDs (`docker images | grep trivoprod`) differ from the `pre-*` tags; `docker logs --since 10m trivoprod_server` has no errors and no passwords/tokens;
+`prisma migrate status` is up to date; `ops/live/run-verify.sh` (throwaway database, the new images) passes; loopback `/health`; the public SPA and `/api/v1/platform` (must be 404); then the release's feature acceptance
+using a test account — never create real customer bills or move stock to prove a deploy.
+
+**Stop conditions.** Any identity mismatch; release commit not on the remote; host files differ from the believed previous release; backup or restore verification not clean; unexpected pending migrations;
+migration or build failure; unhealthy container. On a stop: change nothing further, keep the logs, report.
+
+**Rollback boundary.** Application rollback = restore the saved source files, retag the `pre-<commit>` images to `latest`, `up -d` **without** `--build`. Additive migrations (new columns/tables) stay — old code ignores them.
+Do **not** restore a backup over production as a routine application rollback, and never improvise a destructive database rollback; data restoration is an incident decision for the owner, using the
+verified backup into a scratch database first. `ops/live/rollback.sh` only switches nginx to staging — it is not an application rollback.
+
 ## 10. Suspending / offboarding a company
 
 `PATCH /api/v1/platform/companies/:id/status {"isActive": false}` (on loopback). Logins fail, existing tokens stop working
