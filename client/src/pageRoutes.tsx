@@ -152,7 +152,7 @@ export function PageRoutes({ location }: { location: { pathname: string; search:
       <Route path="procurement/suppliers" element={<RequirePermission permission="po:view"><Suppliers /></RequirePermission>} />
 
       {/* Inventory */}
-      <Route path="inventory/metals" element={<MetalVault />} />
+      <Route path="inventory/metals" element={<RequirePermission permission="stock:view"><MetalVault /></RequirePermission>} />
       <Route path="inventory/stones" element={<DiamondAssortment />} />
       <Route path="inventory/consumables" element={<Consumables />} />
 

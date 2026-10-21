@@ -204,6 +204,24 @@ with `server/.env`). Under Compose: `docker compose -f docker-compose.prod.yml -
 This is the procedure the 9b release followed, written down so it is not re-derived. `ops/live/GO_LIVE.md` covers first go-live and
 nginx cutover; this section is the **routine release**. Every command below was checked against `docker-compose.live.yml` and `ops/live/*`.
 
+**Release policy (source control) — read before preparing any release**
+
+- **No new branches for routine release preparation.** Use the existing, approved branch and the repository history. Record the branch, `HEAD`, upstream and
+  `git status` before touching anything.
+- **Never switch, merge, rebase, reset, stash, clean or overwrite existing work** without first inspecting the working tree (staged, unstaged, untracked and
+  ignored) and writing down a safe plan. If safe integration is impossible on the current branch, stop and report the conflict — do not force it.
+- **Production is a source of functionality to reconcile with Git, not a development workspace.** The running release can contain code that is on no
+  branch you would assume (e.g. a feature branch deployed ahead of `main`). Establish what production actually runs — hash the files the release will
+  replace against candidate commits (see Preflight, "Current release") — and use the branch that matches it as the base.
+- **Never replace production-specific functionality by copying files from `main`** (or any other ref) over the deployed files. Apply the intended change
+  as a minimal, reviewed diff onto the version production actually runs, and check the result still contains every feature the host version has.
+- **If production and Git differ, resolve and review the difference before release.** Stop if it cannot be reconciled safely.
+- **Prepare and test locally first** (focused regression tests for the change, the neighbouring features it touches, tenant/RLS checks, `tsc`, production
+  builds), build identifiable release artifacts, verify rollback evidence, and **obtain explicit approval before any deployment.** Rollback images and source
+  copies existing on the host are not proof they are recoverable — verify them.
+- **Document honestly.** A release record states only what was actually done: do not write that a release was approved, built, deployed or verified unless
+  it was, and say which behaviours still need manual / E2E verification.
+
 **Identity (verify, never assume)**
 
 | | value |

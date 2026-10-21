@@ -75,12 +75,32 @@ async function moveLot(tx: Prisma.TransactionClient, companyId: string, lot: Lot
   return insertMetalMovement(tx, companyId, lot, delta, before, after, meta);
 }
 
+export type VaultMetal = 'GOLD' | 'SILVER';
+
+// THE rule for which Metal Vault lots count as a given metal - used by the sale's FIFO draw (consumeVaultMetal) AND by the
+// stock listing the New Sale dialog shows, so what the screen offers is exactly what the server will accept.
+//   GOLD   = lots stored as GOLD, plus legacy lots whose metalType is NULL (written before the column existed; NULL is gold by
+//            definition - see the MetalStock.metalType schema note and migration 20261008100000).
+//   SILVER = lots stored as SILVER only. A NULL lot is NEVER silver, whatever its free-text karat label says.
+export const vaultMetalWhere = (metal: VaultMetal) =>
+  metal === 'GOLD' ? { OR: [{ metalType: null }, { metalType: 'GOLD' }] } : { metalType: 'SILVER' };
+
+// A request-supplied metal: omitted/null = not stated (undefined); otherwise the text GOLD or SILVER in any letter case
+// (trimmed and upper-cased), else a 400. Never coerced, and never handed to a string method before it is known to be a string.
+export function parseVaultMetal(raw: unknown, field = 'metalType'): VaultMetal | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'string') throw new AppError(`${field} must be the text GOLD or SILVER`, 400);
+  const metal = raw.trim().toUpperCase();
+  if (metal !== 'GOLD' && metal !== 'SILVER') throw new AppError(`${field} must be GOLD or SILVER`, 400);
+  return metal;
+}
+
 // A material (loose-metal) sale: takes `weight` grams of `karat` out of the vault, oldest lot first (FIFO), spilling over
 // into the next lot when one is not enough. Rejects — before anything is written — when the vault does not hold enough.
 // Returns the cost of the metal taken (weight x each lot's own avgCostPerGram) for the COGS / Inventory entry.
 export async function consumeVaultMetal(
   tx: Prisma.TransactionClient, companyId: string,
-  args: { karat: string; weight: number; metalType?: 'GOLD' | 'SILVER'; meta: Omit<MovementMeta, 'movementType'> },
+  args: { karat: string; weight: number; metalType?: VaultMetal; meta: Omit<MovementMeta, 'movementType'> },
 ): Promise<{ cost: number }> {
   const weight = r4(args.weight);
   if (!(weight > 0)) throw new AppError('Material sale weight must be more than zero', 400);
@@ -88,7 +108,7 @@ export async function consumeVaultMetal(
     where: {
       companyId, karat: args.karat, isActive: true, availableWt: { gt: 0 },
       // Gold and Silver lots never mix: a lot is only drawn as the metal it is. NULL (pre-column lots) is GOLD.
-      ...((args.metalType ?? 'GOLD') === 'GOLD' ? { OR: [{ metalType: null }, { metalType: 'GOLD' }] } : { metalType: args.metalType }),
+      ...vaultMetalWhere(args.metalType ?? 'GOLD'),
     },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });

@@ -27,7 +27,7 @@ import { createCreditNoteForReturn } from './creditNote.service';
 import { resolveMetalRate, resolveLiveMetalRate, GOLD_BASE_KARAT, SILVER_BASE_KARAT, BENCHMARK_PURITY } from '../../shared/metalRate';
 import { isValidKarat } from '../../shared/karatMaster';
 import { addMetalStock } from '../inventory/inventory.service';
-import { METAL_MOVEMENT, MetalMovementType, consumeVaultMetal, restoreVaultMetal, insertMetalMovement } from '../../shared/metalMovement';
+import { METAL_MOVEMENT, MetalMovementType, consumeVaultMetal, restoreVaultMetal, insertMetalMovement, parseVaultMetal } from '../../shared/metalMovement';
 import { postAutoJournalEntry } from '../finance/finance.service';
 import { lockAdvances, loadSpendableAdvance, recordAdvanceApplication, releaseAdvanceApplication } from './customerAdvanceApply';
 import { LEDGER_ACCOUNT, cashOrBankAccount } from '../../shared/ledgerAccounts';
@@ -56,6 +56,15 @@ type PaymentInput = PaymentLegMetaInput & {
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const normalizeMode = (mode: string) => mode.trim().toUpperCase();
+// `materialMetal` is request-only (checked against the karat before the vault is touched); it is not an InvoiceItem column.
+const toItemRow = <T extends { materialMetal?: unknown }>({ materialMetal: _m, ...row }: T) => row;
+
+// The metal a biller picked for a material line. Optional: omitted (or null) = not stated, which older clients rely on - the
+// metal then comes from the karat alone. When present it must be the text GOLD or SILVER; letter case and surrounding spaces
+// are normalized (same convention as createMaterialPurchase's metalType), anything else is a 400 - never coerced, and never
+// handed to a string method before it is known to be a string (shared parser: shared/metalMovement.ts parseVaultMetal).
+// Parsed in priceInvoice, i.e. before any stock is touched.
+const parseMaterialMetal = (raw: unknown) => parseVaultMetal(raw, 'materialMetal');
 
 // OLD_GOLD / STORE_CREDIT only exist inside createInvoice (they settle a bill from credit); a standalone
 // "record a payment" has no such thing to draw on, so it must not accept them.
@@ -277,6 +286,9 @@ type InvoiceItemInput = { productCode: string; description: string; huid?: strin
   tagId?: string; /* optional link to real inventory — see JewelryTag */
   materialSale?: boolean; /* a loose-metal line sold out of the Metal Vault (no tagId): `karat` + netGoldWeight x quantity grams
     leave the vault with the bill (rejected if the vault is short) and come back on a return/void. */
+  materialMetal?: string | null; /* material lines: the metal the biller picked - GOLD or SILVER, any letter case (normalized), else 400.
+    Optional (omitted = gold-compatible, the karat decides); when given it must match the karat's own metal in the Karat master.
+    Request-only: never stored on the InvoiceItem. */
   materialBreakdown?: unknown; /* this bill's own material rows + MC/VA rates (shared/materialBreakdown.ts). When present
     the server recomputes the line as a flat price from it (rateType/goldRate/makingCharge/stoneValue from the client are
     ignored) and stores it on the InvoiceItem. Never touches the JewelryTag. */
@@ -439,8 +451,22 @@ export async function createInvoice(data: {
       if (!it.materialSale) continue;
       const lineId = randomUUID();
       materialLineIds.set(idx, lineId);
+      // Gold and silver lots never mix in the vault: take the metal from the karat's own master row, not a gold default.
+      const km = it.karat
+        ? await tx.karatMaster.findFirst({ where: { companyId: ctx.companyId, code: it.karat, isActive: true }, select: { metalType: true } })
+        : null;
+      if (!km) throw new AppError(`Material line: karat "${it.karat ?? ''}" is not an active karat in the Karat master`, 400);
+      // The vault holds gold and silver only: a karat of any other metal (e.g. PLATINUM) is refused, never drawn as gold.
+      if (km.metalType !== 'GOLD' && km.metalType !== 'SILVER') {
+        throw new AppError(`Material line: ${it.karat} is a ${String(km.metalType).toLowerCase()} karat - only gold and silver can be sold from the Metal Vault`, 400);
+      }
+      const lineMetal: 'GOLD' | 'SILVER' = km.metalType;
+      if (it.materialMetal && it.materialMetal !== lineMetal) {
+        throw new AppError(`Material line: ${it.karat} is a ${lineMetal.toLowerCase()} karat, but the line was entered as ${it.materialMetal.toLowerCase()}`, 400);
+      }
       const { cost } = await consumeVaultMetal(tx, ctx.companyId, {
         karat: it.karat!, weight: it.netGoldWeight * it.quantity,
+        metalType: lineMetal,
         meta: { referenceType: 'InvoiceItem', referenceId: lineId, userId, branchId: data.branchId },
       });
       cogsAmount += cost;
@@ -481,7 +507,7 @@ export async function createInvoice(data: {
     // G1 Part D: each line's own slice of tax/discount, snapshotted alongside its already-snapshotted
     // taxRate. Zero for a non-INR sale (matches the invoice-level amounts, which are also 0 then).
     const lineTax = allocateLineTax(items, discountScale, currency === 'INR' && isSameState);
-    const itemsWithTax = items.map((i, idx) => ({ ...i, ...lineTax[idx], ...(materialLineIds.has(idx) ? { id: materialLineIds.get(idx)! } : {}) }));
+    const itemsWithTax = items.map((i, idx) => ({ ...toItemRow(i), ...lineTax[idx], ...(materialLineIds.has(idx) ? { id: materialLineIds.get(idx)! } : {}) }));
 
     const inv = await tx.salesInvoice.create({
       data: {
@@ -634,6 +660,9 @@ async function priceInvoice(
   // carries an offer snapshot keeps it even if that offer has since ended or been switched off.
   previousBreakdowns?: Map<string, MaterialBreakdown | null>,
 ) {
+  // Malformed material-metal input fails fast, before any lookup or stock work.
+  for (const line of data.items) parseMaterialMetal(line.materialMetal);
+
   // Layer 2: a line's categoryId is a company-owned master id supplied by the client and stored on
   // the InvoiceItem — a Company-B category must 404, never attach to this invoice.
   await assertAllOwned('productCategory', data.items.map((i) => i.categoryId), ctx.companyId, 'Category');
@@ -898,7 +927,7 @@ async function priceInvoice(
       uqc = hsn.defaultUqc ?? null;
     }
     return {
-      ...rest, tagId: i.tagId ?? null, materialSale: !!i.materialSale, goldRate, makingCharge, wastagePercent,
+      ...rest, tagId: i.tagId ?? null, materialSale: !!i.materialSale, materialMetal: parseMaterialMetal(i.materialMetal), goldRate, makingCharge, wastagePercent,
       // Stored as the bill's own record; an amended line that no longer carries one clears the old copy.
       materialBreakdown: bd ? (bd.normalized as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
       stoneWeight: i.stoneWeight ?? 0, stoneValue: i.stoneValue ?? 0, unitPrice, totalPrice,
@@ -1226,7 +1255,7 @@ export async function amendInvoice(invoiceId: string, data: {
 
     // G1 Part D: each line's own tax/discount slice, same split as the invoice-level amounts above.
     const lineTax = allocateLineTax(items, discountScale, currency === 'INR' && isSameState);
-    const itemsWithTax = items.map((it, idx) => ({ ...it, ...lineTax[idx] }));
+    const itemsWithTax = items.map((it, idx) => ({ ...toItemRow(it), ...lineTax[idx] }));
 
     // Lines: update in place, add, remove.
     if (removedIds.length > 0) await tx.invoiceItem.deleteMany({ where: { id: { in: removedIds }, invoiceId, companyId: ctx.companyId } });
@@ -2670,7 +2699,7 @@ export async function convertMemoToInvoice(
 
     // G1 Part D: per-line tax split, same numbers the invoice-level split above uses.
     const lineTax = allocateLineTax(pricedItems, discountScale, isSameState);
-    const itemsWithTax = pricedItems.map((it, idx) => ({ ...it, ...lineTax[idx] }));
+    const itemsWithTax = pricedItems.map((it, idx) => ({ ...toItemRow(it), ...lineTax[idx] }));
 
     const inv = await tx.salesInvoice.create({
       data: {

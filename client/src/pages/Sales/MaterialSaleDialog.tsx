@@ -33,13 +33,17 @@ export function vaultShortage(remaining: number | null, weight: number): number 
   return remaining !== null && weight > remaining + 0.0005 ? r3(weight - remaining) : 0;
 }
 
-export const vaultQueryKey = (karat: string) => ['vault-availability', karat];
+/** What the availability request asks the server for. `metalType` makes the server return only the lots a sale of that metal can
+ *  draw from (GOLD = GOLD + legacy NULL lots, SILVER = SILVER lots only) - the same rule the sale itself enforces - so the figure
+ *  shown here is never more than the server will accept. */
+export const vaultQueryParams = (karat: string, metal?: string) => ({ karat, ...(metal && { metalType: metal }) });
+export const vaultQueryKey = (karat: string, metal?: string) => ['vault-availability', karat, metal ?? ''];
 
-/** Vault grams for a karat; null while loading or if the caller may not read stock (then the server still enforces it). */
-export function useVaultGrams(karat: string, enabled = true): number | null {
+/** Vault grams for a karat of a metal; null while loading or if the caller may not read stock (then the server still enforces it). */
+export function useVaultGrams(karat: string, enabled = true, metal?: string): number | null {
   const { data } = useQuery({
-    queryKey: vaultQueryKey(karat),
-    queryFn: () => apiGet<any>('/inventory/metals', { karat }),
+    queryKey: vaultQueryKey(karat, metal),
+    queryFn: () => apiGet<any>('/inventory/metals', vaultQueryParams(karat, metal)),
     enabled: enabled && !!karat,
     retry: false,
     staleTime: 0,
@@ -48,8 +52,8 @@ export function useVaultGrams(karat: string, enabled = true): number | null {
   return sumVaultLots((data as any)?.data ?? data);
 }
 
-export function VaultAvailability({ karat, weight, inCart }: { karat: string; weight: number; inCart: number }) {
-  const vault = useVaultGrams(karat);
+export function VaultAvailability({ karat, weight, inCart, metal }: { karat: string; weight: number; inCart: number; metal?: string }) {
+  const vault = useVaultGrams(karat, true, metal);
   const remaining = remainingVault(vault, inCart);
   const short = vaultShortage(remaining, weight);
   if (!karat) return null;
@@ -77,7 +81,7 @@ export function MaterialSaleDialog({ open, karats, rateByKarat, inCartByKarat = 
 
   const options = karats.filter((k) => k.metalType === metal && k.isActive !== false);
   const masterRate = karat ? rateByKarat[karat] : undefined;
-  const vault = useVaultGrams(karat, open);
+  const vault = useVaultGrams(karat, open, metal);
   const remaining = remainingVault(vault, inCartByKarat[karat] ?? 0);
   const short = vaultShortage(remaining, Number(weight) || 0);
 
@@ -121,7 +125,7 @@ export function MaterialSaleDialog({ open, karats, rateByKarat, inCartByKarat = 
             </TextField>
           </Grid>
           <Grid item xs={12}>
-            <VaultAvailability karat={karat} weight={Number(weight) || 0} inCart={inCartByKarat[karat] ?? 0} />
+            <VaultAvailability karat={karat} weight={Number(weight) || 0} inCart={inCartByKarat[karat] ?? 0} metal={metal} />
           </Grid>
           <Grid item xs={4}>
             <TextField fullWidth size="small" type="number" label="Weight (g)" value={weight}

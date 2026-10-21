@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Box, Card, Table, TableHead, TableBody, TableRow, TableCell, Typography, Button, Grid, Chip, Dialog, DialogTitle, DialogContent, DialogActions, TextField, MenuItem, Alert } from '@mui/material';
 import { Add, Scale } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -8,8 +8,8 @@ import { apiGet, apiPost } from '../../api/client';
 import { PageHeader } from '../../components/common/PageHeader';
 import { useScaleReading } from '../../hooks/useSocket';
 import { useUiStore } from '../../store/ui.store';
+import { buildMetalStockPayload, emptyMetalStockForm } from '../../utils/metalStockPayload';
 
-const KARATS = ['24K', '22K', '18K', '14K', 'SILVER', 'PT'];
 const LOCATIONS = ['VAULT', 'SHOP_FLOOR', 'CASTING_ROOM', 'POLISHING_ROOM'];
 
 export function MetalVault() {
@@ -27,13 +27,30 @@ export function MetalVault() {
     queryFn: () => apiGet<any[]>('/inventory/metals', { karat: karatFilter || undefined }),
   });
 
-  const { control, handleSubmit, reset, setValue } = useForm({
-    defaultValues: { materialName: '', karat: '22K', purity: 0.916, grossWeight: 0, netWeight: 0, location: 'VAULT', sourceType: 'PURCHASE', avgCostPerGram: 0 },
+  // The karat list is the company's Karat master - never a hard-coded list - and each karat carries its metal. The vault holds
+  // gold and silver; the metal sent with a new lot is the selected karat's own, which the server re-checks against the master.
+  const { data: karatsData, isSuccess: karatsLoaded } = useQuery({ queryKey: ['vault-karats'], queryFn: () => apiGet<any>('/inventory/metals/karats') });
+  const allKarats: any[] = (karatsData as any)?.data ?? karatsData ?? [];
+  const vaultKarats = allKarats.filter((k) => k.isActive !== false && (k.metalType === 'GOLD' || k.metalType === 'SILVER'));
+  const metalOf = (code: string) => vaultKarats.find((k) => k.code === code)?.metalType as string | undefined;
+
+  const { control, handleSubmit, reset, setValue, getValues } = useForm({
+    defaultValues: emptyMetalStockForm([]),
   });
+  // Once the master has loaded, start on 22K when the company has it (else its first gold karat), with that karat's own purity. If the
+  // list later changes under an open form (a karat deactivated or removed) and the chosen karat is gone, fall back the same way.
+  const karatCodes = vaultKarats.map((k) => k.code).join('|');
+  useEffect(() => {
+    if (vaultKarats.length === 0) return;
+    const current = getValues('karat');
+    if (current && vaultKarats.some((k) => k.code === current)) return;
+    const d = emptyMetalStockForm(vaultKarats);
+    setValue('karat', d.karat); setValue('purity', Number(d.purity));
+  }, [karatCodes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const mutation = useMutation({
-    mutationFn: (data: any) => apiPost('/inventory/metals', data),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['metal-stock'] }); setCreateOpen(false); reset(); enqueueSnackbar('Metal stock added to vault', { variant: 'success' }); },
+    mutationFn: (data: any) => apiPost('/inventory/metals', buildMetalStockPayload(data, vaultKarats)),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['metal-stock'] }); qc.invalidateQueries({ queryKey: ['vault-availability'] }); setCreateOpen(false); reset(emptyMetalStockForm(vaultKarats)); enqueueSnackbar('Metal stock added to vault', { variant: 'success' }); },
   });
 
   const totalAvailable = (stock ?? []).reduce((sum: number, s: any) => sum + Number(s.availableWt), 0);
@@ -46,7 +63,7 @@ export function MetalVault() {
       {scaleWeight !== null && <Alert severity="info" sx={{ mb: 2 }}><Scale sx={{ mr: 1, verticalAlign: 'middle' }} />Scale: <strong>{scaleWeight.toFixed(4)} g</strong></Alert>}
 
       <Grid container spacing={2} sx={{ mb: 2 }}>
-        {KARATS.map((k) => {
+        {vaultKarats.map((kr) => kr.code as string).map((k) => {
           const total = (stock ?? []).filter((s: any) => s.karat === k).reduce((sum: number, s: any) => sum + Number(s.availableWt), 0);
           return (
             <Grid item xs={4} sm={2} key={k}>
@@ -64,19 +81,25 @@ export function MetalVault() {
         <Table size="small">
           <TableHead>
             <TableRow>
-              <TableCell>Stock Code</TableCell><TableCell>Material</TableCell><TableCell>Karat</TableCell>
+              <TableCell>Stock Code</TableCell><TableCell>Material</TableCell><TableCell>Karat</TableCell><TableCell>Metal</TableCell>
               <TableCell align="right">Gross Wt (g)</TableCell><TableCell align="right">Net Wt (g)</TableCell>
               <TableCell align="right">Available (g)</TableCell><TableCell>Location</TableCell>
               <TableCell align="right">Cost/g (₹)</TableCell><TableCell>Source</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
-            {isLoading ? <TableRow><TableCell colSpan={9} align="center" sx={{ py: 4 }}>Loading...</TableCell></TableRow>
+            {isLoading ? <TableRow><TableCell colSpan={10} align="center" sx={{ py: 4 }}>Loading...</TableCell></TableRow>
               : (stock ?? []).map((s: any) => (
                 <TableRow key={s.id} hover>
                   <TableCell sx={{ fontFamily: 'monospace', fontSize: 12, fontWeight: 700, color: '#44C47A' }}>{s.stockCode}</TableCell>
                   <TableCell>{s.materialName}</TableCell>
                   <TableCell><Chip label={s.karat} size="small" sx={{ bgcolor: '#FFF8E7', color: '#44C47A', fontWeight: 700 }} /></TableCell>
+                  <TableCell>
+                    {/* A lot with no stored metal predates the metal column: it is treated as gold, never as silver. */}
+                    {s.metalType
+                      ? <Chip label={s.metalType === 'SILVER' ? 'Silver' : 'Gold'} size="small" variant="outlined" />
+                      : <Chip label="Not set — counts as gold" size="small" color="warning" variant="outlined" title="Entered before the metal was recorded. It can only be sold as gold; correct it with the owner if it is silver." />}
+                  </TableCell>
                   <TableCell align="right" sx={{ fontFamily: 'monospace' }}>{Number(s.grossWeight).toFixed(4)}</TableCell>
                   <TableCell align="right" sx={{ fontFamily: 'monospace' }}>{Number(s.netWeight).toFixed(4)}</TableCell>
                   <TableCell align="right" sx={{ fontFamily: 'monospace', fontWeight: 700, color: Number(s.availableWt) < 50 ? 'error.main' : 'success.main' }}>
@@ -100,9 +123,20 @@ export function MetalVault() {
         <form onSubmit={handleSubmit((d) => mutation.mutate(d))}>
           <DialogTitle fontWeight={700}>Add Metal to Vault</DialogTitle>
           <DialogContent sx={{ pt: 2 }}>
+            {karatsLoaded && vaultKarats.length === 0 && (
+              <Alert severity="warning" sx={{ mb: 2 }}>No active gold or silver karats are set up for this company, so metal cannot be added yet. Add them in Masters → Karats.</Alert>
+            )}
             <Grid container spacing={2}>
               <Grid item xs={8}><Controller name="materialName" control={control} rules={{ required: true }} render={({ field }) => <TextField {...field} fullWidth label="Material Description" />} /></Grid>
-              <Grid item xs={4}><Controller name="karat" control={control} render={({ field }) => <TextField {...field} select fullWidth label="Karat">{KARATS.map((k) => <MenuItem key={k} value={k}>{k}</MenuItem>)}</TextField>} /></Grid>
+              <Grid item xs={4}>
+                <Controller name="karat" control={control} rules={{ required: true }}
+                  render={({ field }) => (
+                    <TextField {...field} select fullWidth label="Karat" helperText={metalOf(field.value) ? (metalOf(field.value) === 'SILVER' ? 'Silver' : 'Gold') : ' '}
+                      onChange={(e) => { field.onChange(e); const k = vaultKarats.find((x) => x.code === e.target.value); if (k) setValue('purity', Number(k.purity)); }}>
+                      {vaultKarats.map((k) => <MenuItem key={k.code} value={k.code}>{k.code} · {k.metalType === 'SILVER' ? 'Silver' : 'Gold'}</MenuItem>)}
+                    </TextField>
+                  )} />
+              </Grid>
               <Grid item xs={4}>
                 <Controller name="grossWeight" control={control} rules={{ required: true }}
                   render={({ field }) => <TextField {...field} fullWidth label="Gross Weight (g)" type="number" inputProps={{ step: 0.0001 }}
@@ -114,7 +148,7 @@ export function MetalVault() {
               <Grid item xs={6}><Controller name="sourceType" control={control} render={({ field }) => <TextField {...field} select fullWidth label="Source Type"><MenuItem value="PURCHASE">Purchase</MenuItem><MenuItem value="CUSTOMER_SUPPLIED">Customer Supplied</MenuItem><MenuItem value="PRODUCTION_RETURN">Production Return</MenuItem></TextField>} /></Grid>
             </Grid>
           </DialogContent>
-          <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setCreateOpen(false)}>Cancel</Button><Button type="submit" variant="contained" disabled={mutation.isPending}>Add to Vault</Button></DialogActions>
+          <DialogActions sx={{ p: 2.5 }}><Button onClick={() => setCreateOpen(false)}>Cancel</Button><Button type="submit" variant="contained" disabled={mutation.isPending || vaultKarats.length === 0}>Add to Vault</Button></DialogActions>
         </form>
       </Dialog>
     </Box>

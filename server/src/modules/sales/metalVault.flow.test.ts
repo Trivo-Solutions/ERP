@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { platformPrisma as prisma } from '../../config/database'; // fixtures/verification as the platform role; the code under test uses the runtime client
 import { createInvoice, createSalesReturn, createOldGoldExchange, voidInvoice, amendInvoice, reverseInvoicePayment } from './sales.service';
-import { addMetalStock } from '../inventory/inventory.service';
+import { addMetalStock, getMetalStock } from '../inventory/inventory.service';
 import { LEDGER_ACCOUNT } from '../../shared/ledgerAccounts';
 import { createTestTenant, cleanupTestTenant, TestTenant } from '../../test/fixtures';
 import { getJournalEntry, lineAmount } from '../../test/ledger';
@@ -265,6 +265,265 @@ describe('Metal Vault / tag stock movements', () => {
     it('rejects a material line without a karat or a weight', async () => {
       await expect(invoiceFor({ items: [materialLine(4, { karat: undefined })] })).rejects.toMatchObject({ statusCode: 400 });
       await expect(invoiceFor({ items: [materialLine(0)] })).rejects.toMatchObject({ statusCode: 400 });
+    });
+
+    describe('silver lines are drawn from silver lots only, and the metal is checked against the karat', () => {
+      const SILVER_KARAT = '925';
+      const silverLine = (grams: number, overrides: Record<string, unknown> = {}) =>
+        materialLine(grams, { productCode: 'MAT-925', description: 'Loose silver 925', goldRate: 80, karat: SILVER_KARAT, materialMetal: 'SILVER', ...overrides });
+      const silverLots = () => prisma.metalStock.findMany({ where: { companyId: A.company.id, karat: SILVER_KARAT, isActive: true } });
+
+      beforeEach(async () => {
+        await prisma.karatMaster.upsert({
+          where: { companyId_code: { companyId: A.company.id, code: SILVER_KARAT } },
+          create: { companyId: A.company.id, code: SILVER_KARAT, metalType: 'SILVER', purity: 0.925 },
+          update: { metalType: 'SILVER', purity: 0.925, isActive: true },
+        });
+        await prisma.metalStock.updateMany({ where: { companyId: A.company.id, karat: SILVER_KARAT }, data: { isActive: false } });
+        await prisma.metalStock.create({
+          data: {
+            companyId: A.company.id, stockCode: `SLV-${suffix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`,
+            materialName: 'Silver 925', karat: SILVER_KARAT, purity: 0.925, grossWeight: 50, netWeight: 50, availableWt: 50,
+            sourceType: 'PURCHASE', avgCostPerGram: 70, metalType: 'SILVER',
+          },
+        });
+      });
+
+      it('a silver sale takes the grams from the silver lot and leaves the gold lot alone', async () => {
+        const inv = await invoiceFor({ items: [silverLine(20)] });
+
+        expect((await silverLots()).reduce((s, l) => s + Number(l.availableWt), 0)).toBeCloseTo(30);
+        expect(await vaultTotal()).toBeCloseTo(10); // the 22K gold lot from beforeEach is untouched
+        const moves = await prisma.metalStockMovement.findMany({ where: { companyId: A.company.id, referenceId: inv.items[0].id } });
+        expect(moves).toHaveLength(1);
+        expect(moves[0]).toMatchObject({ movementType: 'MATERIAL_SALE', karat: SILVER_KARAT });
+        expect(Number(moves[0].quantity)).toBeCloseTo(-20);
+      });
+
+      it('a silver sale larger than the silver lot is refused whole, even when gold stock is plentiful', async () => {
+        const invoicesBefore = await prisma.salesInvoice.count({ where: { companyId: A.company.id } });
+        await expect(invoiceFor({ items: [silverLine(50.5)] })).rejects.toMatchObject({ statusCode: 409 });
+        expect(await prisma.salesInvoice.count({ where: { companyId: A.company.id } })).toBe(invoicesBefore);
+        expect((await silverLots()).reduce((s, l) => s + Number(l.availableWt), 0)).toBeCloseTo(50);
+        expect(await vaultTotal()).toBeCloseTo(10);
+      });
+
+      describe('returns and voids put silver back into the silver lot it came from', () => {
+        const silverTotal = async () => (await silverLots()).reduce((s, l) => s + Number(l.availableWt), 0);
+        // only the movements of THIS invoice line: the sale's own, and the returns that reverse exactly them
+        const saleMoves = (lineId: string) => prisma.metalStockMovement.findMany({ where: { companyId: A.company.id, movementType: 'MATERIAL_SALE', referenceId: lineId } });
+        const returnMoves = async (lineId: string) => prisma.metalStockMovement.findMany({
+          where: { companyId: A.company.id, movementType: 'MATERIAL_SALE_RETURN', reversesMovementId: { in: (await saleMoves(lineId)).map((m) => m.id) } },
+        });
+
+        it('a silver return restores the silver lot (recorded movement), never the gold lot, and a partial + remaining return never exceeds the sale', async () => {
+          const inv = await invoiceFor({ items: [silverLine(20)] });
+          const lineId = inv.items[0].id;
+          await createSalesReturn({ invoiceId: inv.id, items: [{ invoiceItemId: lineId, weight: 5 }] }, A.ctx, userId);
+          expect(await silverTotal()).toBeCloseTo(35);
+          expect(await vaultTotal()).toBeCloseTo(10); // gold untouched
+          await expect(createSalesReturn({ invoiceId: inv.id, items: [{ invoiceItemId: lineId, weight: 16 }] }, A.ctx, userId))
+            .rejects.toMatchObject({ statusCode: 409 });
+          await createSalesReturn({ invoiceId: inv.id, items: [{ invoiceItemId: lineId }] }, A.ctx, userId);
+          expect(await silverTotal()).toBeCloseTo(50);
+          expect(await vaultTotal()).toBeCloseTo(10);
+          const sale = (await saleMoves(lineId))[0];
+          const back = await returnMoves(lineId);
+          expect(back).toHaveLength(2);
+          expect(back.every((m) => m.metalStockId === sale.metalStockId && m.reversesMovementId === sale.id)).toBe(true);
+        });
+
+        it('voiding a silver invoice restores the silver lot once; a second void is refused and changes nothing', async () => {
+          const inv = await invoiceFor({ items: [silverLine(20)] });
+          expect(await silverTotal()).toBeCloseTo(30);
+          await voidInvoice(inv.id, A.ctx, userId, 'entered in error');
+          expect(await silverTotal()).toBeCloseTo(50);
+          expect(await vaultTotal()).toBeCloseTo(10);
+          await expect(voidInvoice(inv.id, A.ctx, userId, 'again')).rejects.toMatchObject({ statusCode: 409 });
+          expect(await silverTotal()).toBeCloseTo(50);
+          expect(await returnMoves(inv.items[0].id)).toHaveLength(1);
+        });
+
+        it('a void after a silver return cannot double-restore', async () => {
+          const inv = await invoiceFor({ items: [silverLine(20)] });
+          await createSalesReturn({ invoiceId: inv.id, items: [{ invoiceItemId: inv.items[0].id }] }, A.ctx, userId);
+          await expect(voidInvoice(inv.id, A.ctx, userId, 'again')).rejects.toMatchObject({ statusCode: 409 });
+          expect(await silverTotal()).toBeCloseTo(50);
+        });
+
+        it('voiding a mixed gold + silver bill refills each metal in its own lots only', async () => {
+          const inv = await invoiceFor({ items: [materialLine(4), silverLine(20)] });
+          expect(await vaultTotal()).toBeCloseTo(6);
+          expect(await silverTotal()).toBeCloseTo(30);
+          await voidInvoice(inv.id, A.ctx, userId, 'entered in error');
+          expect(await vaultTotal()).toBeCloseTo(10);
+          expect(await silverTotal()).toBeCloseTo(50);
+        });
+      });
+
+      it('refuses a line whose metal does not match its karat, in either direction, and changes nothing', async () => {
+        const invoicesBefore = await prisma.salesInvoice.count({ where: { companyId: A.company.id } });
+        await expect(invoiceFor({ items: [silverLine(5, { materialMetal: 'GOLD' })] })).rejects.toMatchObject({ statusCode: 400 });
+        await expect(invoiceFor({ items: [materialLine(4, { materialMetal: 'SILVER' })] })).rejects.toMatchObject({ statusCode: 400 });
+        expect(await prisma.salesInvoice.count({ where: { companyId: A.company.id } })).toBe(invoicesBefore);
+        expect((await silverLots()).reduce((s, l) => s + Number(l.availableWt), 0)).toBeCloseTo(50);
+        expect(await vaultTotal()).toBeCloseTo(10);
+      });
+
+      it('a gold line that omits the metal still sells as gold (older clients)', async () => {
+        await invoiceFor({ items: [materialLine(4)] });
+        expect(await vaultTotal()).toBeCloseTo(6);
+      });
+
+      it('refuses a karat that is not in the Karat master', async () => {
+        await expect(invoiceFor({ items: [silverLine(5, { karat: '77X' })] })).rejects.toMatchObject({ statusCode: 400 });
+        expect((await silverLots()).reduce((s, l) => s + Number(l.availableWt), 0)).toBeCloseTo(50);
+      });
+
+      describe('materialMetal input validation (400 before any stock is touched)', () => {
+        const silverTotal = async () => (await silverLots()).reduce((s, l) => s + Number(l.availableWt), 0);
+        const invoiceCount = () => prisma.salesInvoice.count({ where: { companyId: A.company.id } });
+
+        it.each([5, true, {}, [], ['GOLD'], { metal: 'GOLD' }])('rejects a non-text materialMetal (%j) with 400, not a server error', async (bad) => {
+          const before = await invoiceCount();
+          await expect(invoiceFor({ items: [materialLine(4, { materialMetal: bad })] })).rejects.toMatchObject({ statusCode: 400 });
+          await expect(invoiceFor({ items: [silverLine(4, { materialMetal: bad })] })).rejects.toMatchObject({ statusCode: 400 });
+          expect(await invoiceCount()).toBe(before);
+          expect(await vaultTotal()).toBeCloseTo(10);
+          expect(await silverTotal()).toBeCloseTo(50);
+        });
+
+        it.each(['', '   ', 'PLATINUM', 'COPPER', 'G', 'GOLD SILVER', 'SILVER;'])('rejects the unsupported value %j with 400', async (bad) => {
+          const before = await invoiceCount();
+          await expect(invoiceFor({ items: [materialLine(4, { materialMetal: bad })] })).rejects.toMatchObject({ statusCode: 400 });
+          expect(await invoiceCount()).toBe(before);
+          expect(await vaultTotal()).toBeCloseTo(10);
+        });
+
+        it('letter case and surrounding spaces are normalized, not rejected', async () => {
+          await invoiceFor({ items: [silverLine(5, { materialMetal: 'silver' })] });
+          await invoiceFor({ items: [silverLine(5, { materialMetal: '  Silver ' })] });
+          await invoiceFor({ items: [materialLine(1, { materialMetal: 'gold' })] });
+          expect(await silverTotal()).toBeCloseTo(40);
+          expect(await vaultTotal()).toBeCloseTo(9);
+        });
+
+        it('a normalized value is still checked against the karat: lower-case "gold" on a silver karat is a 400', async () => {
+          await expect(invoiceFor({ items: [silverLine(5, { materialMetal: 'gold' })] })).rejects.toMatchObject({ statusCode: 400 });
+          expect(await silverTotal()).toBeCloseTo(50);
+        });
+
+        it('null or omitted materialMetal is gold-compatible: the karat alone decides', async () => {
+          await invoiceFor({ items: [materialLine(2, { materialMetal: null })] });
+          await invoiceFor({ items: [materialLine(1)] });
+          await invoiceFor({ items: [silverLine(5, { materialMetal: undefined })] }); // a silver karat with no metal stated is still drawn as silver
+          expect(await vaultTotal()).toBeCloseTo(7);
+          expect(await silverTotal()).toBeCloseTo(45);
+        });
+
+        it('a malformed value on one line stops the whole bill before the tagged piece or the vault is touched', async () => {
+          const tag = await makeTag();
+          const before = await invoiceCount();
+          await expect(invoiceFor({ items: [taggedLine(tag.id), materialLine(4, { materialMetal: 5 })] })).rejects.toMatchObject({ statusCode: 400 });
+          expect(await invoiceCount()).toBe(before);
+          expect((await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } })).status).toBe('IN_STOCK');
+          expect(await vaultTotal()).toBeCloseTo(10);
+        });
+
+        it('materialMetal is request-only: a valid value on a non-material line is dropped, never written to the row', async () => {
+          const tag = await makeTag();
+          const inv = await invoiceFor({ items: [{ ...taggedLine(tag.id), materialMetal: 'GOLD' }] });
+          expect(inv.items[0].tagId).toBe(tag.id);
+          expect((inv.items[0] as Record<string, unknown>).materialMetal).toBeUndefined();
+          expect((await prisma.jewelryTag.findUniqueOrThrow({ where: { id: tag.id } })).status).toBe('SOLD');
+        });
+
+        it('a karat of any metal other than gold or silver (PLATINUM) is refused, never drawn as gold', async () => {
+          await prisma.karatMaster.upsert({
+            where: { companyId_code: { companyId: A.company.id, code: 'PT' } },
+            create: { companyId: A.company.id, code: 'PT', metalType: 'PLATINUM', purity: 0.95 },
+            update: { metalType: 'PLATINUM', purity: 0.95, isActive: true },
+          });
+          await prisma.metalStock.create({
+            data: {
+              companyId: A.company.id, stockCode: `PT-${suffix}-${Date.now().toString(36)}`, materialName: 'Platinum', karat: 'PT', purity: 0.95,
+              grossWeight: 20, netWeight: 20, availableWt: 20, sourceType: 'PURCHASE', avgCostPerGram: 3000, // metalType NULL, as a hand-entered lot is
+            },
+          });
+          await expect(invoiceFor({ items: [materialLine(5, { karat: 'PT', productCode: 'MAT-PT' })] })).rejects.toMatchObject({ statusCode: 400 });
+          const pt = await prisma.metalStock.findFirstOrThrow({ where: { companyId: A.company.id, karat: 'PT', isActive: true } });
+          expect(Number(pt.availableWt)).toBeCloseTo(20);
+        });
+      });
+
+      describe('legacy lots with metalType NULL (rule: NULL is GOLD; a NULL lot is never drawn as silver)', () => {
+        it('a NULL-metalType lot carrying a silver karat label is NOT consumed by a silver sale', async () => {
+          // Only the lot's own metalType is authoritative; its free-text karat label is not (see the MetalStock.metalType schema note).
+          await prisma.metalStock.updateMany({ where: { companyId: A.company.id, karat: SILVER_KARAT }, data: { isActive: false } });
+          const legacy = await prisma.metalStock.create({
+            data: {
+              companyId: A.company.id, stockCode: `LEG-${suffix}-${Date.now().toString(36)}`, materialName: 'Silver (pre-column lot)', karat: SILVER_KARAT,
+              purity: 0.925, grossWeight: 50, netWeight: 50, availableWt: 50, sourceType: 'PURCHASE', avgCostPerGram: 70, // metalType NULL
+            },
+          });
+          const before = await prisma.salesInvoice.count({ where: { companyId: A.company.id } });
+          await expect(invoiceFor({ items: [silverLine(10)] })).rejects.toMatchObject({ statusCode: 409 });
+          expect(await prisma.salesInvoice.count({ where: { companyId: A.company.id } })).toBe(before);
+          expect(Number((await prisma.metalStock.findUniqueOrThrow({ where: { id: legacy.id } })).availableWt)).toBeCloseTo(50);
+        });
+
+        it('a NULL-metalType lot still sells as gold (the existing 22K lot is exactly that)', async () => {
+          expect((await lots()).every((l) => l.metalType === null)).toBe(true);
+          await invoiceFor({ items: [materialLine(4)] });
+          expect(await vaultTotal()).toBeCloseTo(6);
+        });
+      });
+
+      // What the New Sale dialog shows is getMetalStock(karat, metalType); what the sale accepts is consumeVaultMetal. Both use the one
+      // vaultMetalWhere rule, so the figure on screen is exactly what a sale of that metal can take - never more, never less.
+      describe('availability shown vs accepted by the server (same eligibility rule)', () => {
+        const shown = async (karat: string, metalType: 'GOLD' | 'SILVER') =>
+          (await getMetalStock(A.company.id, { karat, metalType })).reduce((s, l) => s + Number(l.availableWt), 0);
+        const lot = (karat: string, metalType: string | null, wt: number, tag: string) => prisma.metalStock.create({
+          data: {
+            companyId: A.company.id, stockCode: `AV-${tag}-${suffix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 4)}`, materialName: `Lot ${tag}`,
+            karat, purity: 0.9, grossWeight: wt, netWeight: wt, availableWt: wt, sourceType: 'PURCHASE', avgCostPerGram: 70, metalType,
+          },
+        });
+
+        it('SILVER shows the silver lots only (a NULL or GOLD lot carrying the same label is not counted), and a sale of exactly that is accepted', async () => {
+          await lot(SILVER_KARAT, null, 30, 'legacy-null'); // legacy lot: not silver, whatever its label says
+          await lot(SILVER_KARAT, 'GOLD', 20, 'gold-mislabeled');
+          const available = await shown(SILVER_KARAT, 'SILVER');
+          expect(available).toBeCloseTo(50); // only the 50 g SILVER lot from beforeEach
+
+          await expect(invoiceFor({ items: [silverLine(available + 0.001)] })).rejects.toMatchObject({ statusCode: 409 }); // one milligram over
+          expect((await silverLots()).filter((l) => l.metalType === 'SILVER').reduce((s, l) => s + Number(l.availableWt), 0)).toBeCloseTo(50); // untouched
+
+          await invoiceFor({ items: [silverLine(available)] }); // exactly what was shown
+          expect(await shown(SILVER_KARAT, 'SILVER')).toBeCloseTo(0);
+          expect((await prisma.metalStock.findMany({ where: { companyId: A.company.id, karat: SILVER_KARAT, metalType: null, isActive: true } })).reduce((s, l) => s + Number(l.availableWt), 0)).toBeCloseTo(30);
+        });
+
+        it('GOLD shows GOLD plus legacy NULL lots (a SILVER lot carrying the label is not counted), and a sale of exactly that is accepted', async () => {
+          await lot(KARAT, 'GOLD', 5, 'gold-typed');
+          await lot(KARAT, 'SILVER', 7, 'silver-mislabeled');
+          const available = await shown(KARAT, 'GOLD');
+          expect(available).toBeCloseTo(15); // the 10 g NULL lot from beforeEach + the 5 g GOLD lot; not the 7 g SILVER one
+
+          await expect(invoiceFor({ items: [materialLine(available + 0.001)] })).rejects.toMatchObject({ statusCode: 409 });
+          expect(await shown(KARAT, 'GOLD')).toBeCloseTo(15); // the refused bill changed nothing
+
+          await invoiceFor({ items: [materialLine(available)] }); // spans two lots, FIFO
+          expect(await shown(KARAT, 'GOLD')).toBeCloseTo(0);
+          expect((await prisma.metalStock.findMany({ where: { companyId: A.company.id, karat: KARAT, metalType: 'SILVER', isActive: true } })).reduce((s, l) => s + Number(l.availableWt), 0)).toBeCloseTo(7);
+        });
+
+        it('with no metal filter the listing still returns every lot (older callers)', async () => {
+          await lot(KARAT, 'SILVER', 7, 'x');
+          expect((await getMetalStock(A.company.id, { karat: KARAT })).length).toBeGreaterThanOrEqual(2);
+        });
+      });
     });
   });
 

@@ -45,6 +45,7 @@ interface LineItem {
   key: string;
   tagId?: string;
   tagNumber?: string;
+  materialMetal?: 'GOLD' | 'SILVER'; // the metal picked in the dialog; the server checks it against the karat
   materialSale?: boolean; // loose metal sold out of the Metal Vault: no tag, the server consumes vault stock
   productCode: string;
   description: string;
@@ -730,7 +731,7 @@ export function NewSalePage() {
   // Pieces is descriptive only: `quantity` multiplies the weight on the server, so it stays 1 and the count rides in the description.
   const addMaterialLine = (e: { metal: string; karat: string; weight: number; pieces: number; rate: number }) => {
     setLines((p) => [...p, {
-      key: nextKey(), materialSale: true,
+      key: nextKey(), materialSale: true, materialMetal: e.metal === 'SILVER' ? 'SILVER' : 'GOLD',
       productCode: `MAT-${e.karat}`, karat: e.karat,
       description: `Loose ${e.metal === 'GOLD' ? 'gold' : 'silver'} ${e.karat}${e.pieces > 1 ? ` · ${e.pieces} pcs` : ''}`,
       quantity: 1, grossWeight: e.weight, netGoldWeight: e.weight, stoneWeight: 0,
@@ -1176,7 +1177,7 @@ export function NewSalePage() {
         wastagePercent: Number(l.wastagePercent) || 0,
         stoneValue: Number(l.stoneValue) || 0,
         tagId: l.tagId,
-        ...(l.materialSale && { materialSale: true }),
+        ...(l.materialSale && { materialSale: true, materialMetal: l.materialMetal }),
         categoryId: l.categoryId || undefined,
         hsnCode: l.hsnCode || undefined,
         salesPersonId: l.salesPersonId || undefined,

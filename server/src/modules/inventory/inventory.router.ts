@@ -3,6 +3,7 @@ import { authenticate } from '../../middleware/auth';
 import { requirePermission } from '../../middleware/rbac';
 import { resolveTenantContext } from '../../middleware/tenant';
 import { qs, qsNum } from '../../shared/query';
+import { parseVaultMetal } from '../../shared/metalMovement';
 import * as svc from './inventory.service';
 
 export const inventoryRouter = Router();
@@ -13,12 +14,20 @@ inventoryRouter.get('/metals', requirePermission('stock:view'), async (req: Requ
     karat: qs(req, 'karat'),
     location: qs(req, 'location'),
     minWeight: qsNum(req, 'minWeight'),
+    // GOLD | SILVER: only the lots a sale of that metal can draw from (the New Sale dialog's availability). 400 on anything else.
+    metalType: parseVaultMetal(qs(req, 'metalType'), 'metalType'),
   });
   res.json({ success: true, data: stock });
 });
 
+inventoryRouter.get('/metals/karats', requirePermission('stock:view'), async (req: Request, res: Response) => {
+  res.json({ success: true, data: await svc.listVaultKarats(req.tenant!.companyId) });
+});
+
+// The request body is validated and whitelisted by addMetalStockEntry - never spread into the row - and the lot's metal comes
+// from the company's Karat master (a client-supplied metalType is only cross-checked against it).
 inventoryRouter.post('/metals', requirePermission('stock:adjust'), async (req: Request, res: Response) => {
-  const stock = await svc.addMetalStock(req.body, req.tenant!.companyId, req.user!.userId);
+  const stock = await svc.addMetalStockEntry(req.body ?? {}, req.tenant!.companyId, req.user!.userId);
   res.status(201).json({ success: true, data: stock });
 });
 

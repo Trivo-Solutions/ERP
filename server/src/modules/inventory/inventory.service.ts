@@ -5,20 +5,34 @@ import { createAuditEntry } from '../../middleware/audit';
 import { nextSimpleCode } from '../../shared/numberSequence';
 import {TenantContext, tenantTransaction, tenantQuery } from '../../shared/tenantContext';
 import { assertOwnedByCompany } from '../../middleware/tenant';
-import { insertMetalMovement, METAL_MOVEMENT, MetalMovementType } from '../../shared/metalMovement';
+import { insertMetalMovement, METAL_MOVEMENT, MetalMovementType, VaultMetal, vaultMetalWhere, parseVaultMetal } from '../../shared/metalMovement';
 
 export async function getMetalStock(companyId: string, filters: {
   karat?: string; location?: string; minWeight?: number;
+  // Only the lots eligible as this metal (same rule a material sale draws with: shared/metalMovement.ts vaultMetalWhere).
+  metalType?: VaultMetal;
 }) {
   return tenantQuery(companyId, (_tx) => _tx.metalStock.findMany({
     where: {
       companyId, isActive: true,
+      ...(filters.metalType && vaultMetalWhere(filters.metalType)),
       ...(filters.karat && { karat: filters.karat }),
       ...(filters.location && { location: filters.location }),
       ...(filters.minWeight && { availableWt: { gte: filters.minWeight } }),
     },
     include: { reservations: { where: { status: 'ACTIVE' } } },
     orderBy: [{ karat: 'asc' }, { createdAt: 'desc' }],
+  }));
+}
+
+// The karats the Metal Vault can hold (this company's active GOLD / SILVER karats), for the vault's own form and tiles. Served under
+// the vault's `stock:view` so the screen does not depend on `masters:view`; it exposes only code / metal / purity, never the rest of
+// the master, and addMetalStockEntry still re-checks the chosen karat against the master on every write.
+export async function listVaultKarats(companyId: string) {
+  return tenantQuery(companyId, (tx) => tx.karatMaster.findMany({
+    where: { companyId, isActive: true, metalType: { in: ['GOLD', 'SILVER'] } },
+    select: { code: true, metalType: true, purity: true },
+    orderBy: { code: 'asc' },
   }));
 }
 
@@ -58,6 +72,51 @@ movement?: { movementType: MetalMovementType; referenceType: string; referenceId
   });
   await createAuditEntry('metal_stocks', stock.id, userId, 'CREATE', undefined, undefined, companyId);
   return stock;
+}
+
+// A hand-entered Metal Vault lot (POST /inventory/metals). The request is NOT spread into the row: only the fields below are read.
+// The lot's metal is the Karat master's, never the client's - the karat must be one of THIS company's active karats and its
+// metalType (GOLD or SILVER) is what gets stored. A client-supplied `metalType` is only a cross-check: if it is present and
+// disagrees with the master the entry is refused (400), so a silver lot can never be filed as gold or the reverse. Omitted
+// is fine - the master decides.
+export async function addMetalStockEntry(input: Record<string, unknown>, companyId: string, userId: string) {
+  const text = (v: unknown, name: string) => {
+    if (typeof v !== 'string' || v.trim() === '') throw new AppError(`${name} is required`, 400);
+    return v.trim();
+  };
+  const num = (v: unknown, name: string, { min = 0, allowZero = true }: { min?: number; allowZero?: boolean } = {}) => {
+    const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
+    if (!Number.isFinite(n) || n < min || (!allowZero && n === min)) throw new AppError(`${name} must be a valid number`, 400);
+    return n;
+  };
+
+  const karat = text(input.karat, 'Karat');
+  const stated = parseVaultMetal(input.metalType, 'metalType');
+  const master = await tenantQuery(companyId, (tx) =>
+    tx.karatMaster.findFirst({ where: { companyId, code: karat, isActive: true }, select: { metalType: true, purity: true } }));
+  if (!master) throw new AppError(`Karat "${karat}" is not an active karat in the Karat master`, 400);
+  if (master.metalType !== 'GOLD' && master.metalType !== 'SILVER') {
+    throw new AppError(`${karat} is a ${String(master.metalType).toLowerCase()} karat - the Metal Vault holds gold and silver only`, 400);
+  }
+  const metalType: VaultMetal = master.metalType;
+  if (stated && stated !== metalType) {
+    throw new AppError(`${karat} is a ${metalType.toLowerCase()} karat in the Karat master, but the stock was entered as ${stated.toLowerCase()}`, 400);
+  }
+
+  const grossWeight = num(input.grossWeight, 'Gross weight', { allowZero: false });
+  const netWeight = num(input.netWeight, 'Net weight', { allowZero: false });
+  if (netWeight > grossWeight) throw new AppError('Net weight cannot exceed gross weight', 400);
+  return addMetalStock({
+    materialName: text(input.materialName, 'Material description'),
+    karat,
+    purity: input.purity === undefined || input.purity === null || input.purity === '' ? Number(master.purity) : num(input.purity, 'Purity', { min: 0, allowZero: false }),
+    grossWeight, netWeight,
+    ...(input.location !== undefined && input.location !== null && input.location !== '' && { location: text(input.location, 'Location') }),
+    metalType,
+    sourceType: text(input.sourceType, 'Source type'),
+    ...(input.sourceRef !== undefined && input.sourceRef !== null && input.sourceRef !== '' && { sourceRef: text(input.sourceRef, 'Source reference') }),
+    avgCostPerGram: num(input.avgCostPerGram ?? 0, 'Cost per gram'),
+  }, companyId, userId);
 }
 
 export async function adjustMetalStock(
